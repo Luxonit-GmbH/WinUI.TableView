@@ -4,10 +4,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using Windows.Foundation;
 using WinUI.TableView.Extensions;
 using WinUI.TableView.Helpers;
@@ -34,7 +30,6 @@ public partial class TableViewCell : ContentControl
     private Rectangle? _v_gridLine;
     private object? _uneditedValue;
     private RoutedEventArgs? _editingArgs;
-    private IList<TableViewConditionalCellStyle>? _cellStyles;
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
@@ -559,10 +554,17 @@ public partial class TableViewCell : ContentControl
     /// <summary>
     /// Applies the selection state to the cell.
     /// </summary>
-    internal void ApplySelectionState()
+    internal void ApplySelectionState(bool onlyToStateSelected = false)
     {
-        var stateName = IsSelected ? VisualStates.StateSelected : VisualStates.StateUnselected;
-        VisualStates.GoToState(this, false, stateName);
+        var isSelected = IsSelected;
+        
+        if (onlyToStateSelected && !isSelected)
+        {
+            return;
+        }
+        
+        VisualStates.GoToState(this, false, 
+            isSelected ? VisualStates.StateSelected : VisualStates.StateUnselected);
     }
 
     /// <summary>
@@ -630,12 +632,30 @@ public partial class TableViewCell : ContentControl
     /// <param name="item">The data item associated with the cell.</param>
     internal void EnsureStyle(object? item)
     {
-        _cellStyles ??= [
-            .. Column?.ConditionalCellStyles ?? [], // Column styles have first priority
-            .. TableView?.ConditionalCellStyles ?? []]; // TableView styles have second priority
-
-        Style = _cellStyles.FirstOrDefault(c => c.Predicate?.Invoke(new(Column!, item)) is true)?
-                          .Style ?? Column?.CellStyle ?? TableView?.CellStyle;
+        Style? winningStyle = null;
+        
+        // Column styles
+        if (winningStyle == null)
+        {
+             var columnStyles = Column?.ConditionalCellStyles;
+             if (columnStyles is { Count: > 0 })
+             {
+                 winningStyle = columnStyles.FirstOrDefault(c => c.Predicate?.Invoke(new(Column!, item)) is true)?.Style ?? null;
+             }
+        }
+        
+        // Table View styles
+        if (winningStyle == null)
+        {
+             var tableViewStyles = TableView?.ConditionalCellStyles;
+             if (tableViewStyles is { Count: > 0 })
+             {
+                 winningStyle = tableViewStyles.FirstOrDefault(c => c.Predicate?.Invoke(new(Column!, item)) is true)?.Style ?? null;
+             }
+        }
+        
+        // Result style
+        Style = winningStyle ?? Column?.CellStyle ?? TableView?.CellStyle;
     }
 
     /// <summary>
@@ -656,7 +676,20 @@ public partial class TableViewCell : ContentControl
     /// <summary>
     /// Gets a value indicating whether the cell is selected.
     /// </summary>
-    public bool IsSelected => TableView?.SelectedCells.Contains(Slot) is true;
+    public bool IsSelected
+    {
+        get
+        {
+            // XXX Eliminate building Slot when selectedCells is empty
+            var selectedCells = TableView?.SelectedCells;
+            if (selectedCells is { Count: > 0 })
+            {
+                return selectedCells.Contains(Slot);
+            }
+
+            return false;
+        }
+    }
 
     /// <summary>
     /// Gets a value indicating whether the cell is the current cell.

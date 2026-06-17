@@ -39,6 +39,37 @@ public interface ITableViewColumnsCollection : IList<TableViewColumn>, INotifyCo
     IList<TableViewColumn> VisibleColumns { get; }
 
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="column"></param>
+    /// <returns></returns>
+    int VisibleColumnIndex(TableViewColumn column);
+
+    /// <summary>
+    /// 
+    /// </summary>
+    IList<TableViewColumn> VisibleFrozenColumns { get; }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="column"></param>
+    /// <returns></returns>
+    int VisibleFrozenColumnIndex(TableViewColumn column);
+
+    /// <summary>
+    /// 
+    /// </summary>
+    IList<TableViewColumn> VisibleScrollableColumns { get; }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="column"></param>
+    /// <returns></returns>
+    int VisibleScrollableColumnIndex(TableViewColumn column);
+
+    /// <summary>
     /// Gets or sets the <see cref="WinUI.TableView.TableView"/> associated with the collection.
     /// </summary>
     /// <remarks>

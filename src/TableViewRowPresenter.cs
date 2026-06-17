@@ -27,6 +27,7 @@ public partial class TableViewRowPresenter : Control
     private Panel? _rootPanel;
     private StackPanel? _scrollableCellsPanel;
     private StackPanel? _frozenCellsPanel;
+    private IReadOnlyList<TableViewCell>? _cellsCache;
     private Rectangle? _v_gridLine;
     private Rectangle? _h_gridLine;
     private Panel? _detailsPanel;
@@ -62,6 +63,7 @@ public partial class TableViewRowPresenter : Control
         _rootPanel = GetTemplateChild("RootPanel") as Panel;
         _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as StackPanel;
         _frozenCellsPanel = GetTemplateChild("FrozenCellsPanel") as StackPanel;
+        _cellsCache = null;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _detailsPanel = GetTemplateChild("DetailsPanel") as Panel;
@@ -387,24 +389,26 @@ public partial class TableViewRowPresenter : Control
     {
         if (TableView is null || cell is not { Column: { } column }) return;
 
-        var _frozenColumns = TableView.Columns.VisibleColumns.Where(x => x.IsFrozen).ToList();
-        var _scrollableColumns = TableView.Columns.VisibleColumns.Where(x => !x.IsFrozen).ToList();
+        var frozenColumns = TableView.Columns.VisibleFrozenColumns;
+        var scrollableColumns = TableView.Columns.VisibleScrollableColumns;
 
         if (cell is { Column.IsFrozen: true } && _frozenCellsPanel is not null)
         {
-            var index = _frozenColumns.IndexOf(column);
-            index = Math.Min(index, _frozenColumns.Count);
+            var index = frozenColumns.IndexOf(column);
+            index = Math.Min(index, frozenColumns.Count);
             index = Math.Max(index, 0); // handles -ve index;
 
             _frozenCellsPanel.Children.Insert(index, cell);
+            _cellsCache = null;
         }
         else if (_scrollableCellsPanel is not null)
         {
-            var index = _scrollableColumns.IndexOf(column);
-            index = Math.Min(index, _scrollableColumns.Count);
+            var index = scrollableColumns.IndexOf(column);
+            index = Math.Min(index, scrollableColumns.Count);
             index = Math.Max(index, 0); // handles -ve index;
 
             _scrollableCellsPanel.Children.Insert(index, cell);
+            _cellsCache = null;
         }
 
         cell.EnsureStyle(TableViewRow?.Content);
@@ -419,10 +423,12 @@ public partial class TableViewRowPresenter : Control
         if (_frozenCellsPanel?.Children.Contains(cell) ?? false)
         {
             _frozenCellsPanel.Children.Remove(cell);
+            _cellsCache = null;
         }
         else if (_scrollableCellsPanel?.Children.Contains(cell) ?? false)
         {
             _scrollableCellsPanel.Children.Remove(cell);
+            _cellsCache = null;
         }
     }
 
@@ -460,7 +466,7 @@ public partial class TableViewRowPresenter : Control
         {
             if (cell.Column is not null)
             {
-                var index = TableView.Columns.VisibleColumns.IndexOf(cell.Column);
+                var index = TableView.Columns.VisibleColumnIndex(cell.Column);
                 if (cell.Index != index)
                     cell.Index = index;
             }
@@ -474,14 +480,15 @@ public partial class TableViewRowPresenter : Control
     {
         _frozenCellsPanel?.Children.Clear();
         _scrollableCellsPanel?.Children.Clear();
+        _cellsCache = null;
     }
 
     /// <summary>
     /// Gets the list of cells in the presenter.
     /// </summary>
     public IReadOnlyList<TableViewCell> Cells =>
-        [.. _frozenCellsPanel?.Children.OfType<TableViewCell>() ?? [],
-         .. _scrollableCellsPanel?.Children.OfType<TableViewCell>() ?? []];
+        _cellsCache ??= [.. _frozenCellsPanel?.Children.OfType<TableViewCell>() ?? [],
+            .. _scrollableCellsPanel?.Children.OfType<TableViewCell>() ?? []];
 
     /// <summary>
     /// Gets or sets the TableViewRow associated with the presenter.

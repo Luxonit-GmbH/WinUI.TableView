@@ -504,7 +504,7 @@ public partial class TableViewHeaderRow : Control
     {
         if (TableView is { Columns: { } } && currentHeader is { Column: { } })
         {
-            var index = TableView.Columns.VisibleColumns.IndexOf(currentHeader.Column);
+            var index = TableView.Columns.VisibleColumnIndex(currentHeader.Column);
 
             if (index > 0)
             {
@@ -542,7 +542,7 @@ public partial class TableViewHeaderRow : Control
         if (_columnDropIndicator is not null && FindHeader(new(position, ActualHeight / 2)) is { Column: { } dropColumn } dropHeader)
         {
             _isValidDropTarget = true;
-            _dropColumnIndex = TableView?.Columns.VisibleColumns.IndexOf(dropColumn) ?? 0;
+            _dropColumnIndex = TableView?.Columns.VisibleColumnIndex(dropColumn) ?? 0;
             var transform = dropHeader.TransformToVisual(this);
             var dropHeaderX = transform.TransformPoint(new Point(0, 0)).X;
             var midPoint = dropHeaderX + (dropHeader.ActualWidth / 2);
@@ -574,7 +574,7 @@ public partial class TableViewHeaderRow : Control
                 return;
             }
 
-            var sourceIndex = TableView.Columns.VisibleColumns.IndexOf(column);
+            var sourceIndex = TableView.Columns.VisibleColumnIndex(column);
             var dropIndex = sourceIndex > _dropColumnIndex ? _dropColumnIndex + 1 : _dropColumnIndex;
             dropIndex = Math.Clamp(dropIndex, 0, TableView.Columns.VisibleColumns.Count - 1);
 
@@ -617,21 +617,21 @@ public partial class TableViewHeaderRow : Control
     {
         if (TableView is null || header is not { Column: { } column }) return;
 
-        var _frozenColumns = TableView.Columns.VisibleColumns.Where(x => x.IsFrozen).ToList();
-        var _scrollableColumns = TableView.Columns.VisibleColumns.Where(x => !x.IsFrozen).ToList();
+        var frozenColumns = TableView.Columns.VisibleFrozenColumns;
+        var scrollableColumns = TableView.Columns.VisibleScrollableColumns;
 
         if (header is { Column.IsFrozen: true } && _frozenHeadersPanel is not null)
         {
-            var index = _frozenColumns.IndexOf(column);
-            index = Math.Min(index, _frozenColumns.Count);
+            var index = TableView.Columns.VisibleFrozenColumnIndex(column);
+            index = Math.Min(index, frozenColumns.Count);
             index = Math.Max(index, 0); // handles -ve index;
 
             _frozenHeadersPanel.Children.Insert(index, header);
         }
         else if (_scrollableHeadersPanel is not null)
         {
-            var index = _scrollableColumns.IndexOf(column);
-            index = Math.Min(index, _scrollableColumns.Count);
+            var index = TableView.Columns.VisibleScrollableColumnIndex(column);
+            index = Math.Min(index, scrollableColumns.Count);
             index = Math.Max(index, 0); // handles -ve index;
 
             _scrollableHeadersPanel.Children.Insert(index, header);

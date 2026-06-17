@@ -349,7 +349,7 @@ public partial class TableViewRow : ListViewItem
                     Row = this,
                     Column = column,
                     TableView = TableView,
-                    Index = TableView.Columns.VisibleColumns.IndexOf(column),
+                    Index = TableView.Columns.VisibleColumnIndex(column),
                     Width = column.ActualWidth
                 };
 
@@ -461,11 +461,12 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     internal void EnsureCellsStyle(TableViewColumn? column = null, object? dataItem = null)
     {
-        var cells = Cells.Where(x => column is null || x.Column == column);
-
-        foreach (var cell in cells)
+        foreach (var cell in Cells)
         {
-            cell.EnsureStyle(dataItem ?? Content);
+            if (column == null || cell.Column == column)
+            {
+                cell.EnsureStyle(dataItem ?? Content);
+            }
         }
     }
 
@@ -484,11 +485,11 @@ public partial class TableViewRow : ListViewItem
     /// <summary>
     /// Applies the selection state to the cells.
     /// </summary>
-    internal void ApplyCellsSelectionState()
+    internal void ApplyCellsSelectionState(bool onlyToStateSelected = false)
     {
         foreach (var cell in Cells)
         {
-            cell.ApplySelectionState();
+            cell.ApplySelectionState(onlyToStateSelected);
         }
     }
 
@@ -591,11 +592,25 @@ public partial class TableViewRow : ListViewItem
     {
         if (TableView is null || RowPresenter is null) return;
 
-        RowPresenter.Background =
-            Index % 2 == 1 && TableView.AlternateRowBackground is not null ? TableView.AlternateRowBackground : _cellPresenterBackground;
+        var alternateRowBackground = TableView.AlternateRowBackground;
+        var alternateRowForeground = TableView.AlternateRowForeground;
 
-        RowPresenter.Foreground =
-            Index % 2 == 1 && TableView.AlternateRowForeground is not null ? TableView.AlternateRowForeground : _cellPresenterForeground;
+        if (alternateRowBackground == null && alternateRowForeground == null)
+        {
+            RowPresenter.Background = _cellPresenterBackground;
+            RowPresenter.Foreground = _cellPresenterForeground;
+        }
+        else
+        {
+            // Should alternate, heavy index lookup
+            var alternate = Index % 2 == 1;
+            
+            RowPresenter.Background =
+                alternate && alternateRowBackground is not null ? alternateRowBackground : _cellPresenterBackground;
+
+            RowPresenter.Foreground =
+                alternate && alternateRowForeground is not null ? alternateRowForeground : _cellPresenterForeground;
+        }
     }
 
     internal void UpdateSelectCheckMarkOpacity()

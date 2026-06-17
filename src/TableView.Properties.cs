@@ -672,18 +672,18 @@ public partial class TableView
     /// <summary>
     /// Gets or sets the background brush for alternate rows.
     /// </summary>
-    public Brush AlternateRowBackground
+    public Brush? AlternateRowBackground
     {
-        get => (Brush)GetValue(AlternateRowBackgroundProperty);
+        get => (Brush?)GetValue(AlternateRowBackgroundProperty);
         set => SetValue(AlternateRowBackgroundProperty, value);
     }
 
     /// <summary>
     /// Gets or sets the foreground brush for alternate rows.
     /// </summary>
-    public Brush AlternateRowForeground
+    public Brush? AlternateRowForeground
     {
-        get => (Brush)GetValue(AlternateRowForegroundProperty);
+        get => (Brush?)GetValue(AlternateRowForegroundProperty);
         set => SetValue(AlternateRowForegroundProperty, value);
     }
 

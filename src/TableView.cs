@@ -38,7 +38,7 @@ public partial class TableView : ListView
     private bool _shouldThrowSelectionModeChangedException;
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
-    private readonly List<TableViewRow> _rows = [];
+    private readonly HashSet<TableViewRow> _rows = [];
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
     private Point? _dragStartPoint;
@@ -107,39 +107,39 @@ public partial class TableView : ListView
     {
         var row = ContainerFromItem(sender) as TableViewRow;
 
-        row?.EnsureCellsStyle(default, sender);
+        row?.EnsureCellsStyle(null, sender);
     }
 
     /// <inheritdoc/>
     protected override void PrepareContainerForItemOverride(DependencyObject element, object item)
     {
+        //Console.WriteLine("PrepareContainerForItemOverride " + item + " rows=" + _rows.Count + ", view=" + _collectionView.Count);
+
         base.PrepareContainerForItemOverride(element, item);
 
-        DispatcherQueue.TryEnqueue(() =>
+        if (element is TableViewRow row)
         {
-            if (element is TableViewRow row)
+            row.TableView = this;
+            
+            // Add to rows
+            _rows.Add(row);
+
+            row.EnsureCellsStyle(null, item);
+            row.ApplyCellsSelectionState(true);
+            row.RowPresenter?.ApplyDetailsPaneState(item);
+
+            if (CurrentCellSlot.HasValue)
             {
-                if (!_rows.Contains(row))
-                {
-                    _rows.Add(row);
-                }
-
-                row.TableView = this;
-                row.EnsureCellsStyle(default, item);
-                row.ApplyCellsSelectionState();
-                row.RowPresenter?.ApplyDetailsPaneState(item);
-
-                if (CurrentCellSlot.HasValue)
-                {
-                    row.ApplyCurrentCellState(CurrentCellSlot.Value);
-                }
+                row.ApplyCurrentCellState(CurrentCellSlot.Value);
             }
-        });
+        }
     }
 
     /// <inheritdoc/>
     protected override void ClearContainerForItemOverride(DependencyObject element, object item)
     {
+        //Console.WriteLine("ClearContainerForItemOverride " + item + " rows=" + _rows.Count + ", view=" + _collectionView.Count);
+
         if (element is TableViewRow row)
         {
             _rows.Remove(row);
@@ -152,13 +152,16 @@ public partial class TableView : ListView
     /// <inheritdoc/>
     protected override DependencyObject GetContainerForItemOverride()
     {
+        //Console.WriteLine("GetContainerForItemOverride rows=" + _rows.Count + ", view=" + _collectionView.Count);
+
         var row = new TableViewRow { TableView = this };
 
         // Set bindings for FontFamily and FontSize to propagate from TableView to TableViewRow
         row.SetBinding(FontFamilyProperty, new Binding { Path = new("TableView.FontFamily"), RelativeSource = new() { Mode = RelativeSourceMode.Self } });
         row.SetBinding(FontSizeProperty, new Binding { Path = new("TableView.FontSize"), RelativeSource = new() { Mode = RelativeSourceMode.Self } });
 
-        _rows.Add(row);
+        // XXX no need to add it here
+        //_rows.Add(row);
         return row;
     }
 
@@ -1799,11 +1802,11 @@ public partial class TableView : ListView
             {
                 if (start == -1)
                 {
-                    start = end = Columns.VisibleColumns.IndexOf(column);
+                    start = end = Columns.VisibleColumnIndex(column);
                 }
                 else
                 {
-                    end = Columns.VisibleColumns.IndexOf(column);
+                    end = Columns.VisibleColumnIndex(column);
                 }
             }
 
@@ -2009,7 +2012,7 @@ public partial class TableView : ListView
     {
         if (_scrollViewer is null) return;
 
-        var offset = CellsHorizontalOffset + Columns.VisibleColumns.Where(c => c.IsFrozen).Sum(c => c.ActualWidth);
+        var offset = CellsHorizontalOffset + Columns.VisibleFrozenColumns.Sum(c => c.ActualWidth);
         AttachedPropertiesHelper.SetFrozenColumnScrollBarSpace(_scrollViewer, offset);
     }
 }

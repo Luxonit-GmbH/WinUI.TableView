@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
+using System.Threading;
 using Windows.Foundation.Collections;
 
 namespace WinUI.TableView;
@@ -40,6 +41,14 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// </summary>
     private void OnVectorChanged(IObservableVector<DependencyObject> sender, IVectorChangedEventArgs args)
     {
+        // CLEAR CACHED COLUMNS
+        _visibleColumnsCached = null;
+        _visibleColumnsMapCached = null;
+        _visibleFrozenColumnsCached = null;
+        _visibleFrozenColumnsMapCached = null;
+        _visibleScrollableColumnsCached = null;
+        _visibleScrollableColumnsMapCached = null;
+        
         if (_movingColumn) return; // Skip processing if it's a move action
 
         UpdateFrozenColumns();
@@ -84,7 +93,7 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     {
         foreach (var column in this.OfType<TableViewColumn>())
         {
-            column.IsFrozen = VisibleColumns.IndexOf(column) < (TableView?.FrozenColumnCount ?? 0);
+            column.IsFrozen = VisibleColumnIndex(column) < (TableView?.FrozenColumnCount ?? 0);
         }
     }
 
@@ -103,10 +112,65 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// <inheritdoc/>
     public TableView? TableView { get; }
 
+    private IList<TableViewColumn>? _visibleColumnsCached;
+    private Dictionary<TableViewColumn, int>? _visibleColumnsMapCached;
+    private IList<TableViewColumn>? _visibleFrozenColumnsCached;
+    private Dictionary<TableViewColumn, int>? _visibleFrozenColumnsMapCached;
+    private IList<TableViewColumn>? _visibleScrollableColumnsCached;
+    private Dictionary<TableViewColumn, int>? _visibleScrollableColumnsMapCached;
+    
     /// <inheritdoc/>
-    public IList<TableViewColumn> VisibleColumns => [.. this.OfType<TableViewColumn>()
-                                                            .Where(x => x.Visibility == Visibility.Visible)
-                                                            .OrderBy(x => x.Order ?? 0)];
+    public IList<TableViewColumn> VisibleColumns =>
+        _visibleColumnsCached ??= [
+            .. this.OfType<TableViewColumn>()
+                .Where(x => x.Visibility == Visibility.Visible)
+                .OrderBy(x => x.Order ?? 0)
+        ];
+
+    /// <summary>
+    /// 
+    /// </summary>
+    public IList<TableViewColumn> VisibleFrozenColumns =>
+        _visibleFrozenColumnsCached ??= VisibleColumns.Where(x => x.IsFrozen).ToList();
+
+    /// <summary>
+    /// 
+    /// </summary>
+    public IList<TableViewColumn> VisibleScrollableColumns =>
+        _visibleScrollableColumnsCached ??= VisibleColumns.Where(x => !x.IsFrozen).ToList();
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="column"></param>
+    /// <returns></returns>
+    public int VisibleColumnIndex(TableViewColumn column)
+    {
+        _visibleColumnsMapCached ??= VisibleColumns.Select((x, i) => (i , x)).ToDictionary(x => x.x, x => x.i);
+        return _visibleColumnsMapCached.GetValueOrDefault(column, -1);
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="column"></param>
+    /// <returns></returns>
+    public int VisibleFrozenColumnIndex(TableViewColumn column)
+    {
+        _visibleFrozenColumnsMapCached ??= VisibleFrozenColumns.Select((x, i) => (i , x)).ToDictionary(x => x.x, x => x.i);
+        return _visibleFrozenColumnsMapCached.GetValueOrDefault(column, -1);
+    }
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="column"></param>
+    /// <returns></returns>
+    public int VisibleScrollableColumnIndex(TableViewColumn column)
+    {
+        _visibleScrollableColumnsMapCached ??= VisibleScrollableColumns.Select((x, i) => (i , x)).ToDictionary(x => x.x, x => x.i);
+        return _visibleScrollableColumnsMapCached.GetValueOrDefault(column, -1);
+    }
 
     TableViewColumn IList<TableViewColumn>.this[int index]
     {
