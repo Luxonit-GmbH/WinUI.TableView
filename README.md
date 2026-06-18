@@ -251,3 +251,4 @@ Every contribution makes a difference — thank you!
 ## License
 
 This project is licensed under the [MIT License](https://github.com/w-ahmad/WinUI.TableView?tab=MIT-1-ov-file).
+
