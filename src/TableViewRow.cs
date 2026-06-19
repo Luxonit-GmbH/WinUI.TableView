@@ -251,21 +251,20 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void OnColumnsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> newItems)
+        switch (e.Action)
         {
-            AddCells(newItems.Where(x => x.Visibility == Visibility.Visible));
-        }
-        else if (e.Action == NotifyCollectionChangedAction.Remove && e.OldItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> oldItems)
-        {
-            RemoveCells(oldItems);
-        }
-        else if (e.Action == NotifyCollectionChangedAction.Move && e.NewItems?.Count > 0)
-        {
-            RowPresenter?.MoveCells(e.NewItems.OfType<TableViewColumn>().First(), e.NewStartingIndex);
-        }
-        else if (e.Action == NotifyCollectionChangedAction.Reset && RowPresenter is not null)
-        {
-            RowPresenter.ClearCells();
+            case NotifyCollectionChangedAction.Add when (e.NewItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> newItems):
+                AddCells(newItems.Where(x => x.Visibility == Visibility.Visible));
+                break;
+            case NotifyCollectionChangedAction.Remove when (e.OldItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> oldItems):
+                RemoveCells(oldItems);
+                break;
+            case NotifyCollectionChangedAction.Move when (e.NewItems?.Count > 0):
+                RowPresenter?.MoveCells(e.NewItems.OfType<TableViewColumn>().First(), e.NewStartingIndex);
+                break;
+            case NotifyCollectionChangedAction.Reset when RowPresenter is not null:
+                RowPresenter.ClearCells();
+                break;
         }
     }
 
@@ -274,46 +273,39 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void OnColumnPropertyChanged(object? sender, TableViewColumnPropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(TableViewColumn.Visibility))
+        switch (e.PropertyName)
         {
-            if (e.Column.Visibility == Visibility.Visible)
-            {
+            case nameof(TableViewColumn.Visibility) when e.Column.Visibility == Visibility.Visible:
                 AddCells([e.Column]);
-            }
-            else
-            {
+                break;
+            case nameof(TableViewColumn.Visibility):
                 RemoveCells([e.Column]);
-            }
-        }
-        else if ((e.PropertyName is nameof(TableViewColumn.Order) ||
-            e.PropertyName is nameof(TableViewColumn.IsFrozen)) &&
-            e.Column.Visibility is Visibility.Visible)
-        {
-            RemoveCells([e.Column]);
-            AddCells([e.Column]);
-        }
-        else if (e.PropertyName is nameof(TableViewColumn.ActualWidth))
-        {
-            if (Cells.FirstOrDefault(x => x.Column == e.Column) is { } cell)
-            {
-                cell.Width = e.Column.ActualWidth;
-            }
-        }
-        else if (e.PropertyName is nameof(TableViewColumn.IsReadOnly))
-        {
-            UpdateCellsState();
-        }
-        else if (e.PropertyName is nameof(TableViewColumn.CellStyle))
-        {
-            EnsureCellsStyle(e.Column);
-        }
-        else if (e.PropertyName is nameof(TableViewBoundColumn.ElementStyle))
-        {
-            EnsureElementStyle(e.Column);
-        }
-        else if (e.PropertyName is nameof(TableViewBoundColumn.EditingElementStyle))
-        {
-            EnsureEditingElementStyle(e.Column);
+                break;
+            case nameof(TableViewColumn.Order) or nameof(TableViewColumn.IsFrozen) when
+                e.Column.Visibility is Visibility.Visible:
+                RemoveCells([e.Column]);
+                AddCells([e.Column]);
+                break;
+            case nameof(TableViewColumn.ActualWidth):
+                {
+                    if (Cells.FirstOrDefault(x => x.Column == e.Column) is { } cell)
+                    {
+                        cell.Width = e.Column.ActualWidth;
+                    }
+                    break;
+                }
+            case nameof(TableViewColumn.IsReadOnly):
+                UpdateCellsState();
+                break;
+            case nameof(TableViewColumn.CellStyle):
+                EnsureCellsStyle(e.Column);
+                break;
+            case nameof(TableViewBoundColumn.ElementStyle):
+                EnsureElementStyle(e.Column);
+                break;
+            case nameof(TableViewBoundColumn.EditingElementStyle):
+                EnsureEditingElementStyle(e.Column);
+                break;
         }
     }
 
@@ -604,7 +596,7 @@ public partial class TableViewRow : ListViewItem
         {
             // Should alternate, heavy index lookup
             var alternate = Index % 2 == 1;
-            
+
             RowPresenter.Background =
                 alternate && alternateRowBackground is not null ? alternateRowBackground : _cellPresenterBackground;
 

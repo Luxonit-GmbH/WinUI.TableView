@@ -1,5 +1,6 @@
 ﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using WinUI.TableView.Columns;
 using WinUI.TableView.Extensions;
 
 namespace WinUI.TableView;
@@ -12,7 +13,7 @@ namespace WinUI.TableView;
 #if WINDOWS
 [WinRT.GeneratedBindableCustomProperty]
 #endif
-public partial class TableViewNumberColumn : TableViewBoundColumn
+public partial class TableViewNumberColumn : TableViewBoundColumn, IDefaultTableViewColumn
 {
     /// <summary>
     /// Generates a TextBlock element for the cell.

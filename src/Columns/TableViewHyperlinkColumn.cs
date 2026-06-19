@@ -1,6 +1,7 @@
 ﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
+using WinUI.TableView.Columns;
 
 namespace WinUI.TableView;
 
@@ -12,7 +13,7 @@ namespace WinUI.TableView;
 #if WINDOWS
 [WinRT.GeneratedBindableCustomProperty]
 #endif
-public partial class TableViewHyperlinkColumn : TableViewTextColumn
+public partial class TableViewHyperlinkColumn : TableViewTextColumn, IDefaultTableViewColumn
 {
     /// <summary>
     /// Generates a HyperlinkButton element for the cell.

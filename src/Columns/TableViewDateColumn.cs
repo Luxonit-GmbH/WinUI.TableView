@@ -2,6 +2,7 @@
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using System;
+using WinUI.TableView.Columns;
 using WinUI.TableView.Controls;
 using WinUI.TableView.Extensions;
 using WinUI.TableView.Helpers;
@@ -17,7 +18,7 @@ namespace WinUI.TableView;
 #if WINDOWS
 [WinRT.GeneratedBindableCustomProperty]
 #endif
-public partial class TableViewDateColumn : TableViewBoundColumn
+public partial class TableViewDateColumn : TableViewBoundColumn, IDefaultTableViewColumn
 {
     /// <summary>
     /// Generates a TextBlock element for the cell.

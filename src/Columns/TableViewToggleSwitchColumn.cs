@@ -1,6 +1,7 @@
 ﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using System;
+using WinUI.TableView.Columns;
 
 namespace WinUI.TableView;
 
@@ -11,7 +12,7 @@ namespace WinUI.TableView;
 #if WINDOWS
 [WinRT.GeneratedBindableCustomProperty]
 #endif
-public partial class TableViewToggleSwitchColumn : TableViewBoundColumn
+public partial class TableViewToggleSwitchColumn : TableViewBoundColumn, IDefaultTableViewColumn
 {
     /// <summary>
     /// Initializes a new instance of the TableViewToggleSwitchColumn class.

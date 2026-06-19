@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
+using WinUI.TableView.Columns;
 using WinUI.TableView.Extensions;
 using WinUI.TableView.Helpers;
 
@@ -114,7 +115,7 @@ public partial class TableViewCell : ContentControl
     {
         if (Column is not null && Row is not null && _contentPresenter is not null && Content is FrameworkElement element)
         {
-            if (Column is TableViewTemplateColumn)
+            if (Column is not IDefaultTableViewColumn)
             {
 #if WINDOWS
                 if (element is ContentControl { ContentTemplateRoot: FrameworkElement root })
