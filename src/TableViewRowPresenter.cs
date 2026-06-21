@@ -27,7 +27,8 @@ public partial class TableViewRowPresenter : Control
     private Panel? _rootPanel;
     private StackPanel? _scrollableCellsPanel;
     private StackPanel? _frozenCellsPanel;
-    private IReadOnlyList<TableViewCell>? _cellsCache;
+    private readonly List<TableViewCell> _cellsList = [];
+    private readonly Dictionary<TableViewColumn, TableViewCell> _cellsByColumn = [];
     private Rectangle? _v_gridLine;
     private Rectangle? _h_gridLine;
     private Panel? _detailsPanel;
@@ -63,7 +64,7 @@ public partial class TableViewRowPresenter : Control
         _rootPanel = GetTemplateChild("RootPanel") as Panel;
         _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as StackPanel;
         _frozenCellsPanel = GetTemplateChild("FrozenCellsPanel") as StackPanel;
-        _cellsCache = null;
+        _cellsList.Clear(); // Template (re)applied: the new panels start empty.
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _detailsPanel = GetTemplateChild("DetailsPanel") as Panel;
@@ -399,7 +400,8 @@ public partial class TableViewRowPresenter : Control
             index = Math.Max(index, 0); // handles -ve index;
 
             _frozenCellsPanel.Children.Insert(index, cell);
-            _cellsCache = null;
+            // Frozen cells occupy the prefix of the ordered cell list.
+            _cellsList.Insert(Math.Min(index, _cellsList.Count), cell);
         }
         else if (_scrollableCellsPanel is not null)
         {
@@ -408,9 +410,12 @@ public partial class TableViewRowPresenter : Control
             index = Math.Max(index, 0); // handles -ve index;
 
             _scrollableCellsPanel.Children.Insert(index, cell);
-            _cellsCache = null;
+            // Scrollable cells follow the frozen cells in the ordered cell list.
+            var frozenCount = _frozenCellsPanel?.Children.Count ?? 0;
+            _cellsList.Insert(Math.Min(frozenCount + index, _cellsList.Count), cell);
         }
 
+        _cellsByColumn[column] = cell;
         cell.EnsureStyle(TableViewRow?.Content);
     }
 
@@ -420,15 +425,27 @@ public partial class TableViewRowPresenter : Control
     /// <param name="cell">The cell to remove.</param>
     public void RemoveCell(TableViewCell cell)
     {
+        var removed = false;
+
         if (_frozenCellsPanel?.Children.Contains(cell) ?? false)
         {
             _frozenCellsPanel.Children.Remove(cell);
-            _cellsCache = null;
+            removed = true;
         }
         else if (_scrollableCellsPanel?.Children.Contains(cell) ?? false)
         {
             _scrollableCellsPanel.Children.Remove(cell);
-            _cellsCache = null;
+            removed = true;
+        }
+
+        if (removed)
+        {
+            _cellsList.Remove(cell);
+
+            if (cell.Column is not null && _cellsByColumn.TryGetValue(cell.Column, out var existing) && existing == cell)
+            {
+                _cellsByColumn.Remove(cell.Column);
+            }
         }
     }
 
@@ -439,7 +456,7 @@ public partial class TableViewRowPresenter : Control
     /// <param name="newIndex">The new index to move the cell to.</param>
     internal void MoveCells(TableViewColumn column, int newIndex)
     {
-        if (Cells.FirstOrDefault(h => h.Column == column) is { } cell)
+        if (GetCellForColumn(column) is { } cell)
         {
             RemoveCell(cell);
             InsertCell(cell);
@@ -480,15 +497,23 @@ public partial class TableViewRowPresenter : Control
     {
         _frozenCellsPanel?.Children.Clear();
         _scrollableCellsPanel?.Children.Clear();
-        _cellsCache = null;
+        _cellsList.Clear();
+        _cellsByColumn.Clear();
+    }
+
+    /// <summary>
+    /// Gets the cell associated with the specified column, or <see langword="null"/> if there is none.
+    /// </summary>
+    /// <param name="column">The column whose cell to retrieve.</param>
+    internal TableViewCell? GetCellForColumn(TableViewColumn column)
+    {
+        return _cellsByColumn.GetValueOrDefault(column);
     }
 
     /// <summary>
     /// Gets the list of cells in the presenter.
     /// </summary>
-    public IReadOnlyList<TableViewCell> Cells =>
-        _cellsCache ??= [.. _frozenCellsPanel?.Children.OfType<TableViewCell>() ?? [],
-            .. _scrollableCellsPanel?.Children.OfType<TableViewCell>() ?? []];
+    public IReadOnlyList<TableViewCell> Cells => _cellsList;
 
     /// <summary>
     /// Gets or sets the TableViewRow associated with the presenter.

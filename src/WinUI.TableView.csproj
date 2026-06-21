@@ -11,12 +11,17 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<LangVersion>14</LangVersion>
 		<Nullable>enable</Nullable>
-		<IsAOTCompatible>true</IsAOTCompatible>			
+		<ImplicitUsings>enable</ImplicitUsings>
+		<IsAOTCompatible>true</IsAOTCompatible>
 	</PropertyGroup>
 	<ItemGroup>
 		<Compile Update="TableView.*.cs">
 			<DependentUpon>TableView.cs</DependentUpon>
 		</Compile>
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="WinUI.TableView.Tests" />
 	</ItemGroup>
 
 	<ItemGroup>

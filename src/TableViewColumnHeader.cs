@@ -348,6 +348,7 @@ public partial class TableViewColumnHeader : ContentControl
 
         if (position.X <= 8 && _headerRow?.GetPreviousHeader(this) is { Column: { } } header)
         {
+            _tableView.EnsureColumnDesiredWidth(header.Column);
             var width = Math.Clamp(
                 header.Column.DesiredWidth,
                 header.Column.MinWidth ?? _tableView.MinColumnWidth,
@@ -356,6 +357,7 @@ public partial class TableViewColumnHeader : ContentControl
         }
         else if (Column is not null)
         {
+            _tableView.EnsureColumnDesiredWidth(Column);
             var width = Math.Clamp(
                 Column.DesiredWidth,
                 Column.MinWidth ?? _tableView.MinColumnWidth,

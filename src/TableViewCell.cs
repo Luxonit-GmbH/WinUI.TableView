@@ -31,6 +31,8 @@ public partial class TableViewCell : ContentControl
     private Rectangle? _v_gridLine;
     private object? _uneditedValue;
     private RoutedEventArgs? _editingArgs;
+    private double _contentDesiredWidth = double.NaN;
+    private bool _contentPending;
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
@@ -98,7 +100,12 @@ public partial class TableViewCell : ContentControl
     {
         base.OnContentChanged(oldContent, newContent);
 
-        if (newContent is ContentControl contentControl)
+        // The content element changed, so any cached desired width is stale.
+        _contentDesiredWidth = double.NaN;
+
+        // Re-measuring unconstrained once the content loads only feeds the column's desired (auto) width.
+        // Skip subscribing for fixed and star sized columns to avoid an extra measure pass per cell.
+        if (Column?.Width.IsAuto is true && newContent is ContentControl contentControl)
         {
             contentControl.Loaded += OnContentLoaded;
         }
@@ -106,83 +113,170 @@ public partial class TableViewCell : ContentControl
         void OnContentLoaded(object sender, RoutedEventArgs e)
         {
             ((ContentControl)sender).Loaded -= OnContentLoaded;
-            Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            _contentDesiredWidth = double.NaN;
+            InvalidateMeasure();
         }
     }
 
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
-        if (Column is not null && Row is not null && _contentPresenter is not null && Content is FrameworkElement element)
+        if (Column is not null && Row is not null && _contentPresenter is not null && ResolveContentElement() is { } element)
         {
-            if (Column is not IDefaultTableViewColumn)
+            // Measuring the content unconstrained only feeds the column's desired (auto) width. For fixed and
+            // star sized columns it is pure overhead on every measure pass, so only do it for auto columns.
+            if (Column.Width.IsAuto)
             {
-#if WINDOWS
-                if (element is ContentControl { ContentTemplateRoot: FrameworkElement root })
-#else
-                if (element.FindDescendant<ContentPresenter>() is { ContentTemplateRoot: FrameworkElement root })
-#endif
-                    element = root;
-                else
-                    return base.MeasureOverride(availableSize);
+                EnsureDesiredWidth(element);
             }
 
-            #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860           
-            element.MaxWidth = double.PositiveInfinity;
-            element.MaxHeight = double.PositiveInfinity;
-            #endregion
-
-            element.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-
-            var desiredWidth = element.DesiredSize.Width;
-            desiredWidth += Padding.Left;
-            desiredWidth += Padding.Right;
-            desiredWidth += BorderThickness.Left;
-            desiredWidth += BorderThickness.Right;
-            desiredWidth += _selectionBorder?.BorderThickness.Right ?? 0;
-            desiredWidth += _selectionBorder?.BorderThickness.Left ?? 0;
-            desiredWidth += _v_gridLine?.ActualWidth ?? 0d;
-
-            Column.DesiredWidth = Math.Max(Column.DesiredWidth, desiredWidth);
-
-            #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
-            var contentWidth = Column.ActualWidth;
-            contentWidth -= element.Margin.Left;
-            contentWidth -= element.Margin.Right;
-            contentWidth -= Padding.Left;
-            contentWidth -= Padding.Right;
-            contentWidth -= BorderThickness.Left;
-            contentWidth -= BorderThickness.Right;
-            contentWidth -= _selectionBorder?.BorderThickness.Left ?? 0;
-            contentWidth -= _selectionBorder?.BorderThickness.Right ?? 0;
-            contentWidth -= _v_gridLine?.ActualWidth ?? 0d;
-
-            var height = Height is double.NaN ? double.PositiveInfinity : Height;
-            var contentHeight = Math.Min(height, MaxHeight);
-            contentHeight -= element.Margin.Top;
-            contentHeight -= element.Margin.Bottom;
-            contentHeight -= Padding.Top;
-            contentHeight -= Padding.Bottom;
-            contentHeight -= BorderThickness.Top;
-            contentHeight -= BorderThickness.Bottom;
-            contentHeight -= _selectionBorder?.BorderThickness.Top ?? 0;
-            contentHeight -= _selectionBorder?.BorderThickness.Bottom ?? 0;
-            contentHeight -= GetHorizontalGridlineHeight();
-
-            if (contentWidth < 0 || contentHeight < 0)
-            {
-                _contentPresenter.Visibility = Visibility.Collapsed;
-            }
-            else
-            {
-                element.MaxWidth = contentWidth;
-                element.MaxHeight = contentHeight;
-                _contentPresenter.Visibility = Visibility.Visible;
-            }
-            #endregion
+            ConstrainContent(element);
         }
 
         return base.MeasureOverride(availableSize);
+    }
+
+    /// <summary>
+    /// Resolves the content element to measure, drilling into the template root for non-default columns.
+    /// Returns <see langword="null"/> when there is nothing measurable.
+    /// </summary>
+    private FrameworkElement? ResolveContentElement()
+    {
+        if (Content is not FrameworkElement element)
+        {
+            return null;
+        }
+
+        if (Column is not IDefaultTableViewColumn)
+        {
+#if WINDOWS
+            if (element is ContentControl { ContentTemplateRoot: FrameworkElement root })
+#else
+            if (element.FindDescendant<ContentPresenter>() is { ContentTemplateRoot: FrameworkElement root })
+#endif
+            {
+                return root;
+            }
+
+            // Non-templated content (e.g. a UserControl) is measured/constrained directly so that auto-sized
+            // columns can size to it instead of collapsing to MinColumnWidth.
+        }
+
+        return element;
+    }
+
+    /// <summary>
+    /// Grows the owning column's desired width to fit this cell. The expensive unconstrained measurement is
+    /// performed only when the cached value has been invalidated (content swapped or row recycled); see
+    /// <see cref="InvalidateDesiredWidth"/>. On unchanged passes the cached value is reused.
+    /// </summary>
+    private void EnsureDesiredWidth(FrameworkElement element)
+    {
+        if (Column is null)
+        {
+            return;
+        }
+
+        if (double.IsNaN(_contentDesiredWidth))
+        {
+            _contentDesiredWidth = MeasureContentDesiredWidth(element);
+        }
+
+        Column.DesiredWidth = Math.Max(Column.DesiredWidth, _contentDesiredWidth);
+    }
+
+    /// <summary>
+    /// Measures the content unconstrained and returns the desired width including the cell's chrome (padding,
+    /// borders and grid line).
+    /// </summary>
+    private double MeasureContentDesiredWidth(FrameworkElement element)
+    {
+        // TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
+        element.MaxWidth = double.PositiveInfinity;
+        element.MaxHeight = double.PositiveInfinity;
+
+        element.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
+        var desiredWidth = element.DesiredSize.Width;
+        desiredWidth += Padding.Left;
+        desiredWidth += Padding.Right;
+        desiredWidth += BorderThickness.Left;
+        desiredWidth += BorderThickness.Right;
+        desiredWidth += _selectionBorder?.BorderThickness.Right ?? 0;
+        desiredWidth += _selectionBorder?.BorderThickness.Left ?? 0;
+        desiredWidth += _v_gridLine?.ActualWidth ?? 0d;
+
+        return desiredWidth;
+    }
+
+    /// <summary>
+    /// Invalidates the cached content desired width so the next auto-size measure re-measures the content.
+    /// Called when the cell's element or its data item changes.
+    /// </summary>
+    internal void InvalidateDesiredWidth()
+    {
+        _contentDesiredWidth = double.NaN;
+    }
+
+    /// <summary>
+    /// Constrains the content element to the column's actual width and the cell's height, collapsing it when there
+    /// is no room. Runs for every column regardless of sizing mode.
+    /// </summary>
+    private void ConstrainContent(FrameworkElement element)
+    {
+        if (Column is null || _contentPresenter is null)
+        {
+            return;
+        }
+
+        // TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
+        var contentWidth = Column.ActualWidth;
+        contentWidth -= element.Margin.Left;
+        contentWidth -= element.Margin.Right;
+        contentWidth -= Padding.Left;
+        contentWidth -= Padding.Right;
+        contentWidth -= BorderThickness.Left;
+        contentWidth -= BorderThickness.Right;
+        contentWidth -= _selectionBorder?.BorderThickness.Left ?? 0;
+        contentWidth -= _selectionBorder?.BorderThickness.Right ?? 0;
+        contentWidth -= _v_gridLine?.ActualWidth ?? 0d;
+
+        var height = Height is double.NaN ? double.PositiveInfinity : Height;
+        var contentHeight = Math.Min(height, MaxHeight);
+        contentHeight -= element.Margin.Top;
+        contentHeight -= element.Margin.Bottom;
+        contentHeight -= Padding.Top;
+        contentHeight -= Padding.Bottom;
+        contentHeight -= BorderThickness.Top;
+        contentHeight -= BorderThickness.Bottom;
+        contentHeight -= _selectionBorder?.BorderThickness.Top ?? 0;
+        contentHeight -= _selectionBorder?.BorderThickness.Bottom ?? 0;
+        contentHeight -= GetHorizontalGridlineHeight();
+
+        if (contentWidth < 0 || contentHeight < 0)
+        {
+            _contentPresenter.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            element.MaxWidth = contentWidth;
+            element.MaxHeight = contentHeight;
+            _contentPresenter.Visibility = Visibility.Visible;
+        }
+    }
+
+    /// <summary>
+    /// Measures the cell content unconstrained and grows the owning column's desired width on demand.
+    /// Used by the auto-fit gesture for columns that are not auto-sized (and therefore are not measured every pass).
+    /// </summary>
+    internal void UpdateDesiredWidth()
+    {
+        if (Column is not null && Row is not null && _contentPresenter is not null && ResolveContentElement() is { } element)
+        {
+            _contentDesiredWidth = MeasureContentDesiredWidth(element);
+            Column.DesiredWidth = Math.Max(Column.DesiredWidth, _contentDesiredWidth);
+            InvalidateMeasure(); // Re-apply the content constraint on the next pass.
+        }
     }
 
     /// <inheritdoc/>
@@ -444,6 +538,8 @@ public partial class TableViewCell : ContentControl
     /// successfully started; otherwise, <see langword="false"/> if the operation was canceled.</returns>
     internal bool BeginCellEditing(RoutedEventArgs editingArgs)
     {
+        EnsureContent(); // Realize deferred content before editing (e.g. UseSingleElement reuses the display element).
+
         var args = new TableViewBeginningEditEventArgs(this, Row?.Content, Column!, editingArgs);
         TableView?.OnBeginningEdit(args);
 
@@ -573,6 +669,11 @@ public partial class TableViewCell : ContentControl
     /// </summary>
     internal async void ApplyCurrentCellState(bool skipFocus = false)
     {
+        if (IsCurrent)
+        {
+            EnsureContent(); // Realize deferred content for the cell becoming current.
+        }
+
         var stateName = IsCurrent ? VisualStates.StateCurrent : VisualStates.StateRegular;
         VisualStates.GoToState(this, false, stateName);
 
@@ -601,6 +702,13 @@ public partial class TableViewCell : ContentControl
     /// </summary>
     private void OnColumnChanged()
     {
+        if (TableView?.IsColumnVirtualizationEnabled is true)
+        {
+            // Defer content generation until the cell scrolls into the horizontal viewport (see EnsureContent).
+            _contentPending = true;
+            return;
+        }
+
         if (TableView?.IsEditing == true)
         {
             SetEditingElement();
@@ -609,6 +717,20 @@ public partial class TableViewCell : ContentControl
         {
             SetElement();
         }
+    }
+
+    /// <summary>
+    /// Generates the cell's content if it was deferred by column virtualization. No-op once realized.
+    /// </summary>
+    internal void EnsureContent()
+    {
+        if (!_contentPending)
+        {
+            return;
+        }
+
+        _contentPending = false;
+        SetElement();
     }
 
     /// <summary>

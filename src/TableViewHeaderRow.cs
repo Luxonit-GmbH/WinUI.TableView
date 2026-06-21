@@ -42,6 +42,7 @@ public partial class TableViewHeaderRow : Control
     private TranslateTransform? _columnDropIndicatorTransform;
     private Image? _dragHeaderImage;
     private bool _calculatingHeaderWidths;
+    private bool _headerWidthsUpdateQueued;
     private int _dropColumnIndex;
     private bool _isValidDropTarget;
     private readonly Dictionary<DependencyProperty, long> _callbackTokens = [];
@@ -198,7 +199,7 @@ public partial class TableViewHeaderRow : Control
         {
             if (!_calculatingHeaderWidths)
             {
-                CalculateHeaderWidths();
+                InvalidateHeaderWidths();
             }
         }
     }
@@ -241,8 +242,27 @@ public partial class TableViewHeaderRow : Control
                                   new Binding { Path = new PropertyPath(nameof(TableViewColumn.Header)) });
             }
 
-            CalculateHeaderWidths();
+            InvalidateHeaderWidths();
         }
+    }
+
+    /// <summary>
+    /// Requests a header width recalculation, coalescing multiple requests raised within the same tick into a
+    /// single pass. Bulk column changes and rapid resizes otherwise trigger one O(columns) recalculation each.
+    /// </summary>
+    internal void InvalidateHeaderWidths()
+    {
+        if (_headerWidthsUpdateQueued)
+        {
+            return;
+        }
+
+        _headerWidthsUpdateQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _headerWidthsUpdateQueued = false;
+            CalculateHeaderWidths();
+        });
     }
 
     /// <summary>
@@ -336,6 +356,7 @@ public partial class TableViewHeaderRow : Control
             _calculatingHeaderWidths = false;
 
             TableView.UpdateHorizontalScrollBarMargin();
+            TableView.RealizeVisibleCells(); // Column widths are now known; realize cells in view (no-op unless virtualizing).
         }
     }
 
@@ -493,7 +514,7 @@ public partial class TableViewHeaderRow : Control
 
         if (!_calculatingHeaderWidths)
         {
-            CalculateHeaderWidths();
+            InvalidateHeaderWidths();
         }
     }
 
@@ -681,7 +702,7 @@ public partial class TableViewHeaderRow : Control
     /// </summary>
     private void OnTableViewSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        CalculateHeaderWidths();
+        InvalidateHeaderWidths();
     }
 
     /// <summary>
