@@ -36,6 +36,8 @@ public partial class TableViewRowPresenter : Control
     private ToggleButton? _detailsToggleButton;
     private ListViewItemPresenter? _itemPresenter;
     private long? _detailsPanelVisibilityCallbackToken;
+    private RectangleGeometry? _scrollableCellsClip;
+    private RectangleGeometry? _detailsClip;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TableViewRowPresenter"/> class.
@@ -142,11 +144,19 @@ public partial class TableViewRowPresenter : Control
                 var width = _detailsPanel.ActualWidth;
                 var height = _detailsPanel.ActualHeight;
                 _detailsPanel.Arrange(new(x, y, width, height));
-                _detailsPanel.Clip = x >= _v_gridLine.ActualOffset.X + _v_gridLine.ActualWidth ? null :
-                    new RectangleGeometry
-                    {
-                        Rect = new(xClip, 0, Math.Max(0, _detailsPanel.ActualWidth - xClip), _detailsPanel.ActualHeight)
-                    };
+
+                // Reuse the clip geometry instead of allocating a new one every arrange (horizontal scroll
+                // re-arranges every row on each tick, so this avoids per-row GC churn during scrolling).
+                if (x >= _v_gridLine.ActualOffset.X + _v_gridLine.ActualWidth)
+                {
+                    _detailsPanel.Clip = null;
+                }
+                else
+                {
+                    _detailsClip ??= new RectangleGeometry();
+                    _detailsClip.Rect = new(xClip, 0, Math.Max(0, _detailsPanel.ActualWidth - xClip), _detailsPanel.ActualHeight);
+                    _detailsPanel.Clip = _detailsClip;
+                }
             }
 
             if (_scrollableCellsPanel?.ActualWidth > 0 && _frozenCellsPanel is not null)
@@ -154,11 +164,18 @@ public partial class TableViewRowPresenter : Control
                 xScroll += _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
 
                 _scrollableCellsPanel.Arrange(new(xScroll, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
-                _scrollableCellsPanel.Clip = xScroll >= _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth ? null :
-                    new RectangleGeometry
-                    {
-                        Rect = new(xClip, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - xClip), _scrollableCellsPanel.ActualHeight)
-                    };
+
+                // Reuse the clip geometry instead of allocating a new one every arrange (see note above).
+                if (xScroll >= _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth)
+                {
+                    _scrollableCellsPanel.Clip = null;
+                }
+                else
+                {
+                    _scrollableCellsClip ??= new RectangleGeometry();
+                    _scrollableCellsClip.Rect = new(xClip, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - xClip), _scrollableCellsPanel.ActualHeight);
+                    _scrollableCellsPanel.Clip = _scrollableCellsClip;
+                }
             }
 
 

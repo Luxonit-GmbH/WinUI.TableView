@@ -39,6 +39,8 @@ public partial class TableView : ListView
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
     private readonly HashSet<TableViewRow> _rows = [];
+    private (int First, int Last) _lastRealizedRange = (-2, -2);
+    private bool _realizePending;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
     private Point? _dragStartPoint;
@@ -484,12 +486,34 @@ public partial class TableView : ListView
             return;
         }
 
+        // Fix A: only do work when the set of visible columns actually changes. Most horizontal scroll ticks
+        // stay within the same columns, so they become no-ops instead of an O(rows x columns) sweep per tick.
         var range = GetVisibleScrollableRange();
-
-        foreach (var row in _rows)
+        if (range == _lastRealizedRange || _realizePending)
         {
-            RealizeRowCells(row, range);
+            return;
         }
+
+        // Fix B: realize off the scroll frame (coalesced) so generating newly-revealed cells doesn't stall the
+        // current frame. The deferred pass re-reads the latest visible range, collapsing rapid scroll ticks.
+        _realizePending = true;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            _realizePending = false;
+
+            var current = GetVisibleScrollableRange();
+            if (current == _lastRealizedRange)
+            {
+                return;
+            }
+
+            _lastRealizedRange = current;
+
+            foreach (var row in _rows)
+            {
+                RealizeRowCells(row, current);
+            }
+        });
     }
 
     /// <summary>

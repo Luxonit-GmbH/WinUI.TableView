@@ -39,6 +39,7 @@ public partial class TableViewHeaderRow : Control
     private StackPanel? _frozenHeadersPanel;
     private StackPanel? _scrollableHeadersPanel;
     private Border? _columnDropIndicator;
+    private RectangleGeometry? _scrollableHeadersClip;
     private TranslateTransform? _columnDropIndicatorTransform;
     private Image? _dragHeaderImage;
     private bool _calculatingHeaderWidths;
@@ -115,11 +116,19 @@ public partial class TableViewHeaderRow : Control
             var xClip = (headersOffset * -1) + frozenOffset;
 
             _scrollableHeadersPanel.Arrange(new Rect(headersOffset, 0, _scrollableHeadersPanel.ActualWidth, _scrollableHeadersPanel.ActualHeight));
-            _scrollableHeadersPanel.Clip = headersOffset >= frozenOffset ? null :
-                new RectangleGeometry
-                {
-                    Rect = new Rect(xClip, 0, _scrollableHeadersPanel.ActualWidth - xClip, finalSize.Height)
-                };
+
+            // Reuse the clip geometry instead of allocating a new one every arrange (horizontal scroll re-arranges
+            // the header on each tick).
+            if (headersOffset >= frozenOffset)
+            {
+                _scrollableHeadersPanel.Clip = null;
+            }
+            else
+            {
+                _scrollableHeadersClip ??= new RectangleGeometry();
+                _scrollableHeadersClip.Rect = new Rect(xClip, 0, _scrollableHeadersPanel.ActualWidth - xClip, finalSize.Height);
+                _scrollableHeadersPanel.Clip = _scrollableHeadersClip;
+            }
         }
 
         return finalSize;
