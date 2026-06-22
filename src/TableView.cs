@@ -41,7 +41,7 @@ public partial class TableView : ListView
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
     private bool _realizePending;
-    private bool _prefetchScheduled;
+    private DispatcherTimer? _prefetchTimer;
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
@@ -594,32 +594,39 @@ public partial class TableView : ListView
     }
 
     /// <summary>
-    /// Schedules a low-priority (idle) pass that progressively realizes still-deferred cells in the realized rows,
-    /// a bounded number per tick, until none remain. This warms up off-screen columns during idle time so that
-    /// horizontal scrolling lands on already-materialized cells and never pays the one-time first-measure cost on
-    /// the scroll path. Coalesced via <see cref="_prefetchScheduled"/>; no-op unless virtualization is enabled.
+    /// (Re)starts a short debounce timer that warms up still-deferred (off-screen) cells, but only once the grid
+    /// has been quiet for the timer interval. Every scroll or row-realization activity restarts the timer, so the
+    /// warm-up never competes with loading or scrolling — it yields the thread between bursts and only fills in
+    /// during genuine idle. No-op unless column virtualization is enabled.
     /// </summary>
     private void SchedulePrefetch()
     {
-        if (!IsColumnVirtualizationEnabled || _prefetchScheduled)
+        if (!IsColumnVirtualizationEnabled)
         {
             return;
         }
 
-        _prefetchScheduled = true;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, PrefetchStep);
+        if (_prefetchTimer is null)
+        {
+            _prefetchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _prefetchTimer.Tick += OnPrefetchTick;
+        }
+
+        // Debounce: restart on every call so the warm-up only runs after activity stops.
+        _prefetchTimer.Stop();
+        _prefetchTimer.Start();
     }
 
-    private void PrefetchStep()
+    private void OnPrefetchTick(object? sender, object e)
     {
-        _prefetchScheduled = false;
+        _prefetchTimer?.Stop();
 
         if (!IsColumnVirtualizationEnabled)
         {
             return;
         }
 
-        const int budget = 48; // cells realized per idle tick — keeps each pass small enough not to cause a hitch
+        const int budget = 16; // small chunk per tick so a warm-up pass costs only a fraction of a frame
         var realized = 0;
 
         foreach (var row in _rows)
@@ -650,7 +657,7 @@ public partial class TableView : ListView
 
         if (realized > 0)
         {
-            SchedulePrefetch(); // more cells still deferred — continue on the next idle tick
+            _prefetchTimer?.Start(); // more deferred cells remain — continue after the interval (yields between chunks)
         }
     }
 
