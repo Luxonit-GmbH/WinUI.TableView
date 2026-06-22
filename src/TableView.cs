@@ -41,6 +41,7 @@ public partial class TableView : ListView
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
     private bool _realizePending;
+    private bool _prefetchScheduled;
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
@@ -504,36 +505,33 @@ public partial class TableView : ListView
             return;
         }
 
-        // Only do work when the set of visible columns actually changes; most horizontal scroll ticks stay within
-        // the already-realized band (see the CacheLength-sized prefetch buffer in GetVisibleScrollableRange).
+        // The visible band changed? Realize it OFF the scroll frame (coalesced) so materializing newly-revealed
+        // cells never blocks the current frame — the transform pan keeps the scroll smooth and the cells fill in
+        // on the next dispatcher turn. Rapid ticks collapse into one pass that re-reads the latest visible range.
         var range = GetVisibleScrollableRange();
-        if (range == _lastRealizedRange || _realizePending)
+        if (range != _lastRealizedRange && !_realizePending)
         {
-            return;
+            _realizePending = true;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                _realizePending = false;
+
+                var current = GetVisibleScrollableRange();
+                if (current != _lastRealizedRange)
+                {
+                    _lastRealizedRange = current;
+
+                    foreach (var row in _rows)
+                    {
+                        RealizeRowCells(row, current);
+                    }
+                }
+            });
         }
 
-        // Realize OFF the scroll frame (coalesced) so materializing newly-revealed cells never blocks the current
-        // frame — the transform pan keeps the scroll smooth and the cells fill in on the next dispatcher turn.
-        // Rapid ticks collapse into one pass that re-reads the latest visible range. With the prefetch buffer,
-        // revealed cells are at worst briefly empty before they fill.
-        _realizePending = true;
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            _realizePending = false;
-
-            var current = GetVisibleScrollableRange();
-            if (current == _lastRealizedRange)
-            {
-                return;
-            }
-
-            _lastRealizedRange = current;
-
-            foreach (var row in _rows)
-            {
-                RealizeRowCells(row, current);
-            }
-        });
+        // Then progressively realize the remaining off-screen cells during idle, so later scrolls land on cells
+        // that are already materialized and never pay the first-measure cost on the scroll path.
+        SchedulePrefetch();
     }
 
     /// <summary>
@@ -549,6 +547,7 @@ public partial class TableView : ListView
         }
 
         RealizeRowCells(row, GetVisibleScrollableRange());
+        SchedulePrefetch();
     }
 
     private void RealizeRowCells(TableViewRow row, (int First, int Last) range)
@@ -591,6 +590,67 @@ public partial class TableView : ListView
                     cell.EnsureContent();
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Schedules a low-priority (idle) pass that progressively realizes still-deferred cells in the realized rows,
+    /// a bounded number per tick, until none remain. This warms up off-screen columns during idle time so that
+    /// horizontal scrolling lands on already-materialized cells and never pays the one-time first-measure cost on
+    /// the scroll path. Coalesced via <see cref="_prefetchScheduled"/>; no-op unless virtualization is enabled.
+    /// </summary>
+    private void SchedulePrefetch()
+    {
+        if (!IsColumnVirtualizationEnabled || _prefetchScheduled)
+        {
+            return;
+        }
+
+        _prefetchScheduled = true;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, PrefetchStep);
+    }
+
+    private void PrefetchStep()
+    {
+        _prefetchScheduled = false;
+
+        if (!IsColumnVirtualizationEnabled)
+        {
+            return;
+        }
+
+        const int budget = 48; // cells realized per idle tick — keeps each pass small enough not to cause a hitch
+        var realized = 0;
+
+        foreach (var row in _rows)
+        {
+            if (row.RowPresenter is not { } presenter)
+            {
+                continue;
+            }
+
+            foreach (var cell in presenter.Cells)
+            {
+                if (cell.EnsureContent())
+                {
+                    realized++;
+                }
+
+                if (realized >= budget)
+                {
+                    break;
+                }
+            }
+
+            if (realized >= budget)
+            {
+                break;
+            }
+        }
+
+        if (realized > 0)
+        {
+            SchedulePrefetch(); // more cells still deferred — continue on the next idle tick
         }
     }
 
