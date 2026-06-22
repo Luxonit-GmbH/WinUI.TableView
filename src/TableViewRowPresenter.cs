@@ -25,7 +25,7 @@ public partial class TableViewRowPresenter : Control
 {
     private TableViewRowHeader? _rowHeader;
     private Panel? _rootPanel;
-    private StackPanel? _scrollableCellsPanel;
+    private Panel? _scrollableCellsPanel;
     private StackPanel? _frozenCellsPanel;
     private readonly List<TableViewCell> _cellsList = [];
     private readonly Dictionary<TableViewColumn, TableViewCell> _cellsByColumn = [];
@@ -66,7 +66,7 @@ public partial class TableViewRowPresenter : Control
 
         _rowHeader = GetTemplateChild("RowHeader") as TableViewRowHeader;
         _rootPanel = GetTemplateChild("RootPanel") as Panel;
-        _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as StackPanel;
+        _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as Panel;
         _frozenCellsPanel = GetTemplateChild("FrozenCellsPanel") as StackPanel;
         _cellsList.Clear(); // Template (re)applied: the new panels start empty.
         _scrollableCellsTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
@@ -564,6 +564,15 @@ public partial class TableViewRowPresenter : Control
     internal TableViewCell? GetCellForColumn(TableViewColumn column)
     {
         return _cellsByColumn.GetValueOrDefault(column);
+    }
+
+    /// <summary>
+    /// Invalidates the scrollable cells panel's measure so it re-virtualizes (re-measures the now-visible columns
+    /// and collapses the off-screen ones). Called when the visible column range changes.
+    /// </summary>
+    internal void InvalidateCellsMeasure()
+    {
+        _scrollableCellsPanel?.InvalidateMeasure();
     }
 
     /// <summary>

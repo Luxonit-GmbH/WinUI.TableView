@@ -524,6 +524,9 @@ public partial class TableView : ListView
                     foreach (var row in _rows)
                     {
                         RealizeRowCells(row, current);
+                        // Re-virtualize the cells panel for the new range (measures now-visible columns at full
+                        // width, collapses the rest) — covers columns whose content was already realized.
+                        row.RowPresenter?.InvalidateCellsMeasure();
                     }
                 }
             });
@@ -659,7 +662,13 @@ public partial class TableView : ListView
     /// horizontal offset and viewport width. Returns (-1, -1) when the range cannot be determined yet (e.g. before
     /// column widths are known), in which case only frozen columns should be realized.
     /// </summary>
-    private (int First, int Last) GetVisibleScrollableRange()
+    /// <summary>
+    /// The cumulative right-edge offsets of the visible scrollable columns, used by <see cref="TableViewCellsPanel"/>
+    /// to measure/arrange cells by column position. Returns an empty array when no columns or widths are known.
+    /// </summary>
+    internal double[] ScrollableColumnOffsets => (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
+
+    internal (int First, int Last) GetVisibleScrollableRange()
     {
         if (_scrollViewer is null || _scrollViewer.ViewportWidth <= 0)
         {
