@@ -60,7 +60,12 @@ public partial class TableView
     /// <summary>
     /// Identifies the CacheLength dependency property.
     /// </summary>
-    public static readonly DependencyProperty CacheLengthProperty = DependencyProperty.Register(nameof(CacheLength), typeof(double), typeof(TableView), new PropertyMetadata(4d, OnCacheLengthChanged));
+    public static readonly DependencyProperty CacheLengthProperty = DependencyProperty.Register(nameof(CacheLength), typeof(double), typeof(TableView), new PropertyMetadata(1d, OnCacheLengthChanged));
+
+    /// <summary>
+    /// Identifies the ColumnCacheLength dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ColumnCacheLengthProperty = DependencyProperty.Register(nameof(ColumnCacheLength), typeof(double), typeof(TableView), new PropertyMetadata(0.5d, OnColumnCacheLengthChanged));
 
     /// <summary>
     /// Identifies the IsColumnVirtualizationEnabled dependency property.
@@ -518,15 +523,29 @@ public partial class TableView
     }
 
     /// <summary>
-    /// Gets or sets the size of the buffer of realized items kept outside the viewport, expressed as a multiple of the
+    /// Gets or sets the vertical buffer of realized rows kept outside the viewport, expressed as a multiple of the
     /// viewport size. Lower values reduce the number of rows (and therefore cells) realized at startup and while
-    /// scrolling, at the cost of more realization work during fast scrolling. Defaults to 4.0, the framework default for
-    /// <see cref="ItemsStackPanel"/>.
+    /// scrolling — especially when grabbing the scrollbar — at the cost of more realization work during fast
+    /// scrolling. Defaults to 1.0 (the framework default for <see cref="ItemsStackPanel"/> is 4.0).
     /// </summary>
     public double CacheLength
     {
         get => (double)GetValue(CacheLengthProperty);
         set => SetValue(CacheLengthProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets the horizontal buffer of realized columns kept on each side of the viewport, expressed as a
+    /// multiple of the viewport width. Only meaningful when <see cref="IsColumnVirtualizationEnabled"/> is set.
+    /// Higher values preload more columns so horizontal scrolling reveals them without a layout hitch and is less
+    /// likely to flash blank, at the cost of measuring more columns per row (which makes vertical row realization
+    /// heavier). Defaults to 0.5. Raise it (e.g. 1.0–1.5) if fast horizontal scrolling flashes blank columns;
+    /// lower it if grabbing the vertical scrollbar feels heavy.
+    /// </summary>
+    public double ColumnCacheLength
+    {
+        get => (double)GetValue(ColumnCacheLengthProperty);
+        set => SetValue(ColumnCacheLengthProperty, value);
     }
 
     /// <summary>
@@ -937,6 +956,17 @@ public partial class TableView
         if (d is TableView tableView)
         {
             tableView.ApplyCacheLength();
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the ColumnCacheLength property by forcing the realized column band to be recomputed.
+    /// </summary>
+    private static void OnColumnCacheLengthChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            tableView.InvalidateColumnBand();
         }
     }
 

@@ -40,9 +40,6 @@ public partial class TableView : ListView
     private bool _isItemsSourceSuspended;
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
-    // Viewports of columns to realize (measure) on each side of the visible window. Wider = smoother horizontal
-    // scrolling (more preloaded columns, re-realized less often) at the cost of measuring more columns up front.
-    private const double ColumnPreloadViewports = 1.5d;
     private bool _realizePending;
     private bool _prefetchScheduled;
     private bool _cellsOffsetComputedThisPass;
@@ -501,6 +498,16 @@ public partial class TableView : ListView
     /// Realizes (generates deferred content for) the cells of all realized rows whose columns fall within the
     /// horizontal viewport. No-op unless <see cref="IsColumnVirtualizationEnabled"/> is set.
     /// </summary>
+    /// <summary>
+    /// Forces the realized column band to be recomputed on the next pass (e.g. after <see cref="ColumnCacheLength"/>
+    /// changes), then re-realizes the visible cells.
+    /// </summary>
+    internal void InvalidateColumnBand()
+    {
+        _lastRealizedRange = (-2, -2);
+        RealizeVisibleCells();
+    }
+
     internal void RealizeVisibleCells()
     {
         if (!IsColumnVirtualizationEnabled)
@@ -513,7 +520,7 @@ public partial class TableView : ListView
         // layout at all — the transform pan alone keeps it smooth. We only re-realize when the viewport drifts
         // within half the band of an edge, which still leaves a margin of realized columns ahead (so nothing turns
         // white) and happens far less often than once per frame. The re-realize runs off the scroll frame.
-        var trigger = GetVisibleScrollableRange(ColumnPreloadViewports * 0.5);
+        var trigger = GetVisibleScrollableRange(ColumnCacheLength * 0.5);
         var band = _lastRealizedRange;
         var covered = band.First >= 0
                       && trigger.First >= 0
@@ -527,7 +534,7 @@ public partial class TableView : ListView
             {
                 _realizePending = false;
 
-                var wide = GetVisibleScrollableRange(ColumnPreloadViewports);
+                var wide = GetVisibleScrollableRange(ColumnCacheLength);
                 if (wide.First >= 0 && wide != _lastRealizedRange)
                 {
                     _lastRealizedRange = wide;
@@ -559,7 +566,7 @@ public partial class TableView : ListView
 
         // Flag this (newly realized / recycled) row to match the current realized band, so it lines up with every
         // other row. Falls back to computing the band when none has been established yet (early load).
-        var range = _lastRealizedRange.First >= 0 ? _lastRealizedRange : GetVisibleScrollableRange(ColumnPreloadViewports);
+        var range = _lastRealizedRange.First >= 0 ? _lastRealizedRange : GetVisibleScrollableRange(ColumnCacheLength);
         RealizeRowCells(row, range);
         SchedulePrefetch();
     }

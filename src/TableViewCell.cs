@@ -254,7 +254,14 @@ public partial class TableViewCell : ContentControl
         contentWidth -= _selectionBorder?.BorderThickness.Right ?? 0;
         contentWidth -= _v_gridLine?.ActualWidth ?? 0d;
 
-        var height = Height is double.NaN ? double.PositiveInfinity : Height;
+        // The cells panel measures with infinite available height (it's inside a vertically-scrolling ItemsStackPanel),
+        // so when no explicit RowHeight is set the content would otherwise do an unbounded vertical layout on every
+        // pass — and again on every data tick. Bound it to the row's already-settled height; for the common
+        // uniform-height grid that is exactly the natural row height, so nothing is clipped, but the content is no
+        // longer measured against infinity. Setting TableView.RowHeight gives a guaranteed fixed bound (recommended).
+        var height = !double.IsNaN(Height) ? Height
+                   : ActualHeight > 0 ? ActualHeight
+                   : double.PositiveInfinity;
         var contentHeight = Math.Min(height, MaxHeight);
         contentHeight -= element.Margin.Top;
         contentHeight -= element.Margin.Bottom;
