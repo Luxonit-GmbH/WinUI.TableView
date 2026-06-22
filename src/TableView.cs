@@ -661,22 +661,17 @@ public partial class TableView : ListView
     /// </summary>
     private (int First, int Last) GetVisibleScrollableRange()
     {
-        var scrollable = Columns.VisibleScrollableColumns;
-
-        if (_scrollViewer is null || scrollable.Count == 0)
+        if (_scrollViewer is null || _scrollViewer.ViewportWidth <= 0)
         {
             return (-1, -1);
         }
 
-        var totalWidth = 0d;
-        foreach (var column in scrollable)
+        // Cumulative right-edges of the scrollable columns (cached; rebuilt only when widths/membership change),
+        // so we never re-sum every column width on a scroll tick.
+        var offsets = (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
+        if (offsets.Length == 0 || offsets[^1] <= 0)
         {
-            totalWidth += column.ActualWidth;
-        }
-
-        if (totalWidth <= 0 || _scrollViewer.ViewportWidth <= 0)
-        {
-            return (-1, -1); // Widths/layout not ready; realize frozen only and wait for the width pass.
+            return (-1, -1); // No columns, or widths not yet known.
         }
 
         var frozenWidth = 0d;
@@ -695,32 +690,65 @@ public partial class TableView : ListView
         var start = HorizontalOffset - buffer;
         var end = HorizontalOffset + viewport + buffer;
 
-        var first = -1;
-        var last = -1;
-        var x = 0d;
-
-        for (var i = 0; i < scrollable.Count; i++)
+        // First visible = first column whose right edge >= start. Last visible = last column whose left edge <= end.
+        // Both found via binary search over the sorted offsets (O(log n) instead of an O(n) scan).
+        var first = LowerBound(offsets, start);
+        if (first >= offsets.Length)
         {
-            var colEnd = x + scrollable[i].ActualWidth;
-
-            if (colEnd >= start && x <= end)
-            {
-                if (first < 0)
-                {
-                    first = i;
-                }
-
-                last = i;
-            }
-            else if (x > end)
-            {
-                break;
-            }
-
-            x = colEnd;
+            return (-1, -1);
         }
 
-        return (first, last);
+        var last = Math.Min(UpperBound(offsets, end), offsets.Length - 1);
+
+        return last < first ? (-1, -1) : (first, last);
+    }
+
+    /// <summary>
+    /// Returns the index of the first element of the ascending <paramref name="values"/> that is &gt;= <paramref name="value"/>,
+    /// or the array length if none qualify.
+    /// </summary>
+    private static int LowerBound(double[] values, double value)
+    {
+        int lo = 0, hi = values.Length;
+
+        while (lo < hi)
+        {
+            var mid = (lo + hi) >> 1;
+            if (values[mid] < value)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
+    }
+
+    /// <summary>
+    /// Returns the index of the first element of the ascending <paramref name="values"/> that is &gt; <paramref name="value"/>,
+    /// or the array length if none qualify.
+    /// </summary>
+    private static int UpperBound(double[] values, double value)
+    {
+        int lo = 0, hi = values.Length;
+
+        while (lo < hi)
+        {
+            var mid = (lo + hi) >> 1;
+            if (values[mid] <= value)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
     }
 
     /// <summary>
