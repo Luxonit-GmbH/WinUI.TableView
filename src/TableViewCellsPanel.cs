@@ -23,14 +23,28 @@ public partial class TableViewCellsPanel : Panel
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
-        var count = Children.Count;
+        // Cache the children collection and each child reference: Children / Children[i] are COM interop calls
+        // (UIElementCollection.get_Children / get_ListItem), and a 50-column row measured thousands of times turns
+        // those into hundreds of thousands of calls. Fetch once.
+        var children = Children;
+        var count = children.Count;
         if (count == 0)
         {
             return new Size(0, 0);
         }
 
-        var offsets = OwningTableView?.ScrollableColumnOffsets ?? [];
-        var height = double.IsInfinity(availableSize.Height) ? 0d : availableSize.Height;
+        var tableView = OwningTableView;
+        var offsets = tableView?.ScrollableColumnOffsets ?? [];
+        var availableHeight = availableSize.Height;
+
+        // Rows are uniform, so the panel's height is the (explicit) RowHeight or the finite available height — no need
+        // to read every child's DesiredSize.Height and Max them (which the profile showed as 300k+ calls). Only fall
+        // back to tracking the tallest child when neither is known.
+        var knownHeight = tableView is { RowHeight: var rowHeight } && !double.IsNaN(rowHeight) ? rowHeight
+                        : !double.IsInfinity(availableHeight) ? availableHeight
+                        : double.NaN;
+        var trackHeight = double.IsNaN(knownHeight);
+        var measuredHeight = 0d;
 
         // Offsets not ready / out of sync with the children: measure the way a horizontal StackPanel would (each
         // cell's own Width drives its desired width).
@@ -39,39 +53,41 @@ public partial class TableViewCellsPanel : Panel
             var total = 0d;
             for (var i = 0; i < count; i++)
             {
-                var child = Children[i];
-                child.Measure(new Size(double.PositiveInfinity, availableSize.Height));
+                var child = children[i];
+                child.Measure(new Size(double.PositiveInfinity, availableHeight));
                 total += child.DesiredSize.Width;
 
-                if (double.IsInfinity(availableSize.Height))
+                if (trackHeight)
                 {
-                    height = Math.Max(height, child.DesiredSize.Height);
+                    measuredHeight = Math.Max(measuredHeight, child.DesiredSize.Height);
                 }
             }
 
-            return new Size(total, height);
+            return new Size(total, trackHeight ? measuredHeight : knownHeight);
         }
 
-        // Measure every cell at its column width. Off-screen cells collapse their own content internally, so this
-        // stays cheap for non-visible columns while still giving on-screen cells their real width.
+        // Measure every cell at its column width. Off-screen cells are Collapsed (Measure is a no-op for them), so
+        // this only does real work for the on-screen band.
         for (var i = 0; i < count; i++)
         {
+            var child = children[i];
             var width = offsets[i] - (i == 0 ? 0d : offsets[i - 1]);
-            Children[i].Measure(new Size(width, availableSize.Height));
+            child.Measure(new Size(width, availableHeight));
 
-            if (double.IsInfinity(availableSize.Height))
+            if (trackHeight)
             {
-                height = Math.Max(height, Children[i].DesiredSize.Height);
+                measuredHeight = Math.Max(measuredHeight, child.DesiredSize.Height);
             }
         }
 
-        return new Size(offsets[^1], height);
+        return new Size(offsets[^1], trackHeight ? measuredHeight : knownHeight);
     }
 
     /// <inheritdoc/>
     protected override Size ArrangeOverride(Size finalSize)
     {
-        var count = Children.Count;
+        var children = Children;
+        var count = children.Count;
         if (count == 0)
         {
             return finalSize;
@@ -85,8 +101,9 @@ public partial class TableViewCellsPanel : Panel
             var x = 0d;
             for (var i = 0; i < count; i++)
             {
-                var w = Children[i].DesiredSize.Width;
-                Children[i].Arrange(new Rect(x, 0, w, finalSize.Height));
+                var child = children[i];
+                var w = child.DesiredSize.Width;
+                child.Arrange(new Rect(x, 0, w, finalSize.Height));
                 x += w;
             }
 
@@ -98,7 +115,7 @@ public partial class TableViewCellsPanel : Panel
         for (var i = 0; i < count; i++)
         {
             var left = i == 0 ? 0d : offsets[i - 1];
-            Children[i].Arrange(new Rect(left, 0, offsets[i] - left, finalSize.Height));
+            children[i].Arrange(new Rect(left, 0, offsets[i] - left, finalSize.Height));
         }
 
         return finalSize;

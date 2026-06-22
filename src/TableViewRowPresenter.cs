@@ -36,9 +36,7 @@ public partial class TableViewRowPresenter : Control
     private ToggleButton? _detailsToggleButton;
     private ListViewItemPresenter? _itemPresenter;
     private long? _detailsPanelVisibilityCallbackToken;
-    private RectangleGeometry? _scrollableCellsClip;
     private RectangleGeometry? _detailsClip;
-    private TranslateTransform? _scrollableCellsTransform;
     private TranslateTransform? _detailsTransform;
 
     /// <summary>
@@ -69,8 +67,7 @@ public partial class TableViewRowPresenter : Control
         _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as Panel;
         _frozenCellsPanel = GetTemplateChild("FrozenCellsPanel") as StackPanel;
         _cellsList.Clear(); // Template (re)applied: the new panels start empty.
-        _scrollableCellsTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
-        _detailsTransform = null;
+        _detailsTransform = null; // Cells use the TableView-shared transform/clip, (re)attached in ApplyHorizontalScroll.
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _detailsPanel = GetTemplateChild("DetailsPanel") as Panel;
@@ -187,23 +184,18 @@ public partial class TableViewRowPresenter : Control
 
         if (_scrollableCellsPanel is not null && _frozenCellsPanel is not null)
         {
-            if (_scrollableCellsTransform is null)
+            // Pan + clip via the TableView-wide shared transform/clip (updated once per offset change in
+            // UpdateSharedHorizontalScroll). This is a cheap idempotent assignment — no per-row clip recomputation.
+            var sharedTransform = TableView.SharedCellsTransform;
+            if (!ReferenceEquals(_scrollableCellsPanel.RenderTransform, sharedTransform))
             {
-                _scrollableCellsTransform = new TranslateTransform();
-                _scrollableCellsPanel.RenderTransform = _scrollableCellsTransform;
+                _scrollableCellsPanel.RenderTransform = sharedTransform;
             }
 
-            _scrollableCellsTransform.X = -h;
-
-            if (h <= 0)
+            var sharedClip = TableView.SharedCellsClip;
+            if (!ReferenceEquals(_scrollableCellsPanel.Clip, sharedClip))
             {
-                _scrollableCellsPanel.Clip = null;
-            }
-            else
-            {
-                _scrollableCellsClip ??= new RectangleGeometry();
-                _scrollableCellsClip.Rect = new(h, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - h), _scrollableCellsPanel.ActualHeight);
-                _scrollableCellsPanel.Clip = _scrollableCellsClip;
+                _scrollableCellsPanel.Clip = sharedClip;
             }
         }
 

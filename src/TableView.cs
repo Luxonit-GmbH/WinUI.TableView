@@ -40,6 +40,10 @@ public partial class TableView : ListView
     private bool _isItemsSourceSuspended;
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
+    // One transform + clip shared by every realized row's scrollable cells panel, so a horizontal scroll updates
+    // them ONCE instead of looping (and recomputing a clip rect for) every realized row each tick.
+    private TranslateTransform? _sharedCellsTransform;
+    private RectangleGeometry? _sharedCellsClip;
     private bool _realizePending;
     private bool _prefetchScheduled;
     private bool _cellsOffsetComputedThisPass;
@@ -506,6 +510,39 @@ public partial class TableView : ListView
     {
         _lastRealizedRange = (-2, -2);
         RealizeVisibleCells();
+    }
+
+    // A clip height large enough to never clip a row vertically — the scrollable-cells clip only needs to hide the
+    // horizontally panned-out (left) portion; vertical extent is bounded by the row itself.
+    private const double CellsClipExtent = 1_000_000d;
+
+    /// <summary>
+    /// The shared <see cref="TranslateTransform"/> applied to every row's scrollable cells panel for horizontal pan.
+    /// </summary>
+    internal TranslateTransform SharedCellsTransform => _sharedCellsTransform ??= new TranslateTransform();
+
+    /// <summary>
+    /// The shared clip applied to every row's scrollable cells panel so panned-out content does not draw over the
+    /// frozen columns / row header.
+    /// </summary>
+    internal RectangleGeometry SharedCellsClip => _sharedCellsClip ??= new RectangleGeometry { Rect = new Rect(0, 0, CellsClipExtent, CellsClipExtent) };
+
+    /// <summary>
+    /// Updates the shared horizontal pan transform and clip from the current <see cref="HorizontalOffset"/>. Called
+    /// once per offset change so individual rows don't each recompute a clip rect.
+    /// </summary>
+    internal void UpdateSharedHorizontalScroll()
+    {
+        var h = HorizontalOffset;
+        SharedCellsTransform.X = -h;
+
+        var offsets = ScrollableColumnOffsets;
+        var width = offsets.Length > 0 ? offsets[^1] : 0d;
+
+        // When scrolled, clip away the [0, h] strip (it pans left of the frozen boundary); otherwise don't clip.
+        SharedCellsClip.Rect = h > 0 && width > h
+            ? new Rect(h, 0, width - h, CellsClipExtent)
+            : new Rect(0, 0, CellsClipExtent, CellsClipExtent);
     }
 
     internal void RealizeVisibleCells()
