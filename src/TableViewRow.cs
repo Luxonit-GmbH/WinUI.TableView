@@ -34,6 +34,8 @@ public partial class TableViewRow : ListViewItem
     private readonly Thickness _selectionIndicatorMargin = new(4, 0, 0, 0);
     private ListViewItemPresenter? _itemPresenter;
     private Border? _selectionBackground;
+    private Border? _selectionIndicator;
+    private Border? _multiSelectIndicator;
     private bool _ensureCells = true;
     private Brush? _cellPresenterBackground;
     private Brush? _cellPresenterForeground;
@@ -129,6 +131,9 @@ public partial class TableViewRow : ListViewItem
         _cellPresenterBackground = Background;
         _cellPresenterForeground = Foreground;
         _itemPresenter = GetTemplateChild("Root") as ListViewItemPresenter;
+        // The template (re)applied — cached visual-tree parts found under _itemPresenter are now stale.
+        _selectionIndicator = null;
+        _multiSelectIndicator = null;
 #if !WINDOWS
         RowPresenter = GetTemplateChild("RowPresenter") as TableViewRowPresenter;
         _selectionBackground = GetTemplateChild("SelectionBackground") as Border;
@@ -509,35 +514,32 @@ public partial class TableViewRow : ListViewItem
         var left = Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft) / 2;
         var detailsHeight = RowPresenter?.GetDetailsContentHeight() ?? 0d;
 #if WINDOWS
-        var selectionIndicator = _itemPresenter?.FindDescendants()
-                                                .OfType<Border>()
-                                                .FirstOrDefault(x => x is { Width: 3 });
+        // These template parts are stable for the lifetime of the container, so find them once and cache them
+        // (reset in OnApplyTemplate) instead of walking the visual tree on every EnsureLayout call.
+        _selectionIndicator ??= _itemPresenter?.FindDescendants()
+                                               .OfType<Border>()
+                                               .FirstOrDefault(x => x is { Width: 3 });
 
         var cellsHeight = ActualHeight - detailsHeight;
         var selectionIndicatorHeight = Math.Max(Selection_IndicatorHeight, cellsHeight - 40);
 
-        if (selectionIndicator is not null)
+        if (_selectionIndicator is not null)
         {
-            selectionIndicator.MaxHeight = selectionIndicatorHeight;
-            selectionIndicator.Margin = new Thickness(
+            _selectionIndicator.MaxHeight = selectionIndicatorHeight;
+            _selectionIndicator.Margin = new Thickness(
                 _selectionIndicatorMargin.Left + left,
                 _selectionIndicatorMargin.Top,
                 _selectionIndicatorMargin.Right,
                 _selectionIndicatorMargin.Bottom);
         }
 
-        if (TableView is ListView { SelectionMode: ListViewSelectionMode.Multiple })
-        {
-            var fontIcon = this.FindDescendant<FontIcon>(x => x.Glyph == Check_Mark);
-            selectionIndicator = fontIcon?.Parent as Border;
-        }
+        var selectionIndicator = _selectionIndicator;
 
         if (TableView is ListView { SelectionMode: ListViewSelectionMode.Multiple })
         {
-            var fontIcon = this.FindDescendant<FontIcon>(x => x.Glyph == Check_Mark);
-            selectionIndicator = fontIcon?.Parent as Border;
+            _multiSelectIndicator ??= this.FindDescendant<FontIcon>(x => x.Glyph == Check_Mark)?.Parent as Border;
+            selectionIndicator = _multiSelectIndicator;
         }
-
 
         _selectionBackground ??= _itemPresenter?.FindDescendants()
                                                 .OfType<Border>()
@@ -622,9 +624,11 @@ public partial class TableViewRow : ListViewItem
 
     internal void UpdateSelectCheckMarkOpacity()
     {
-        var fontIcon = this.FindDescendant<FontIcon>(x => x.Glyph == Check_Mark);
+        // Reuse the cached multi-select indicator (the checkmark's parent border) instead of walking the tree
+        // on every editing toggle for every realized row.
+        _multiSelectIndicator ??= this.FindDescendant<FontIcon>(x => x.Glyph == Check_Mark)?.Parent as Border;
 
-        if (fontIcon?.Parent is Border border)
+        if (_multiSelectIndicator is { } border)
         {
             border.Opacity = TableView?.IsEditing is true ? 0.3 : 1;
         }

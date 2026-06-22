@@ -636,8 +636,7 @@ public partial class TableViewCell : ContentControl
             Focus(FocusState.Pointer);
         });
 #endif
-
-        DispatcherQueue.TryEnqueue(InvalidateMeasure);
+        // Note: setting Content already invalidates this cell's measure, so no extra InvalidateMeasure is needed.
     }
 
     /// <summary>

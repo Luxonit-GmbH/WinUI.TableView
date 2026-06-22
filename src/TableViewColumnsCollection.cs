@@ -48,7 +48,8 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
         _visibleFrozenColumnsMapCached = null;
         _visibleScrollableColumnsCached = null;
         _visibleScrollableColumnsMapCached = null;
-        
+        _visibleScrollableColumnOffsetsCached = null;
+
         if (_movingColumn) return; // Skip processing if it's a move action
 
         UpdateFrozenColumns();
@@ -102,6 +103,15 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// </summary>
     internal void HandleColumnPropertyChanged(TableViewColumn column, string propertyName)
     {
+        if (propertyName is nameof(TableViewColumn.ActualWidth)
+            or nameof(TableViewColumn.Visibility)
+            or nameof(TableViewColumn.Order)
+            or nameof(TableViewColumn.IsFrozen))
+        {
+            // These change the cumulative scrollable-column offsets used by horizontal virtualization.
+            _visibleScrollableColumnOffsetsCached = null;
+        }
+
         if (Contains(column) && !_movingColumn)
         {
             var index = IndexOf(column);
@@ -118,7 +128,8 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     private Dictionary<TableViewColumn, int>? _visibleFrozenColumnsMapCached;
     private IList<TableViewColumn>? _visibleScrollableColumnsCached;
     private Dictionary<TableViewColumn, int>? _visibleScrollableColumnsMapCached;
-    
+    private double[]? _visibleScrollableColumnOffsetsCached;
+
     /// <inheritdoc/>
     public IList<TableViewColumn> VisibleColumns =>
         _visibleColumnsCached ??= [
@@ -138,6 +149,35 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// </summary>
     public IList<TableViewColumn> VisibleScrollableColumns =>
         _visibleScrollableColumnsCached ??= VisibleColumns.Where(x => !x.IsFrozen).ToList();
+
+    /// <summary>
+    /// Gets the cumulative right-edge offset (running sum of <see cref="TableViewColumn.ActualWidth"/>) of each
+    /// visible scrollable column. Cached so horizontal virtualization can locate the visible column range with a
+    /// binary search instead of re-summing every column width on every scroll tick; invalidated when the scrollable
+    /// set or any column's ActualWidth changes.
+    /// </summary>
+    internal double[] VisibleScrollableColumnOffsets
+    {
+        get
+        {
+            if (_visibleScrollableColumnOffsetsCached is null)
+            {
+                var columns = VisibleScrollableColumns;
+                var offsets = new double[columns.Count];
+                var x = 0d;
+
+                for (var i = 0; i < columns.Count; i++)
+                {
+                    x += columns[i].ActualWidth;
+                    offsets[i] = x;
+                }
+
+                _visibleScrollableColumnOffsetsCached = offsets;
+            }
+
+            return _visibleScrollableColumnOffsetsCached;
+        }
+    }
 
     /// <summary>
     /// 

@@ -594,10 +594,10 @@ public partial class TableView : ListView
     }
 
     /// <summary>
-    /// Schedules a low-priority (idle) pass that progressively realizes still-deferred cells in the realized rows,
-    /// a bounded number per tick, until none remain. This warms up off-screen columns during idle time so that
-    /// horizontal scrolling lands on already-materialized cells and never pays the one-time first-measure cost on
-    /// the scroll path. Coalesced via <see cref="_prefetchScheduled"/>; no-op unless virtualization is enabled.
+    /// Schedules a Low-priority (idle) pass that progressively realizes still-deferred (off-screen) cells a small
+    /// budget at a time, until none remain — warming up off-screen columns during idle gaps so horizontal scrolling
+    /// lands on already-materialized cells. The Low priority yields to input/render/data work, and the bounded
+    /// budget keeps each pass to a fraction of a frame. Coalesced; no-op unless virtualization is enabled.
     /// </summary>
     private void SchedulePrefetch()
     {
@@ -619,7 +619,7 @@ public partial class TableView : ListView
             return;
         }
 
-        const int budget = 48; // cells realized per idle tick — keeps each pass small enough not to cause a hitch
+        const int budget = 12; // small chunk; Low priority yields the thread between chunks
         var realized = 0;
 
         foreach (var row in _rows)
@@ -650,7 +650,7 @@ public partial class TableView : ListView
 
         if (realized > 0)
         {
-            SchedulePrefetch(); // more cells still deferred — continue on the next idle tick
+            SchedulePrefetch(); // more deferred cells remain — continue on the next idle tick
         }
     }
 
@@ -661,22 +661,17 @@ public partial class TableView : ListView
     /// </summary>
     private (int First, int Last) GetVisibleScrollableRange()
     {
-        var scrollable = Columns.VisibleScrollableColumns;
-
-        if (_scrollViewer is null || scrollable.Count == 0)
+        if (_scrollViewer is null || _scrollViewer.ViewportWidth <= 0)
         {
             return (-1, -1);
         }
 
-        var totalWidth = 0d;
-        foreach (var column in scrollable)
+        // Cumulative right-edges of the scrollable columns (cached; rebuilt only when widths/membership change),
+        // so we never re-sum every column width on a scroll tick.
+        var offsets = (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
+        if (offsets.Length == 0 || offsets[^1] <= 0)
         {
-            totalWidth += column.ActualWidth;
-        }
-
-        if (totalWidth <= 0 || _scrollViewer.ViewportWidth <= 0)
-        {
-            return (-1, -1); // Widths/layout not ready; realize frozen only and wait for the width pass.
+            return (-1, -1); // No columns, or widths not yet known.
         }
 
         var frozenWidth = 0d;
@@ -691,36 +686,72 @@ public partial class TableView : ListView
             viewport = _scrollViewer.ViewportWidth;
         }
 
-        var buffer = viewport * CacheLength; // Prefetch the same number of viewports ahead as the vertical cache.
+        // Synchronous (on-frame) realize covers only the viewport + a small margin, so loading/scrolling materializes
+        // and measures just the near-visible columns. The idle prefetch warms everything else off-frame — this keeps
+        // the StackPanel (which measures every realized cell) from measuring far-off-screen columns during load.
+        var buffer = viewport * 0.5;
         var start = HorizontalOffset - buffer;
         var end = HorizontalOffset + viewport + buffer;
 
-        var first = -1;
-        var last = -1;
-        var x = 0d;
-
-        for (var i = 0; i < scrollable.Count; i++)
+        // First visible = first column whose right edge >= start. Last visible = last column whose left edge <= end.
+        // Both found via binary search over the sorted offsets (O(log n) instead of an O(n) scan).
+        var first = LowerBound(offsets, start);
+        if (first >= offsets.Length)
         {
-            var colEnd = x + scrollable[i].ActualWidth;
-
-            if (colEnd >= start && x <= end)
-            {
-                if (first < 0)
-                {
-                    first = i;
-                }
-
-                last = i;
-            }
-            else if (x > end)
-            {
-                break;
-            }
-
-            x = colEnd;
+            return (-1, -1);
         }
 
-        return (first, last);
+        var last = Math.Min(UpperBound(offsets, end), offsets.Length - 1);
+
+        return last < first ? (-1, -1) : (first, last);
+    }
+
+    /// <summary>
+    /// Returns the index of the first element of the ascending <paramref name="values"/> that is &gt;= <paramref name="value"/>,
+    /// or the array length if none qualify.
+    /// </summary>
+    private static int LowerBound(double[] values, double value)
+    {
+        int lo = 0, hi = values.Length;
+
+        while (lo < hi)
+        {
+            var mid = (lo + hi) >> 1;
+            if (values[mid] < value)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
+    }
+
+    /// <summary>
+    /// Returns the index of the first element of the ascending <paramref name="values"/> that is &gt; <paramref name="value"/>,
+    /// or the array length if none qualify.
+    /// </summary>
+    private static int UpperBound(double[] values, double value)
+    {
+        int lo = 0, hi = values.Length;
+
+        while (lo < hi)
+        {
+            var mid = (lo + hi) >> 1;
+            if (values[mid] <= value)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
     }
 
     /// <summary>
@@ -1646,7 +1677,8 @@ public partial class TableView : ListView
 
             foreach (var rowIndex in rowIndexes)
             {
-                var row = _rows.FirstOrDefault(x => x.Index == rowIndex);
+                // O(1) container lookup instead of a linear scan of realized rows per affected index.
+                var row = ContainerFromIndex(rowIndex) as TableViewRow;
                 row?.ApplyCellsSelectionState();
             }
 
