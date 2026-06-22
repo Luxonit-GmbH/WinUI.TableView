@@ -121,6 +121,17 @@ public partial class TableViewCell : ContentControl
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
+        // The cells panel measures off-screen (non-visible) columns with zero available width. Treat that as
+        // "skip content": collapse the content presenter so its subtree isn't measured, and return cheaply. The
+        // cell is still arranged in its column slot and is re-measured at full width (content restored) when it
+        // scrolls into view. Without this, ConstrainContent would size the content from Column.ActualWidth and
+        // measure the full content subtree anyway, defeating horizontal measure-virtualization.
+        if (availableSize.Width <= 0 && _contentPresenter is not null)
+        {
+            _contentPresenter.Visibility = Visibility.Collapsed;
+            return base.MeasureOverride(availableSize);
+        }
+
         if (Column is not null && Row is not null && _contentPresenter is not null && ResolveContentElement() is { } element)
         {
             // Measuring the content unconstrained only feeds the column's desired (auto) width. For fixed and
