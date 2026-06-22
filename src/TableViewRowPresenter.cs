@@ -38,6 +38,8 @@ public partial class TableViewRowPresenter : Control
     private long? _detailsPanelVisibilityCallbackToken;
     private RectangleGeometry? _scrollableCellsClip;
     private RectangleGeometry? _detailsClip;
+    private TranslateTransform? _scrollableCellsTransform;
+    private TranslateTransform? _detailsTransform;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TableViewRowPresenter"/> class.
@@ -67,6 +69,8 @@ public partial class TableViewRowPresenter : Control
         _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as StackPanel;
         _frozenCellsPanel = GetTemplateChild("FrozenCellsPanel") as StackPanel;
         _cellsList.Clear(); // Template (re)applied: the new panels start empty.
+        _scrollableCellsTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
+        _detailsTransform = null;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _detailsPanel = GetTemplateChild("DetailsPanel") as Panel;
@@ -131,55 +135,29 @@ public partial class TableViewRowPresenter : Control
             var cornerRadius = _itemPresenter?.CornerRadius ?? new CornerRadius(0);
             var isMultiSelection = TableView is ListView { SelectionMode: ListViewSelectionMode.Multiple };
             var left = isMultiSelection ? 44 : Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
-            var xScroll = -TableView.HorizontalOffset;
-            var xClip = TableView.HorizontalOffset;
 
             _rootPanel?.Arrange(new(left, 0, Math.Max(0, _rootPanel.ActualWidth), _rootPanel.ActualHeight));
 
+            // Arrange the scrollable panels at their un-scrolled positions; the horizontal scroll offset is applied
+            // via RenderTransform in ApplyHorizontalScroll so that scrolling does not re-run a layout pass.
             if (_detailsPanel?.Visibility is Visibility.Visible && _v_gridLine is not null)
             {
                 var x = _v_gridLine.ActualOffset.X + _v_gridLine.ActualWidth;
-                x += TableView.AreRowDetailsFrozen ? 0 : xScroll;
                 var y = _scrollableCellsPanel?.ActualHeight ?? _v_gridLine.ActualOffset.Y;
-                var width = _detailsPanel.ActualWidth;
-                var height = _detailsPanel.ActualHeight;
-                _detailsPanel.Arrange(new(x, y, width, height));
-
-                // Reuse the clip geometry instead of allocating a new one every arrange (horizontal scroll
-                // re-arranges every row on each tick, so this avoids per-row GC churn during scrolling).
-                if (x >= _v_gridLine.ActualOffset.X + _v_gridLine.ActualWidth)
-                {
-                    _detailsPanel.Clip = null;
-                }
-                else
-                {
-                    _detailsClip ??= new RectangleGeometry();
-                    _detailsClip.Rect = new(xClip, 0, Math.Max(0, _detailsPanel.ActualWidth - xClip), _detailsPanel.ActualHeight);
-                    _detailsPanel.Clip = _detailsClip;
-                }
+                _detailsPanel.Arrange(new(x, y, _detailsPanel.ActualWidth, _detailsPanel.ActualHeight));
             }
 
             if (_scrollableCellsPanel?.ActualWidth > 0 && _frozenCellsPanel is not null)
             {
-                xScroll += _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
-
-                _scrollableCellsPanel.Arrange(new(xScroll, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
-
-                // Reuse the clip geometry instead of allocating a new one every arrange (see note above).
-                if (xScroll >= _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth)
-                {
-                    _scrollableCellsPanel.Clip = null;
-                }
-                else
-                {
-                    _scrollableCellsClip ??= new RectangleGeometry();
-                    _scrollableCellsClip.Rect = new(xClip, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - xClip), _scrollableCellsPanel.ActualHeight);
-                    _scrollableCellsPanel.Clip = _scrollableCellsClip;
-                }
+                var frozenRight = _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
+                _scrollableCellsPanel.Arrange(new(frozenRight, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
             }
 
+            ApplyHorizontalScroll();
 
-            if (_v_gridLine is not null && TableView is not null)
+            // CellsHorizontalOffset is uniform across rows, so only the first row to arrange in a given layout
+            // pass computes it (the TransformToVisual is otherwise repeated for every realized row).
+            if (_v_gridLine is not null && TableView.TryClaimCellsOffsetUpdate())
             {
                 var transform = _v_gridLine.TransformToVisual(this);
                 var relativePosition = transform.TransformPoint(new Point(0, 0));
@@ -191,6 +169,67 @@ public partial class TableViewRowPresenter : Control
         }
 
         return finalSize;
+    }
+
+    /// <summary>
+    /// Applies the current horizontal scroll offset to the scrollable cells (and row-details) panel via a
+    /// RenderTransform plus a clip, instead of re-arranging the row. Called from <see cref="ArrangeOverride"/> and
+    /// directly on HorizontalOffset changes, so horizontal scrolling does not trigger a layout pass per row.
+    /// </summary>
+    internal void ApplyHorizontalScroll()
+    {
+        if (TableView is null)
+        {
+            return;
+        }
+
+        var h = TableView.HorizontalOffset;
+
+        if (_scrollableCellsPanel is not null && _frozenCellsPanel is not null)
+        {
+            if (_scrollableCellsTransform is null)
+            {
+                _scrollableCellsTransform = new TranslateTransform();
+                _scrollableCellsPanel.RenderTransform = _scrollableCellsTransform;
+            }
+
+            _scrollableCellsTransform.X = -h;
+
+            if (h <= 0)
+            {
+                _scrollableCellsPanel.Clip = null;
+            }
+            else
+            {
+                _scrollableCellsClip ??= new RectangleGeometry();
+                _scrollableCellsClip.Rect = new(h, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - h), _scrollableCellsPanel.ActualHeight);
+                _scrollableCellsPanel.Clip = _scrollableCellsClip;
+            }
+        }
+
+        if (_detailsPanel?.Visibility is Visibility.Visible)
+        {
+            var frozen = TableView.AreRowDetailsFrozen;
+
+            if (_detailsTransform is null)
+            {
+                _detailsTransform = new TranslateTransform();
+                _detailsPanel.RenderTransform = _detailsTransform;
+            }
+
+            _detailsTransform.X = frozen ? 0 : -h;
+
+            if (frozen || h <= 0)
+            {
+                _detailsPanel.Clip = null;
+            }
+            else
+            {
+                _detailsClip ??= new RectangleGeometry();
+                _detailsClip.Rect = new(h, 0, Math.Max(0, _detailsPanel.ActualWidth - h), _detailsPanel.ActualHeight);
+                _detailsPanel.Clip = _detailsClip;
+            }
+        }
     }
 
     /// <summary>

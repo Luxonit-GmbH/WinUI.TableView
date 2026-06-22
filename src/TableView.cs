@@ -40,6 +40,7 @@ public partial class TableView : ListView
     private bool _isItemsSourceSuspended;
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
+    private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
     private Point? _dragStartPoint;
@@ -73,6 +74,23 @@ public partial class TableView : ListView
         SelectionChanged += TableView_SelectionChanged;
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
         _collectionView.VectorChanged += (_, _) => InvalidateRowIndices();
+    }
+
+    /// <summary>
+    /// Returns <see langword="true"/> for the first realized row that asks within a layout pass, so the
+    /// (row-uniform) <see cref="CellsHorizontalOffset"/> is computed once per pass instead of once per row.
+    /// The claim is released after the current synchronous arrange batch via the dispatcher.
+    /// </summary>
+    internal bool TryClaimCellsOffsetUpdate()
+    {
+        if (_cellsOffsetComputedThisPass)
+        {
+            return false;
+        }
+
+        _cellsOffsetComputedThisPass = true;
+        DispatcherQueue.TryEnqueue(() => _cellsOffsetComputedThisPass = false);
+        return true;
     }
 
     /// <summary>

@@ -1165,11 +1165,12 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
-            tableView._headerRow?.InvalidateArrange();
+            // Pan via RenderTransform instead of re-running layout on the header + every row each tick.
+            tableView._headerRow?.ApplyHorizontalScroll();
 
             foreach (var row in tableView._rows)
             {
-                row?.RowPresenter?.InvalidateArrange();
+                row?.RowPresenter?.ApplyHorizontalScroll();
             }
 
             tableView.RealizeVisibleCells();
