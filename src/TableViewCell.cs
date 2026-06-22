@@ -33,6 +33,12 @@ public partial class TableViewCell : ContentControl
     private RoutedEventArgs? _editingArgs;
     private double _contentDesiredWidth = double.NaN;
     private bool _contentPending;
+    private bool _isInViewport;
+    // Cache key for the last applied content constraint (see ConstrainContent): the constraint depends only on these,
+    // not on the cell's value, so unchanged passes can skip the recompute + the MaxWidth/MaxHeight/Visibility sets.
+    private FrameworkElement? _constrainedElement;
+    private double _constrainedColumnWidth = double.NaN;
+    private double _constrainedRowHeight = double.NaN;
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
@@ -121,6 +127,18 @@ public partial class TableViewCell : ContentControl
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
+        // Horizontal measure-virtualization: when the cell's column is outside the viewport (set by
+        // RealizeVisibleCells), collapse the content presenter so its subtree is NOT measured — this is the
+        // expensive part, and it's skipped even when the content has already been realized (e.g. by prefetch).
+        // The cell still occupies its column slot, and SetInViewport(true) re-measures it (content restored)
+        // when it scrolls into view. We key off this flag rather than availableSize because ConstrainContent
+        // sizes the content from Column.ActualWidth and would otherwise measure the full subtree regardless.
+        if (!_isInViewport && _contentPresenter is not null && TableView?.IsColumnVirtualizationEnabled is true)
+        {
+            _contentPresenter.Visibility = Visibility.Collapsed;
+            return base.MeasureOverride(availableSize);
+        }
+
         if (Column is not null && Row is not null && _contentPresenter is not null && ResolveContentElement() is { } element)
         {
             // Measuring the content unconstrained only feeds the column's desired (auto) width. For fixed and
@@ -229,8 +247,28 @@ public partial class TableViewCell : ContentControl
             return;
         }
 
+        var columnWidth = Column.ActualWidth;
+        var rowHeight = !double.IsNaN(Height) ? Height
+                      : ActualHeight > 0 ? ActualHeight
+                      : double.PositiveInfinity;
+
+        // The applied constraint (content MaxWidth/MaxHeight + presenter visibility) depends only on the column
+        // width, the row height and the content element — not on the cell's value. Skip the recompute and the DP sets
+        // when none changed, which is the steady state for fixed-width columns + uniform rows (i.e. most measures and
+        // every value-only data tick).
+        if (ReferenceEquals(element, _constrainedElement)
+            && columnWidth == _constrainedColumnWidth
+            && rowHeight == _constrainedRowHeight)
+        {
+            return;
+        }
+
+        _constrainedElement = element;
+        _constrainedColumnWidth = columnWidth;
+        _constrainedRowHeight = rowHeight;
+
         // TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
-        var contentWidth = Column.ActualWidth;
+        var contentWidth = columnWidth;
         contentWidth -= element.Margin.Left;
         contentWidth -= element.Margin.Right;
         contentWidth -= Padding.Left;
@@ -241,8 +279,11 @@ public partial class TableViewCell : ContentControl
         contentWidth -= _selectionBorder?.BorderThickness.Right ?? 0;
         contentWidth -= _v_gridLine?.ActualWidth ?? 0d;
 
-        var height = Height is double.NaN ? double.PositiveInfinity : Height;
-        var contentHeight = Math.Min(height, MaxHeight);
+        // rowHeight bounds the content height: when no explicit RowHeight is set the cells panel would otherwise let
+        // the content do an unbounded vertical layout (it's inside a vertically-scrolling ItemsStackPanel, so the
+        // available height is infinite), on every pass and every data tick. For the common uniform-height grid the
+        // settled height is exactly the natural row height, so nothing is clipped. (Set RowHeight for a fixed bound.)
+        var contentHeight = Math.Min(rowHeight, MaxHeight);
         contentHeight -= element.Margin.Top;
         contentHeight -= element.Margin.Bottom;
         contentHeight -= Padding.Top;
@@ -731,6 +772,41 @@ public partial class TableViewCell : ContentControl
         _contentPending = false;
         SetElement();
         return true;
+    }
+
+    /// <summary>
+    /// Sets whether this cell's column is currently within the horizontal viewport. When it leaves the viewport the
+    /// entire cell is collapsed; a collapsed element's <c>Measure()</c> is a no-op, so its whole template (and content)
+    /// is skipped during layout — the dominant cost for many-column grids. It is re-shown and re-measured when the
+    /// column scrolls back into the realized band. Only meaningful while
+    /// <see cref="WinUI.TableView.TableView.IsColumnVirtualizationEnabled"/> is set. The cell stays in the row's cell
+    /// list (it is only hidden), so column-indexed access for selection/editing is unaffected.
+    /// </summary>
+    internal void SetInViewport(bool value)
+    {
+        var changed = _isInViewport != value;
+        _isInViewport = value;
+
+        // Sync visibility every call (not only on change) so a freshly created off-viewport cell — which starts with
+        // _isInViewport == false but Visibility == Visible — is collapsed too.
+        if (TableView?.IsColumnVirtualizationEnabled is true)
+        {
+            var visibility = value ? Visibility.Visible : Visibility.Collapsed;
+            if (Visibility != visibility)
+            {
+                Visibility = visibility;
+            }
+        }
+        else if (Visibility != Visibility.Visible)
+        {
+            // Virtualization disabled: never leave a cell hidden (RealizeAllCells calls this with true for all cells).
+            Visibility = Visibility.Visible;
+        }
+
+        if (changed && value)
+        {
+            InvalidateMeasure();
+        }
     }
 
     /// <summary>

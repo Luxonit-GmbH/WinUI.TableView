@@ -498,6 +498,16 @@ public partial class TableView : ListView
     /// Realizes (generates deferred content for) the cells of all realized rows whose columns fall within the
     /// horizontal viewport. No-op unless <see cref="IsColumnVirtualizationEnabled"/> is set.
     /// </summary>
+    /// <summary>
+    /// Forces the realized column band to be recomputed on the next pass (e.g. after <see cref="ColumnCacheLength"/>
+    /// changes), then re-realizes the visible cells.
+    /// </summary>
+    internal void InvalidateColumnBand()
+    {
+        _lastRealizedRange = (-2, -2);
+        RealizeVisibleCells();
+    }
+
     internal void RealizeVisibleCells()
     {
         if (!IsColumnVirtualizationEnabled)
@@ -505,25 +515,33 @@ public partial class TableView : ListView
             return;
         }
 
-        // The visible band changed? Realize it OFF the scroll frame (coalesced) so materializing newly-revealed
-        // cells never blocks the current frame — the transform pan keeps the scroll smooth and the cells fill in
-        // on the next dispatcher turn. Rapid ticks collapse into one pass that re-reads the latest visible range.
-        var range = GetVisibleScrollableRange();
-        if (range != _lastRealizedRange && !_realizePending)
+        // Hysteresis: we realize a band that extends ColumnPreloadViewports viewports of columns past the visible
+        // window on each side. While the on-screen columns stay comfortably inside that band, scrolling needs NO
+        // layout at all — the transform pan alone keeps it smooth. We only re-realize when the viewport drifts
+        // within half the band of an edge, which still leaves a margin of realized columns ahead (so nothing turns
+        // white) and happens far less often than once per frame. The re-realize runs off the scroll frame.
+        var trigger = GetVisibleScrollableRange(ColumnCacheLength * 0.5);
+        var band = _lastRealizedRange;
+        var covered = band.First >= 0
+                      && trigger.First >= 0
+                      && trigger.First >= band.First
+                      && trigger.Last <= band.Last;
+
+        if (!covered && !_realizePending)
         {
             _realizePending = true;
             DispatcherQueue.TryEnqueue(() =>
             {
                 _realizePending = false;
 
-                var current = GetVisibleScrollableRange();
-                if (current != _lastRealizedRange)
+                var wide = GetVisibleScrollableRange(ColumnCacheLength);
+                if (wide.First >= 0 && wide != _lastRealizedRange)
                 {
-                    _lastRealizedRange = current;
+                    _lastRealizedRange = wide;
 
                     foreach (var row in _rows)
                     {
-                        RealizeRowCells(row, current);
+                        RealizeRowCells(row, wide);
                     }
                 }
             });
@@ -546,7 +564,10 @@ public partial class TableView : ListView
             return;
         }
 
-        RealizeRowCells(row, GetVisibleScrollableRange());
+        // Flag this (newly realized / recycled) row to match the current realized band, so it lines up with every
+        // other row. Falls back to computing the band when none has been established yet (early load).
+        var range = _lastRealizedRange.First >= 0 ? _lastRealizedRange : GetVisibleScrollableRange(ColumnCacheLength);
+        RealizeRowCells(row, range);
         SchedulePrefetch();
     }
 
@@ -560,18 +581,29 @@ public partial class TableView : ListView
         // Frozen columns are always within view.
         foreach (var column in Columns.VisibleFrozenColumns)
         {
-            presenter.GetCellForColumn(column)?.EnsureContent();
+            if (presenter.GetCellForColumn(column) is { } cell)
+            {
+                cell.SetInViewport(true);
+                cell.EnsureContent();
+            }
         }
 
-        if (range.First < 0)
-        {
-            return;
-        }
-
+        // Flag every scrollable cell in/out of the viewport. Off-screen cells then skip their (expensive) content
+        // measure even if their content was already realized (e.g. by idle prefetch) — this is what actually
+        // virtualizes the measure cost. Content is realized only for the cells in view.
         var scrollable = Columns.VisibleScrollableColumns;
-        for (var i = range.First; i <= range.Last && i < scrollable.Count; i++)
+        for (var i = 0; i < scrollable.Count; i++)
         {
-            presenter.GetCellForColumn(scrollable[i])?.EnsureContent();
+            if (presenter.GetCellForColumn(scrollable[i]) is { } cell)
+            {
+                var inView = range.First >= 0 && i >= range.First && i <= range.Last;
+                cell.SetInViewport(inView);
+
+                if (inView)
+                {
+                    cell.EnsureContent();
+                }
+            }
         }
     }
 
@@ -587,6 +619,7 @@ public partial class TableView : ListView
             {
                 foreach (var cell in presenter.Cells)
                 {
+                    cell.SetInViewport(true);
                     cell.EnsureContent();
                 }
             }
@@ -655,11 +688,17 @@ public partial class TableView : ListView
     }
 
     /// <summary>
+    /// The cumulative right-edge offsets of the visible scrollable columns, used by <see cref="TableViewCellsPanel"/>
+    /// to measure/arrange cells by column position. Returns an empty array when no columns or widths are known.
+    /// </summary>
+    internal double[] ScrollableColumnOffsets => (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
+
+    /// <summary>
     /// Computes the inclusive index range of visible scrollable columns (with a small buffer) from the current
     /// horizontal offset and viewport width. Returns (-1, -1) when the range cannot be determined yet (e.g. before
     /// column widths are known), in which case only frozen columns should be realized.
     /// </summary>
-    private (int First, int Last) GetVisibleScrollableRange()
+    internal (int First, int Last) GetVisibleScrollableRange(double bufferViewports)
     {
         if (_scrollViewer is null || _scrollViewer.ViewportWidth <= 0)
         {
@@ -686,10 +725,10 @@ public partial class TableView : ListView
             viewport = _scrollViewer.ViewportWidth;
         }
 
-        // Synchronous (on-frame) realize covers only the viewport + a small margin, so loading/scrolling materializes
-        // and measures just the near-visible columns. The idle prefetch warms everything else off-frame — this keeps
-        // the StackPanel (which measures every realized cell) from measuring far-off-screen columns during load.
-        var buffer = viewport * 0.5;
+        // Buffer (in viewports) of columns to include on each side of the visible window. Callers pass a wide value
+        // to define the preloaded "realized band" and a narrower value to decide when the viewport has drifted close
+        // enough to that band's edge to warrant re-realizing.
+        var buffer = viewport * bufferViewports;
         var start = HorizontalOffset - buffer;
         var end = HorizontalOffset + viewport + buffer;
 

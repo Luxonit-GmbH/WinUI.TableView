@@ -103,14 +103,8 @@
                                         Grid.Column="2"
                                         Orientation="Horizontal" />
 
-                            <StackPanel x:Name="ScrollableCellsPanel"
-                                        Grid.Column="3"
-                                        Orientation="Horizontal">
-                                <!--This is just dummy textblock. It would be removed at runtime-->
-                                <TextBlock Margin="16,0"
-                                           Text="{Binding}"
-                                           VerticalAlignment="Center" />
-                            </StackPanel>
+                            <local:TableViewCellsPanel x:Name="ScrollableCellsPanel"
+                                                       Grid.Column="3" />
 
                             <Grid x:Name="DetailsPanel"
                                   Grid.Row="1"
