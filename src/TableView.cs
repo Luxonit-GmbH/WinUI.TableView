@@ -40,6 +40,7 @@ public partial class TableView : ListView
     private bool _isItemsSourceSuspended;
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
+    private bool _realizePending;
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
@@ -503,22 +504,36 @@ public partial class TableView : ListView
             return;
         }
 
-        // Only do work when the set of visible columns actually changes. Most horizontal scroll ticks stay within
-        // the already-realized band (see the CacheLength-sized prefetch buffer in GetVisibleScrollableRange), so
-        // they are no-ops. When a new band is entered the (now cheap) cells are realized synchronously so they
-        // appear in the same frame rather than popping in after the scroll settles.
+        // Only do work when the set of visible columns actually changes; most horizontal scroll ticks stay within
+        // the already-realized band (see the CacheLength-sized prefetch buffer in GetVisibleScrollableRange).
         var range = GetVisibleScrollableRange();
-        if (range == _lastRealizedRange)
+        if (range == _lastRealizedRange || _realizePending)
         {
             return;
         }
 
-        _lastRealizedRange = range;
-
-        foreach (var row in _rows)
+        // Realize OFF the scroll frame (coalesced) so materializing newly-revealed cells never blocks the current
+        // frame — the transform pan keeps the scroll smooth and the cells fill in on the next dispatcher turn.
+        // Rapid ticks collapse into one pass that re-reads the latest visible range. With the prefetch buffer,
+        // revealed cells are at worst briefly empty before they fill.
+        _realizePending = true;
+        DispatcherQueue.TryEnqueue(() =>
         {
-            RealizeRowCells(row, range);
-        }
+            _realizePending = false;
+
+            var current = GetVisibleScrollableRange();
+            if (current == _lastRealizedRange)
+            {
+                return;
+            }
+
+            _lastRealizedRange = current;
+
+            foreach (var row in _rows)
+            {
+                RealizeRowCells(row, current);
+            }
+        });
     }
 
     /// <summary>
