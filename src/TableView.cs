@@ -686,7 +686,10 @@ public partial class TableView : ListView
             viewport = _scrollViewer.ViewportWidth;
         }
 
-        var buffer = viewport * CacheLength; // Prefetch the same number of viewports ahead as the vertical cache.
+        // Synchronous (on-frame) realize covers only the viewport + a small margin, so loading/scrolling materializes
+        // and measures just the near-visible columns. The idle prefetch warms everything else off-frame — this keeps
+        // the StackPanel (which measures every realized cell) from measuring far-off-screen columns during load.
+        var buffer = viewport * 0.5;
         var start = HorizontalOffset - buffer;
         var end = HorizontalOffset + viewport + buffer;
 
