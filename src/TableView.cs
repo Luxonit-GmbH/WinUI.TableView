@@ -40,7 +40,6 @@ public partial class TableView : ListView
     private bool _isItemsSourceSuspended;
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
-    private bool _realizePending;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
     private Point? _dragStartPoint;
@@ -486,34 +485,22 @@ public partial class TableView : ListView
             return;
         }
 
-        // Fix A: only do work when the set of visible columns actually changes. Most horizontal scroll ticks
-        // stay within the same columns, so they become no-ops instead of an O(rows x columns) sweep per tick.
+        // Only do work when the set of visible columns actually changes. Most horizontal scroll ticks stay within
+        // the already-realized band (see the CacheLength-sized prefetch buffer in GetVisibleScrollableRange), so
+        // they are no-ops. When a new band is entered the (now cheap) cells are realized synchronously so they
+        // appear in the same frame rather than popping in after the scroll settles.
         var range = GetVisibleScrollableRange();
-        if (range == _lastRealizedRange || _realizePending)
+        if (range == _lastRealizedRange)
         {
             return;
         }
 
-        // Fix B: realize off the scroll frame (coalesced) so generating newly-revealed cells doesn't stall the
-        // current frame. The deferred pass re-reads the latest visible range, collapsing rapid scroll ticks.
-        _realizePending = true;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        _lastRealizedRange = range;
+
+        foreach (var row in _rows)
         {
-            _realizePending = false;
-
-            var current = GetVisibleScrollableRange();
-            if (current == _lastRealizedRange)
-            {
-                return;
-            }
-
-            _lastRealizedRange = current;
-
-            foreach (var row in _rows)
-            {
-                RealizeRowCells(row, current);
-            }
-        });
+            RealizeRowCells(row, range);
+        }
     }
 
     /// <summary>
@@ -611,7 +598,7 @@ public partial class TableView : ListView
             viewport = _scrollViewer.ViewportWidth;
         }
 
-        var buffer = viewport * 0.5;
+        var buffer = viewport * CacheLength; // Prefetch the same number of viewports ahead as the vertical cache.
         var start = HorizontalOffset - buffer;
         var end = HorizontalOffset + viewport + buffer;
 
