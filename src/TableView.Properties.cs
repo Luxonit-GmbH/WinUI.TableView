@@ -1195,14 +1195,11 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
-            // Pan via RenderTransform instead of re-running layout. Update the shared cells transform + clip ONCE;
-            // each row's panel already references them, so this pans every row without per-row clip recomputation.
-            tableView.UpdateSharedHorizontalScroll();
+            // Pan via RenderTransform instead of re-running layout on the header + every row each tick.
             tableView._headerRow?.ApplyHorizontalScroll();
 
             foreach (var row in tableView._rows)
             {
-                // Cheap now: assigns the shared transform/clip (idempotent) and pans the row-details panel if shown.
                 row?.RowPresenter?.ApplyHorizontalScroll();
             }
 
