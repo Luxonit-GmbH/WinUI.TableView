@@ -567,15 +567,6 @@ public partial class TableViewRowPresenter : Control
     }
 
     /// <summary>
-    /// Invalidates the scrollable cells panel's measure so it re-virtualizes (re-measures the now-visible columns
-    /// and collapses the off-screen ones). Called when the visible column range changes.
-    /// </summary>
-    internal void InvalidateCellsMeasure()
-    {
-        _scrollableCellsPanel?.InvalidateMeasure();
-    }
-
-    /// <summary>
     /// Gets the list of cells in the presenter.
     /// </summary>
     public IReadOnlyList<TableViewCell> Cells => _cellsList;

@@ -33,7 +33,7 @@ public partial class TableViewCell : ContentControl
     private RoutedEventArgs? _editingArgs;
     private double _contentDesiredWidth = double.NaN;
     private bool _contentPending;
-    private bool _isInViewport = true;
+    private bool _isInViewport;
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
