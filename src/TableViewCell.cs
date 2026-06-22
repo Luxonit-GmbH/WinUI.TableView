@@ -755,18 +755,37 @@ public partial class TableViewCell : ContentControl
 
     /// <summary>
     /// Sets whether this cell's column is currently within the horizontal viewport. When it leaves the viewport the
-    /// cell collapses its content (skipping the content measure on subsequent passes); when it re-enters, the content
-    /// is restored. Only meaningful while <see cref="WinUI.TableView.TableView.IsColumnVirtualizationEnabled"/> is set.
+    /// entire cell is collapsed; a collapsed element's <c>Measure()</c> is a no-op, so its whole template (and content)
+    /// is skipped during layout — the dominant cost for many-column grids. It is re-shown and re-measured when the
+    /// column scrolls back into the realized band. Only meaningful while
+    /// <see cref="WinUI.TableView.TableView.IsColumnVirtualizationEnabled"/> is set. The cell stays in the row's cell
+    /// list (it is only hidden), so column-indexed access for selection/editing is unaffected.
     /// </summary>
     internal void SetInViewport(bool value)
     {
-        if (_isInViewport == value)
+        var changed = _isInViewport != value;
+        _isInViewport = value;
+
+        // Sync visibility every call (not only on change) so a freshly created off-viewport cell — which starts with
+        // _isInViewport == false but Visibility == Visible — is collapsed too.
+        if (TableView?.IsColumnVirtualizationEnabled is true)
         {
-            return;
+            var visibility = value ? Visibility.Visible : Visibility.Collapsed;
+            if (Visibility != visibility)
+            {
+                Visibility = visibility;
+            }
+        }
+        else if (Visibility != Visibility.Visible)
+        {
+            // Virtualization disabled: never leave a cell hidden (RealizeAllCells calls this with true for all cells).
+            Visibility = Visibility.Visible;
         }
 
-        _isInViewport = value;
-        InvalidateMeasure();
+        if (changed && value)
+        {
+            InvalidateMeasure();
+        }
     }
 
     /// <summary>
