@@ -34,6 +34,11 @@ public partial class TableViewCell : ContentControl
     private double _contentDesiredWidth = double.NaN;
     private bool _contentPending;
     private bool _isInViewport;
+    // Cache key for the last applied content constraint (see ConstrainContent): the constraint depends only on these,
+    // not on the cell's value, so unchanged passes can skip the recompute + the MaxWidth/MaxHeight/Visibility sets.
+    private FrameworkElement? _constrainedElement;
+    private double _constrainedColumnWidth = double.NaN;
+    private double _constrainedRowHeight = double.NaN;
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
@@ -242,8 +247,28 @@ public partial class TableViewCell : ContentControl
             return;
         }
 
+        var columnWidth = Column.ActualWidth;
+        var rowHeight = !double.IsNaN(Height) ? Height
+                      : ActualHeight > 0 ? ActualHeight
+                      : double.PositiveInfinity;
+
+        // The applied constraint (content MaxWidth/MaxHeight + presenter visibility) depends only on the column
+        // width, the row height and the content element — not on the cell's value. Skip the recompute and the DP sets
+        // when none changed, which is the steady state for fixed-width columns + uniform rows (i.e. most measures and
+        // every value-only data tick).
+        if (ReferenceEquals(element, _constrainedElement)
+            && columnWidth == _constrainedColumnWidth
+            && rowHeight == _constrainedRowHeight)
+        {
+            return;
+        }
+
+        _constrainedElement = element;
+        _constrainedColumnWidth = columnWidth;
+        _constrainedRowHeight = rowHeight;
+
         // TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
-        var contentWidth = Column.ActualWidth;
+        var contentWidth = columnWidth;
         contentWidth -= element.Margin.Left;
         contentWidth -= element.Margin.Right;
         contentWidth -= Padding.Left;
@@ -254,15 +279,11 @@ public partial class TableViewCell : ContentControl
         contentWidth -= _selectionBorder?.BorderThickness.Right ?? 0;
         contentWidth -= _v_gridLine?.ActualWidth ?? 0d;
 
-        // The cells panel measures with infinite available height (it's inside a vertically-scrolling ItemsStackPanel),
-        // so when no explicit RowHeight is set the content would otherwise do an unbounded vertical layout on every
-        // pass — and again on every data tick. Bound it to the row's already-settled height; for the common
-        // uniform-height grid that is exactly the natural row height, so nothing is clipped, but the content is no
-        // longer measured against infinity. Setting TableView.RowHeight gives a guaranteed fixed bound (recommended).
-        var height = !double.IsNaN(Height) ? Height
-                   : ActualHeight > 0 ? ActualHeight
-                   : double.PositiveInfinity;
-        var contentHeight = Math.Min(height, MaxHeight);
+        // rowHeight bounds the content height: when no explicit RowHeight is set the cells panel would otherwise let
+        // the content do an unbounded vertical layout (it's inside a vertically-scrolling ItemsStackPanel, so the
+        // available height is infinite), on every pass and every data tick. For the common uniform-height grid the
+        // settled height is exactly the natural row height, so nothing is clipped. (Set RowHeight for a fixed bound.)
+        var contentHeight = Math.Min(rowHeight, MaxHeight);
         contentHeight -= element.Margin.Top;
         contentHeight -= element.Margin.Bottom;
         contentHeight -= Padding.Top;
