@@ -39,9 +39,12 @@ public partial class TableViewHeaderRow : Control
     private StackPanel? _frozenHeadersPanel;
     private StackPanel? _scrollableHeadersPanel;
     private Border? _columnDropIndicator;
+    private RectangleGeometry? _scrollableHeadersClip;
+    private TranslateTransform? _scrollableHeadersTransform;
     private TranslateTransform? _columnDropIndicatorTransform;
     private Image? _dragHeaderImage;
     private bool _calculatingHeaderWidths;
+    private bool _headerWidthsUpdateQueued;
     private int _dropColumnIndex;
     private bool _isValidDropTarget;
     private readonly Dictionary<DependencyProperty, long> _callbackTokens = [];
@@ -71,6 +74,7 @@ public partial class TableViewHeaderRow : Control
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _frozenHeadersPanel = GetTemplateChild("FrozenHeadersPanel") as StackPanel;
         _scrollableHeadersPanel = GetTemplateChild("ScrollableHeadersPanel") as StackPanel;
+        _scrollableHeadersTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
         _columnDropIndicator = GetTemplateChild("ColumnDropIndicator") as Border;
         _columnDropIndicatorTransform = GetTemplateChild("ColumnDropIndicatorTransform") as TranslateTransform;
         _dragHeaderImage = GetTemplateChild("DragHeaderImage") as Image;
@@ -109,19 +113,49 @@ public partial class TableViewHeaderRow : Control
 
         if (_scrollableHeadersPanel is not null && _frozenHeadersPanel is not null && TableView is not null && _scrollableHeadersPanel.ActualWidth > 0)
         {
+            // Arrange at the un-scrolled position; horizontal scroll is applied via RenderTransform in
+            // ApplyHorizontalScroll so scrolling does not re-run a layout pass.
             var frozenOffset = _frozenHeadersPanel.ActualOffset.X + _frozenHeadersPanel.ActualWidth;
-            var headersOffset = -TableView.HorizontalOffset + frozenOffset;
-            var xClip = (headersOffset * -1) + frozenOffset;
+            _scrollableHeadersPanel.Arrange(new Rect(frozenOffset, 0, _scrollableHeadersPanel.ActualWidth, _scrollableHeadersPanel.ActualHeight));
 
-            _scrollableHeadersPanel.Arrange(new Rect(headersOffset, 0, _scrollableHeadersPanel.ActualWidth, _scrollableHeadersPanel.ActualHeight));
-            _scrollableHeadersPanel.Clip = headersOffset >= frozenOffset ? null :
-                new RectangleGeometry
-                {
-                    Rect = new Rect(xClip, 0, _scrollableHeadersPanel.ActualWidth - xClip, finalSize.Height)
-                };
+            ApplyHorizontalScroll();
         }
 
         return finalSize;
+    }
+
+    /// <summary>
+    /// Applies the current horizontal scroll offset to the scrollable headers panel via a RenderTransform plus a
+    /// clip, instead of re-arranging the header. Called from <see cref="ArrangeOverride"/> and directly on
+    /// HorizontalOffset changes so horizontal scrolling does not trigger a layout pass.
+    /// </summary>
+    internal void ApplyHorizontalScroll()
+    {
+        if (TableView is null || _scrollableHeadersPanel is null || _frozenHeadersPanel is null || _scrollableHeadersPanel.ActualWidth <= 0)
+        {
+            return;
+        }
+
+        var h = TableView.HorizontalOffset;
+
+        if (_scrollableHeadersTransform is null)
+        {
+            _scrollableHeadersTransform = new TranslateTransform();
+            _scrollableHeadersPanel.RenderTransform = _scrollableHeadersTransform;
+        }
+
+        _scrollableHeadersTransform.X = -h;
+
+        if (h <= 0)
+        {
+            _scrollableHeadersPanel.Clip = null;
+        }
+        else
+        {
+            _scrollableHeadersClip ??= new RectangleGeometry();
+            _scrollableHeadersClip.Rect = new Rect(h, 0, Math.Max(0, _scrollableHeadersPanel.ActualWidth - h), _scrollableHeadersPanel.ActualHeight);
+            _scrollableHeadersPanel.Clip = _scrollableHeadersClip;
+        }
     }
 
     /// <summary>
@@ -198,7 +232,7 @@ public partial class TableViewHeaderRow : Control
         {
             if (!_calculatingHeaderWidths)
             {
-                CalculateHeaderWidths();
+                InvalidateHeaderWidths();
             }
         }
     }
@@ -241,8 +275,27 @@ public partial class TableViewHeaderRow : Control
                                   new Binding { Path = new PropertyPath(nameof(TableViewColumn.Header)) });
             }
 
-            CalculateHeaderWidths();
+            InvalidateHeaderWidths();
         }
+    }
+
+    /// <summary>
+    /// Requests a header width recalculation, coalescing multiple requests raised within the same tick into a
+    /// single pass. Bulk column changes and rapid resizes otherwise trigger one O(columns) recalculation each.
+    /// </summary>
+    internal void InvalidateHeaderWidths()
+    {
+        if (_headerWidthsUpdateQueued)
+        {
+            return;
+        }
+
+        _headerWidthsUpdateQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _headerWidthsUpdateQueued = false;
+            CalculateHeaderWidths();
+        });
     }
 
     /// <summary>
@@ -336,6 +389,7 @@ public partial class TableViewHeaderRow : Control
             _calculatingHeaderWidths = false;
 
             TableView.UpdateHorizontalScrollBarMargin();
+            TableView.RealizeVisibleCells(); // Column widths are now known; realize cells in view (no-op unless virtualizing).
         }
     }
 
@@ -493,7 +547,7 @@ public partial class TableViewHeaderRow : Control
 
         if (!_calculatingHeaderWidths)
         {
-            CalculateHeaderWidths();
+            InvalidateHeaderWidths();
         }
     }
 
@@ -681,7 +735,7 @@ public partial class TableViewHeaderRow : Control
     /// </summary>
     private void OnTableViewSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        CalculateHeaderWidths();
+        InvalidateHeaderWidths();
     }
 
     /// <summary>

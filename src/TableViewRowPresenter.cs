@@ -27,7 +27,8 @@ public partial class TableViewRowPresenter : Control
     private Panel? _rootPanel;
     private StackPanel? _scrollableCellsPanel;
     private StackPanel? _frozenCellsPanel;
-    private IReadOnlyList<TableViewCell>? _cellsCache;
+    private readonly List<TableViewCell> _cellsList = [];
+    private readonly Dictionary<TableViewColumn, TableViewCell> _cellsByColumn = [];
     private Rectangle? _v_gridLine;
     private Rectangle? _h_gridLine;
     private Panel? _detailsPanel;
@@ -35,6 +36,10 @@ public partial class TableViewRowPresenter : Control
     private ToggleButton? _detailsToggleButton;
     private ListViewItemPresenter? _itemPresenter;
     private long? _detailsPanelVisibilityCallbackToken;
+    private RectangleGeometry? _scrollableCellsClip;
+    private RectangleGeometry? _detailsClip;
+    private TranslateTransform? _scrollableCellsTransform;
+    private TranslateTransform? _detailsTransform;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TableViewRowPresenter"/> class.
@@ -63,7 +68,9 @@ public partial class TableViewRowPresenter : Control
         _rootPanel = GetTemplateChild("RootPanel") as Panel;
         _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as StackPanel;
         _frozenCellsPanel = GetTemplateChild("FrozenCellsPanel") as StackPanel;
-        _cellsCache = null;
+        _cellsList.Clear(); // Template (re)applied: the new panels start empty.
+        _scrollableCellsTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
+        _detailsTransform = null;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _detailsPanel = GetTemplateChild("DetailsPanel") as Panel;
@@ -128,40 +135,29 @@ public partial class TableViewRowPresenter : Control
             var cornerRadius = _itemPresenter?.CornerRadius ?? new CornerRadius(0);
             var isMultiSelection = TableView is ListView { SelectionMode: ListViewSelectionMode.Multiple };
             var left = isMultiSelection ? 44 : Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
-            var xScroll = -TableView.HorizontalOffset;
-            var xClip = TableView.HorizontalOffset;
 
             _rootPanel?.Arrange(new(left, 0, Math.Max(0, _rootPanel.ActualWidth), _rootPanel.ActualHeight));
 
+            // Arrange the scrollable panels at their un-scrolled positions; the horizontal scroll offset is applied
+            // via RenderTransform in ApplyHorizontalScroll so that scrolling does not re-run a layout pass.
             if (_detailsPanel?.Visibility is Visibility.Visible && _v_gridLine is not null)
             {
                 var x = _v_gridLine.ActualOffset.X + _v_gridLine.ActualWidth;
-                x += TableView.AreRowDetailsFrozen ? 0 : xScroll;
                 var y = _scrollableCellsPanel?.ActualHeight ?? _v_gridLine.ActualOffset.Y;
-                var width = _detailsPanel.ActualWidth;
-                var height = _detailsPanel.ActualHeight;
-                _detailsPanel.Arrange(new(x, y, width, height));
-                _detailsPanel.Clip = x >= _v_gridLine.ActualOffset.X + _v_gridLine.ActualWidth ? null :
-                    new RectangleGeometry
-                    {
-                        Rect = new(xClip, 0, Math.Max(0, _detailsPanel.ActualWidth - xClip), _detailsPanel.ActualHeight)
-                    };
+                _detailsPanel.Arrange(new(x, y, _detailsPanel.ActualWidth, _detailsPanel.ActualHeight));
             }
 
             if (_scrollableCellsPanel?.ActualWidth > 0 && _frozenCellsPanel is not null)
             {
-                xScroll += _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
-
-                _scrollableCellsPanel.Arrange(new(xScroll, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
-                _scrollableCellsPanel.Clip = xScroll >= _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth ? null :
-                    new RectangleGeometry
-                    {
-                        Rect = new(xClip, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - xClip), _scrollableCellsPanel.ActualHeight)
-                    };
+                var frozenRight = _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
+                _scrollableCellsPanel.Arrange(new(frozenRight, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
             }
 
+            ApplyHorizontalScroll();
 
-            if (_v_gridLine is not null && TableView is not null)
+            // CellsHorizontalOffset is uniform across rows, so only the first row to arrange in a given layout
+            // pass computes it (the TransformToVisual is otherwise repeated for every realized row).
+            if (_v_gridLine is not null && TableView.TryClaimCellsOffsetUpdate())
             {
                 var transform = _v_gridLine.TransformToVisual(this);
                 var relativePosition = transform.TransformPoint(new Point(0, 0));
@@ -173,6 +169,67 @@ public partial class TableViewRowPresenter : Control
         }
 
         return finalSize;
+    }
+
+    /// <summary>
+    /// Applies the current horizontal scroll offset to the scrollable cells (and row-details) panel via a
+    /// RenderTransform plus a clip, instead of re-arranging the row. Called from <see cref="ArrangeOverride"/> and
+    /// directly on HorizontalOffset changes, so horizontal scrolling does not trigger a layout pass per row.
+    /// </summary>
+    internal void ApplyHorizontalScroll()
+    {
+        if (TableView is null)
+        {
+            return;
+        }
+
+        var h = TableView.HorizontalOffset;
+
+        if (_scrollableCellsPanel is not null && _frozenCellsPanel is not null)
+        {
+            if (_scrollableCellsTransform is null)
+            {
+                _scrollableCellsTransform = new TranslateTransform();
+                _scrollableCellsPanel.RenderTransform = _scrollableCellsTransform;
+            }
+
+            _scrollableCellsTransform.X = -h;
+
+            if (h <= 0)
+            {
+                _scrollableCellsPanel.Clip = null;
+            }
+            else
+            {
+                _scrollableCellsClip ??= new RectangleGeometry();
+                _scrollableCellsClip.Rect = new(h, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - h), _scrollableCellsPanel.ActualHeight);
+                _scrollableCellsPanel.Clip = _scrollableCellsClip;
+            }
+        }
+
+        if (_detailsPanel?.Visibility is Visibility.Visible)
+        {
+            var frozen = TableView.AreRowDetailsFrozen;
+
+            if (_detailsTransform is null)
+            {
+                _detailsTransform = new TranslateTransform();
+                _detailsPanel.RenderTransform = _detailsTransform;
+            }
+
+            _detailsTransform.X = frozen ? 0 : -h;
+
+            if (frozen || h <= 0)
+            {
+                _detailsPanel.Clip = null;
+            }
+            else
+            {
+                _detailsClip ??= new RectangleGeometry();
+                _detailsClip.Rect = new(h, 0, Math.Max(0, _detailsPanel.ActualWidth - h), _detailsPanel.ActualHeight);
+                _detailsPanel.Clip = _detailsClip;
+            }
+        }
     }
 
     /// <summary>
@@ -399,7 +456,8 @@ public partial class TableViewRowPresenter : Control
             index = Math.Max(index, 0); // handles -ve index;
 
             _frozenCellsPanel.Children.Insert(index, cell);
-            _cellsCache = null;
+            // Frozen cells occupy the prefix of the ordered cell list.
+            _cellsList.Insert(Math.Min(index, _cellsList.Count), cell);
         }
         else if (_scrollableCellsPanel is not null)
         {
@@ -408,9 +466,12 @@ public partial class TableViewRowPresenter : Control
             index = Math.Max(index, 0); // handles -ve index;
 
             _scrollableCellsPanel.Children.Insert(index, cell);
-            _cellsCache = null;
+            // Scrollable cells follow the frozen cells in the ordered cell list.
+            var frozenCount = _frozenCellsPanel?.Children.Count ?? 0;
+            _cellsList.Insert(Math.Min(frozenCount + index, _cellsList.Count), cell);
         }
 
+        _cellsByColumn[column] = cell;
         cell.EnsureStyle(TableViewRow?.Content);
     }
 
@@ -420,15 +481,27 @@ public partial class TableViewRowPresenter : Control
     /// <param name="cell">The cell to remove.</param>
     public void RemoveCell(TableViewCell cell)
     {
+        var removed = false;
+
         if (_frozenCellsPanel?.Children.Contains(cell) ?? false)
         {
             _frozenCellsPanel.Children.Remove(cell);
-            _cellsCache = null;
+            removed = true;
         }
         else if (_scrollableCellsPanel?.Children.Contains(cell) ?? false)
         {
             _scrollableCellsPanel.Children.Remove(cell);
-            _cellsCache = null;
+            removed = true;
+        }
+
+        if (removed)
+        {
+            _cellsList.Remove(cell);
+
+            if (cell.Column is not null && _cellsByColumn.TryGetValue(cell.Column, out var existing) && existing == cell)
+            {
+                _cellsByColumn.Remove(cell.Column);
+            }
         }
     }
 
@@ -439,7 +512,7 @@ public partial class TableViewRowPresenter : Control
     /// <param name="newIndex">The new index to move the cell to.</param>
     internal void MoveCells(TableViewColumn column, int newIndex)
     {
-        if (Cells.FirstOrDefault(h => h.Column == column) is { } cell)
+        if (GetCellForColumn(column) is { } cell)
         {
             RemoveCell(cell);
             InsertCell(cell);
@@ -480,15 +553,23 @@ public partial class TableViewRowPresenter : Control
     {
         _frozenCellsPanel?.Children.Clear();
         _scrollableCellsPanel?.Children.Clear();
-        _cellsCache = null;
+        _cellsList.Clear();
+        _cellsByColumn.Clear();
+    }
+
+    /// <summary>
+    /// Gets the cell associated with the specified column, or <see langword="null"/> if there is none.
+    /// </summary>
+    /// <param name="column">The column whose cell to retrieve.</param>
+    internal TableViewCell? GetCellForColumn(TableViewColumn column)
+    {
+        return _cellsByColumn.GetValueOrDefault(column);
     }
 
     /// <summary>
     /// Gets the list of cells in the presenter.
     /// </summary>
-    public IReadOnlyList<TableViewCell> Cells =>
-        _cellsCache ??= [.. _frozenCellsPanel?.Children.OfType<TableViewCell>() ?? [],
-            .. _scrollableCellsPanel?.Children.OfType<TableViewCell>() ?? []];
+    public IReadOnlyList<TableViewCell> Cells => _cellsList;
 
     /// <summary>
     /// Gets or sets the TableViewRow associated with the presenter.

@@ -37,6 +37,7 @@ public partial class TableViewRow : ListViewItem
     private bool _ensureCells = true;
     private Brush? _cellPresenterBackground;
     private Brush? _cellPresenterForeground;
+    private int? _cachedIndex;
 
     /// <summary>
     /// Initializes a new instance of the TableViewRow class.
@@ -147,8 +148,12 @@ public partial class TableViewRow : ListViewItem
         {
             foreach (var cell in Cells)
             {
+                // The data item changed; the cached auto-size width no longer reflects this cell's content.
+                cell.InvalidateDesiredWidth();
                 cell.RefreshElement();
             }
+
+            TableView?.RealizeRowCells(this); // Ensure visible columns are realized for the recycled row.
         }
 
         RowPresenter?.InvalidateMeasure(); // The cells presenter does not measure every time.
@@ -232,6 +237,8 @@ public partial class TableViewRow : ListViewItem
 
             AddCells(TableView.Columns.VisibleColumns);
             _ensureCells = false;
+
+            TableView.RealizeRowCells(this); // No-op unless column virtualization is enabled.
         }
     }
 
@@ -251,21 +258,20 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void OnColumnsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> newItems)
+        switch (e.Action)
         {
-            AddCells(newItems.Where(x => x.Visibility == Visibility.Visible));
-        }
-        else if (e.Action == NotifyCollectionChangedAction.Remove && e.OldItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> oldItems)
-        {
-            RemoveCells(oldItems);
-        }
-        else if (e.Action == NotifyCollectionChangedAction.Move && e.NewItems?.Count > 0)
-        {
-            RowPresenter?.MoveCells(e.NewItems.OfType<TableViewColumn>().First(), e.NewStartingIndex);
-        }
-        else if (e.Action == NotifyCollectionChangedAction.Reset && RowPresenter is not null)
-        {
-            RowPresenter.ClearCells();
+            case NotifyCollectionChangedAction.Add when (e.NewItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> newItems):
+                AddCells(newItems.Where(x => x.Visibility == Visibility.Visible));
+                break;
+            case NotifyCollectionChangedAction.Remove when (e.OldItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> oldItems):
+                RemoveCells(oldItems);
+                break;
+            case NotifyCollectionChangedAction.Move when (e.NewItems?.Count > 0):
+                RowPresenter?.MoveCells(e.NewItems.OfType<TableViewColumn>().First(), e.NewStartingIndex);
+                break;
+            case NotifyCollectionChangedAction.Reset when RowPresenter is not null:
+                RowPresenter.ClearCells();
+                break;
         }
     }
 
@@ -274,46 +280,39 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void OnColumnPropertyChanged(object? sender, TableViewColumnPropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(TableViewColumn.Visibility))
+        switch (e.PropertyName)
         {
-            if (e.Column.Visibility == Visibility.Visible)
-            {
+            case nameof(TableViewColumn.Visibility) when e.Column.Visibility == Visibility.Visible:
                 AddCells([e.Column]);
-            }
-            else
-            {
+                break;
+            case nameof(TableViewColumn.Visibility):
                 RemoveCells([e.Column]);
-            }
-        }
-        else if ((e.PropertyName is nameof(TableViewColumn.Order) ||
-            e.PropertyName is nameof(TableViewColumn.IsFrozen)) &&
-            e.Column.Visibility is Visibility.Visible)
-        {
-            RemoveCells([e.Column]);
-            AddCells([e.Column]);
-        }
-        else if (e.PropertyName is nameof(TableViewColumn.ActualWidth))
-        {
-            if (Cells.FirstOrDefault(x => x.Column == e.Column) is { } cell)
-            {
-                cell.Width = e.Column.ActualWidth;
-            }
-        }
-        else if (e.PropertyName is nameof(TableViewColumn.IsReadOnly))
-        {
-            UpdateCellsState();
-        }
-        else if (e.PropertyName is nameof(TableViewColumn.CellStyle))
-        {
-            EnsureCellsStyle(e.Column);
-        }
-        else if (e.PropertyName is nameof(TableViewBoundColumn.ElementStyle))
-        {
-            EnsureElementStyle(e.Column);
-        }
-        else if (e.PropertyName is nameof(TableViewBoundColumn.EditingElementStyle))
-        {
-            EnsureEditingElementStyle(e.Column);
+                break;
+            case nameof(TableViewColumn.Order) or nameof(TableViewColumn.IsFrozen) when
+                e.Column.Visibility is Visibility.Visible:
+                RemoveCells([e.Column]);
+                AddCells([e.Column]);
+                break;
+            case nameof(TableViewColumn.ActualWidth):
+                {
+                    if (RowPresenter?.GetCellForColumn(e.Column) is { } cell && cell.Width != e.Column.ActualWidth)
+                    {
+                        cell.Width = e.Column.ActualWidth;
+                    }
+                    break;
+                }
+            case nameof(TableViewColumn.IsReadOnly):
+                UpdateCellsState();
+                break;
+            case nameof(TableViewColumn.CellStyle):
+                EnsureCellsStyle(e.Column);
+                break;
+            case nameof(TableViewBoundColumn.ElementStyle):
+                EnsureElementStyle(e.Column);
+                break;
+            case nameof(TableViewBoundColumn.EditingElementStyle):
+                EnsureEditingElementStyle(e.Column);
+                break;
         }
     }
 
@@ -326,7 +325,7 @@ public partial class TableViewRow : ListViewItem
         {
             foreach (var column in columns)
             {
-                var cell = RowPresenter.Cells.FirstOrDefault(x => x.Column == column);
+                var cell = RowPresenter.GetCellForColumn(column);
                 if (cell is not null)
                 {
                     RowPresenter.RemoveCell(cell);
@@ -347,32 +346,40 @@ public partial class TableViewRow : ListViewItem
                 var cell = new TableViewCell
                 {
                     Row = this,
-                    Column = column,
+                    // TableView must be assigned before Column so the Column setter can observe the
+                    // virtualization setting and defer content generation accordingly.
                     TableView = TableView,
+                    Column = column,
                     Index = TableView.Columns.VisibleColumnIndex(column),
-                    Width = column.ActualWidth
+                    Width = column.ActualWidth,
+                    // Set heights directly instead of per-cell bindings (these values rarely change and are
+                    // re-applied via ApplyCellHeights on change). Avoids 3 bindings per cell.
+                    Height = TableView.RowHeight,
+                    MaxHeight = TableView.RowMaxHeight,
+                    MinHeight = TableView.RowMinHeight
                 };
-
-                cell.SetBinding(HeightProperty, new Binding
-                {
-                    Path = new PropertyPath($"{nameof(TableViewCell.TableView)}.{nameof(TableView.RowHeight)}"),
-                    RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-                });
-
-                cell.SetBinding(MaxHeightProperty, new Binding
-                {
-                    Path = new PropertyPath($"{nameof(TableViewCell.TableView)}.{nameof(TableView.RowMaxHeight)}"),
-                    RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-                });
-
-                cell.SetBinding(MinHeightProperty, new Binding
-                {
-                    Path = new PropertyPath($"{nameof(TableViewCell.TableView)}.{nameof(TableView.RowMinHeight)}"),
-                    RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-                });
 
                 RowPresenter.InsertCell(cell);
             }
+        }
+    }
+
+    /// <summary>
+    /// Applies the TableView's row height values to all cells. Called when cells are created and whenever
+    /// <see cref="TableView.RowHeight"/>, <see cref="TableView.RowMinHeight"/> or <see cref="TableView.RowMaxHeight"/> change.
+    /// </summary>
+    internal void ApplyCellHeights()
+    {
+        if (TableView is null)
+        {
+            return;
+        }
+
+        foreach (var cell in Cells)
+        {
+            cell.Height = TableView.RowHeight;
+            cell.MaxHeight = TableView.RowMaxHeight;
+            cell.MinHeight = TableView.RowMinHeight;
         }
     }
 
@@ -604,7 +611,7 @@ public partial class TableViewRow : ListViewItem
         {
             // Should alternate, heavy index lookup
             var alternate = Index % 2 == 1;
-            
+
             RowPresenter.Background =
                 alternate && alternateRowBackground is not null ? alternateRowBackground : _cellPresenterBackground;
 
@@ -638,9 +645,35 @@ public partial class TableViewRow : ListViewItem
     public IReadOnlyList<TableViewCell> Cells => RowPresenter?.Cells ?? [];
 
     /// <summary>
-    /// Gets the index of the row.
+    /// Gets the index of the row. Cached to avoid repeated container lookups; invalidated on (re)binding and on
+    /// collection changes via <see cref="InvalidateIndex"/>.
     /// </summary>
-    public int Index => TableView?.IndexFromContainer(this) ?? -1;
+    public int Index
+    {
+        get
+        {
+            if (_cachedIndex is { } cached)
+            {
+                return cached;
+            }
+
+            var index = TableView?.IndexFromContainer(this) ?? -1;
+            if (index >= 0)
+            {
+                _cachedIndex = index;
+            }
+
+            return index;
+        }
+    }
+
+    /// <summary>
+    /// Invalidates the cached <see cref="Index"/> so it is recomputed on next access.
+    /// </summary>
+    internal void InvalidateIndex()
+    {
+        _cachedIndex = null;
+    }
 
     /// <summary>
     /// Gets or sets the TableView associated with the row.

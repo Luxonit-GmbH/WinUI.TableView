@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using System;
 using Windows.Globalization.DateTimeFormatting;
+using WinUI.TableView.Columns;
 using WinUI.TableView.Controls;
 using WinUI.TableView.Extensions;
 using WinUI.TableView.Helpers;
@@ -17,7 +18,7 @@ namespace WinUI.TableView;
 #if WINDOWS
 [WinRT.GeneratedBindableCustomProperty]
 #endif
-public partial class TableViewTimeColumn : TableViewBoundColumn
+public partial class TableViewTimeColumn : TableViewBoundColumn, IDefaultTableViewColumn
 {
     /// <summary>
     /// Initializes a new instance of the TableViewTimeColumn class.

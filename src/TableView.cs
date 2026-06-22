@@ -39,6 +39,8 @@ public partial class TableView : ListView
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
     private readonly HashSet<TableViewRow> _rows = [];
+    private (int First, int Last) _lastRealizedRange = (-2, -2);
+    private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
     private Point? _dragStartPoint;
@@ -71,6 +73,36 @@ public partial class TableView : ListView
         Unloaded += OnUnloaded;
         SelectionChanged += TableView_SelectionChanged;
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
+        _collectionView.VectorChanged += (_, _) => InvalidateRowIndices();
+    }
+
+    /// <summary>
+    /// Returns <see langword="true"/> for the first realized row that asks within a layout pass, so the
+    /// (row-uniform) <see cref="CellsHorizontalOffset"/> is computed once per pass instead of once per row.
+    /// The claim is released after the current synchronous arrange batch via the dispatcher.
+    /// </summary>
+    internal bool TryClaimCellsOffsetUpdate()
+    {
+        if (_cellsOffsetComputedThisPass)
+        {
+            return false;
+        }
+
+        _cellsOffsetComputedThisPass = true;
+        DispatcherQueue.TryEnqueue(() => _cellsOffsetComputedThisPass = false);
+        return true;
+    }
+
+    /// <summary>
+    /// Invalidates the cached row index of every realized row. Called when the collection changes so that
+    /// rows whose logical position shifted recompute their index on next access.
+    /// </summary>
+    private void InvalidateRowIndices()
+    {
+        foreach (var row in _rows)
+        {
+            row.InvalidateIndex();
+        }
     }
 
     /// <summary>
@@ -105,9 +137,19 @@ public partial class TableView : ListView
     /// </summary>
     private void OnItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        var row = ContainerFromItem(sender) as TableViewRow;
+        if (ContainerFromItem(sender) is not TableViewRow row)
+        {
+            return;
+        }
 
-        row?.EnsureCellsStyle(null, sender);
+        // The data changed in place; invalidate cached auto-size widths so auto columns can grow/shrink to fit.
+        // Only auto columns are re-measured (on the next layout pass), so fixed/star columns pay nothing.
+        foreach (var cell in row.Cells)
+        {
+            cell.InvalidateDesiredWidth();
+        }
+
+        row.EnsureCellsStyle(null, sender);
     }
 
     /// <inheritdoc/>
@@ -115,12 +157,18 @@ public partial class TableView : ListView
     {
         //Console.WriteLine("PrepareContainerForItemOverride " + item + " rows=" + _rows.Count + ", view=" + _collectionView.Count);
 
+        // Invalidate before base binds the content: OnContentChanged (raised by the base call) reads Index.
+        if (element is TableViewRow preparingRow)
+        {
+            preparingRow.InvalidateIndex();
+        }
+
         base.PrepareContainerForItemOverride(element, item);
 
         if (element is TableViewRow row)
         {
             row.TableView = this;
-            
+
             // Add to rows
             _rows.Add(row);
 
@@ -144,6 +192,7 @@ public partial class TableView : ListView
         {
             _rows.Remove(row);
             row.TableView = null;
+            row.InvalidateIndex();
         }
 
         base.ClearContainerForItemOverride(element, item);
@@ -397,6 +446,206 @@ public partial class TableView : ListView
     {
         ResumeItemsSource();
         EnsureAutoColumns();
+        ApplyCacheLength();
+    }
+
+    /// <summary>
+    /// Applies the current <see cref="CacheLength"/> value to the underlying items panel.
+    /// </summary>
+    private async void ApplyCacheLength()
+    {
+        if (!IsLoaded)
+        {
+            return; // Re-applied from OnLoaded once the items panel exists.
+        }
+
+        while (ItemsPanelRoot is null)
+        {
+            await Task.Yield();
+        }
+
+        if (ItemsPanelRoot is ItemsStackPanel itemsStackPanel)
+        {
+            itemsStackPanel.CacheLength = CacheLength;
+        }
+    }
+
+    /// <summary>
+    /// Recomputes a column's desired width by measuring the content of every realized cell in that column.
+    /// Non-auto columns are not measured on every layout pass, so this is used on demand (e.g. by the auto-fit
+    /// gesture) to obtain an up-to-date desired width across the currently realized rows.
+    /// </summary>
+    /// <param name="column">The column to measure.</param>
+    internal void EnsureColumnDesiredWidth(TableViewColumn column)
+    {
+        column.DesiredWidth = 0d;
+
+        foreach (var row in _rows)
+        {
+            foreach (var cell in row.Cells)
+            {
+                if (cell.Column == column)
+                {
+                    cell.UpdateDesiredWidth();
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Realizes (generates deferred content for) the cells of all realized rows whose columns fall within the
+    /// horizontal viewport. No-op unless <see cref="IsColumnVirtualizationEnabled"/> is set.
+    /// </summary>
+    internal void RealizeVisibleCells()
+    {
+        if (!IsColumnVirtualizationEnabled)
+        {
+            return;
+        }
+
+        // Only do work when the set of visible columns actually changes. Most horizontal scroll ticks stay within
+        // the already-realized band (see the CacheLength-sized prefetch buffer in GetVisibleScrollableRange), so
+        // they are no-ops. When a new band is entered the (now cheap) cells are realized synchronously so they
+        // appear in the same frame rather than popping in after the scroll settles.
+        var range = GetVisibleScrollableRange();
+        if (range == _lastRealizedRange)
+        {
+            return;
+        }
+
+        _lastRealizedRange = range;
+
+        foreach (var row in _rows)
+        {
+            RealizeRowCells(row, range);
+        }
+    }
+
+    /// <summary>
+    /// Realizes the cells of a single row whose columns fall within the horizontal viewport.
+    /// No-op unless <see cref="IsColumnVirtualizationEnabled"/> is set.
+    /// </summary>
+    /// <param name="row">The row whose visible cells to realize.</param>
+    internal void RealizeRowCells(TableViewRow row)
+    {
+        if (!IsColumnVirtualizationEnabled)
+        {
+            return;
+        }
+
+        RealizeRowCells(row, GetVisibleScrollableRange());
+    }
+
+    private void RealizeRowCells(TableViewRow row, (int First, int Last) range)
+    {
+        if (row.RowPresenter is not { } presenter)
+        {
+            return;
+        }
+
+        // Frozen columns are always within view.
+        foreach (var column in Columns.VisibleFrozenColumns)
+        {
+            presenter.GetCellForColumn(column)?.EnsureContent();
+        }
+
+        if (range.First < 0)
+        {
+            return;
+        }
+
+        var scrollable = Columns.VisibleScrollableColumns;
+        for (var i = range.First; i <= range.Last && i < scrollable.Count; i++)
+        {
+            presenter.GetCellForColumn(scrollable[i])?.EnsureContent();
+        }
+    }
+
+    /// <summary>
+    /// Realizes the content of every cell in every realized row, regardless of viewport. Used when column
+    /// virtualization is turned off so that no cell is left with deferred content.
+    /// </summary>
+    private void RealizeAllCells()
+    {
+        foreach (var row in _rows)
+        {
+            if (row.RowPresenter is { } presenter)
+            {
+                foreach (var cell in presenter.Cells)
+                {
+                    cell.EnsureContent();
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Computes the inclusive index range of visible scrollable columns (with a small buffer) from the current
+    /// horizontal offset and viewport width. Returns (-1, -1) when the range cannot be determined yet (e.g. before
+    /// column widths are known), in which case only frozen columns should be realized.
+    /// </summary>
+    private (int First, int Last) GetVisibleScrollableRange()
+    {
+        var scrollable = Columns.VisibleScrollableColumns;
+
+        if (_scrollViewer is null || scrollable.Count == 0)
+        {
+            return (-1, -1);
+        }
+
+        var totalWidth = 0d;
+        foreach (var column in scrollable)
+        {
+            totalWidth += column.ActualWidth;
+        }
+
+        if (totalWidth <= 0 || _scrollViewer.ViewportWidth <= 0)
+        {
+            return (-1, -1); // Widths/layout not ready; realize frozen only and wait for the width pass.
+        }
+
+        var frozenWidth = 0d;
+        foreach (var column in Columns.VisibleFrozenColumns)
+        {
+            frozenWidth += column.ActualWidth;
+        }
+
+        var viewport = _scrollViewer.ViewportWidth - CellsHorizontalOffset - frozenWidth;
+        if (viewport <= 0)
+        {
+            viewport = _scrollViewer.ViewportWidth;
+        }
+
+        var buffer = viewport * CacheLength; // Prefetch the same number of viewports ahead as the vertical cache.
+        var start = HorizontalOffset - buffer;
+        var end = HorizontalOffset + viewport + buffer;
+
+        var first = -1;
+        var last = -1;
+        var x = 0d;
+
+        for (var i = 0; i < scrollable.Count; i++)
+        {
+            var colEnd = x + scrollable[i].ActualWidth;
+
+            if (colEnd >= start && x <= end)
+            {
+                if (first < 0)
+                {
+                    first = i;
+                }
+
+                last = i;
+            }
+            else if (x > end)
+            {
+                break;
+            }
+
+            x = colEnd;
+        }
+
+        return (first, last);
     }
 
     /// <summary>

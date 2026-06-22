@@ -2,6 +2,7 @@
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using System;
+using WinUI.TableView.Columns;
 
 namespace WinUI.TableView;
 
@@ -12,7 +13,7 @@ namespace WinUI.TableView;
 #if WINDOWS
 [WinRT.GeneratedBindableCustomProperty]
 #endif
-public partial class TableViewCheckBoxColumn : TableViewBoundColumn
+public partial class TableViewCheckBoxColumn : TableViewBoundColumn, IDefaultTableViewColumn
 {
     /// <summary>
     /// Initializes a new instance of the TableViewCheckBoxColumn class.

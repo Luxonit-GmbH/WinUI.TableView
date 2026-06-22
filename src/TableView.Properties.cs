@@ -45,17 +45,27 @@ public partial class TableView
     /// <summary>
     /// Identifies the RowHeight dependency property.
     /// </summary>
-    public static readonly DependencyProperty RowHeightProperty = DependencyProperty.Register(nameof(RowHeight), typeof(double), typeof(TableView), new PropertyMetadata(double.NaN));
+    public static readonly DependencyProperty RowHeightProperty = DependencyProperty.Register(nameof(RowHeight), typeof(double), typeof(TableView), new PropertyMetadata(double.NaN, OnRowHeightPropertyChanged));
 
     /// <summary>
     /// Identifies the RowMaxHeight dependency property.
     /// </summary>
-    public static readonly DependencyProperty RowMaxHeightProperty = DependencyProperty.Register(nameof(RowMaxHeight), typeof(double), typeof(TableView), new PropertyMetadata(double.PositiveInfinity));
+    public static readonly DependencyProperty RowMaxHeightProperty = DependencyProperty.Register(nameof(RowMaxHeight), typeof(double), typeof(TableView), new PropertyMetadata(double.PositiveInfinity, OnRowHeightPropertyChanged));
 
     /// <summary>
     /// Identifies the RowMinHeight dependency property.
     /// </summary>
-    public static readonly DependencyProperty RowMinHeightProperty = DependencyProperty.Register(nameof(RowMinHeight), typeof(double), typeof(TableView), new PropertyMetadata(40d));
+    public static readonly DependencyProperty RowMinHeightProperty = DependencyProperty.Register(nameof(RowMinHeight), typeof(double), typeof(TableView), new PropertyMetadata(40d, OnRowHeightPropertyChanged));
+
+    /// <summary>
+    /// Identifies the CacheLength dependency property.
+    /// </summary>
+    public static readonly DependencyProperty CacheLengthProperty = DependencyProperty.Register(nameof(CacheLength), typeof(double), typeof(TableView), new PropertyMetadata(4d, OnCacheLengthChanged));
+
+    /// <summary>
+    /// Identifies the IsColumnVirtualizationEnabled dependency property.
+    /// </summary>
+    public static readonly DependencyProperty IsColumnVirtualizationEnabledProperty = DependencyProperty.Register(nameof(IsColumnVirtualizationEnabled), typeof(bool), typeof(TableView), new PropertyMetadata(false, OnIsColumnVirtualizationEnabledChanged));
 
     /// <summary>
     /// Identifies the ShowExportOptions dependency property.
@@ -508,6 +518,31 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets the size of the buffer of realized items kept outside the viewport, expressed as a multiple of the
+    /// viewport size. Lower values reduce the number of rows (and therefore cells) realized at startup and while
+    /// scrolling, at the cost of more realization work during fast scrolling. Defaults to 4.0, the framework default for
+    /// <see cref="ItemsStackPanel"/>.
+    /// </summary>
+    public double CacheLength
+    {
+        get => (double)GetValue(CacheLengthProperty);
+        set => SetValue(CacheLengthProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether cell content is generated lazily, only for columns within the
+    /// horizontal viewport (column virtualization). This dramatically reduces the number of cell elements created
+    /// for grids with many columns. Once generated, a cell's content is retained (it is not released on scroll).
+    /// Requires fixed or star sized columns — auto-sized columns need their content realized to measure their
+    /// width and will collapse when virtualized. Defaults to <see langword="false"/>.
+    /// </summary>
+    public bool IsColumnVirtualizationEnabled
+    {
+        get => (bool)GetValue(IsColumnVirtualizationEnabledProperty);
+        set => SetValue(IsColumnVirtualizationEnabledProperty, value);
+    }
+
+    /// <summary>
     ///  Gets or sets an object source used to generate the content of the TableView.
     /// </summary>
     public new object? ItemsSource
@@ -895,6 +930,50 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Handles changes to the CacheLength property.
+    /// </summary>
+    private static void OnCacheLengthChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            tableView.ApplyCacheLength();
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to RowHeight, RowMinHeight and RowMaxHeight by pushing the new values to the realized
+    /// rows' cells (cells use direct height values rather than per-cell bindings).
+    /// </summary>
+    private static void OnRowHeightPropertyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            foreach (var row in tableView._rows)
+            {
+                row.ApplyCellHeights();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the IsColumnVirtualizationEnabled property.
+    /// </summary>
+    private static void OnIsColumnVirtualizationEnabledChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            if (tableView.IsColumnVirtualizationEnabled)
+            {
+                tableView.RealizeVisibleCells();
+            }
+            else
+            {
+                tableView.RealizeAllCells();
+            }
+        }
+    }
+
+    /// <summary>
     /// Handles changes to the ShowExportOptions property.
     /// </summary>
     private static void OnShowExportOptionsChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -990,7 +1069,7 @@ public partial class TableView
     {
         if (d is TableView table && table._headerRow is not null)
         {
-            table._headerRow.CalculateHeaderWidths();
+            table._headerRow.InvalidateHeaderWidths();
         }
     }
 
@@ -1001,7 +1080,7 @@ public partial class TableView
     {
         if (d is TableView table && table._headerRow is not null)
         {
-            table._headerRow.CalculateHeaderWidths();
+            table._headerRow.InvalidateHeaderWidths();
         }
     }
 
@@ -1084,14 +1163,17 @@ public partial class TableView
     /// </summary>
     private static void OnHorizontalOffsetChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is TableView { _headerRow: { } } tableView)
+        if (d is TableView tableView)
         {
-            tableView._headerRow.InvalidateArrange();
+            // Pan via RenderTransform instead of re-running layout on the header + every row each tick.
+            tableView._headerRow?.ApplyHorizontalScroll();
 
             foreach (var row in tableView._rows)
             {
-                row?.RowPresenter?.InvalidateArrange();
+                row?.RowPresenter?.ApplyHorizontalScroll();
             }
+
+            tableView.RealizeVisibleCells();
         }
     }
 
