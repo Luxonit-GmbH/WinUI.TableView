@@ -722,15 +722,16 @@ public partial class TableViewCell : ContentControl
     /// <summary>
     /// Generates the cell's content if it was deferred by column virtualization. No-op once realized.
     /// </summary>
-    internal void EnsureContent()
+    internal bool EnsureContent()
     {
         if (!_contentPending)
         {
-            return;
+            return false;
         }
 
         _contentPending = false;
         SetElement();
+        return true;
     }
 
     /// <summary>
