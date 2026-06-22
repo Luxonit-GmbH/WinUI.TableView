@@ -563,18 +563,29 @@ public partial class TableView : ListView
         // Frozen columns are always within view.
         foreach (var column in Columns.VisibleFrozenColumns)
         {
-            presenter.GetCellForColumn(column)?.EnsureContent();
+            if (presenter.GetCellForColumn(column) is { } cell)
+            {
+                cell.SetInViewport(true);
+                cell.EnsureContent();
+            }
         }
 
-        if (range.First < 0)
-        {
-            return;
-        }
-
+        // Flag every scrollable cell in/out of the viewport. Off-screen cells then skip their (expensive) content
+        // measure even if their content was already realized (e.g. by idle prefetch) — this is what actually
+        // virtualizes the measure cost. Content is realized only for the cells in view.
         var scrollable = Columns.VisibleScrollableColumns;
-        for (var i = range.First; i <= range.Last && i < scrollable.Count; i++)
+        for (var i = 0; i < scrollable.Count; i++)
         {
-            presenter.GetCellForColumn(scrollable[i])?.EnsureContent();
+            if (presenter.GetCellForColumn(scrollable[i]) is { } cell)
+            {
+                var inView = range.First >= 0 && i >= range.First && i <= range.Last;
+                cell.SetInViewport(inView);
+
+                if (inView)
+                {
+                    cell.EnsureContent();
+                }
+            }
         }
     }
 
@@ -590,6 +601,7 @@ public partial class TableView : ListView
             {
                 foreach (var cell in presenter.Cells)
                 {
+                    cell.SetInViewport(true);
                     cell.EnsureContent();
                 }
             }
@@ -658,16 +670,16 @@ public partial class TableView : ListView
     }
 
     /// <summary>
-    /// Computes the inclusive index range of visible scrollable columns (with a small buffer) from the current
-    /// horizontal offset and viewport width. Returns (-1, -1) when the range cannot be determined yet (e.g. before
-    /// column widths are known), in which case only frozen columns should be realized.
-    /// </summary>
-    /// <summary>
     /// The cumulative right-edge offsets of the visible scrollable columns, used by <see cref="TableViewCellsPanel"/>
     /// to measure/arrange cells by column position. Returns an empty array when no columns or widths are known.
     /// </summary>
     internal double[] ScrollableColumnOffsets => (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
 
+    /// <summary>
+    /// Computes the inclusive index range of visible scrollable columns (with a small buffer) from the current
+    /// horizontal offset and viewport width. Returns (-1, -1) when the range cannot be determined yet (e.g. before
+    /// column widths are known), in which case only frozen columns should be realized.
+    /// </summary>
     internal (int First, int Last) GetVisibleScrollableRange()
     {
         if (_scrollViewer is null || _scrollViewer.ViewportWidth <= 0)

@@ -7,12 +7,12 @@ using WinUI.TableView.Extensions;
 namespace WinUI.TableView;
 
 /// <summary>
-/// Hosts a row's scrollable <see cref="TableViewCell"/>s. When column virtualization is enabled it measures only the
-/// cells whose columns fall within the horizontal viewport — off-screen cells are measured at zero width so their
-/// content subtree is not measured (the expensive part). Cells are always arranged at their column's cumulative
-/// offset, so the row's RenderTransform pans them and an off-screen cell still occupies the correct slot when it is
-/// later measured. When virtualization is off (or the column offsets are not yet available) it falls back to a
-/// horizontal StackPanel-equivalent layout.
+/// Hosts a row's scrollable <see cref="TableViewCell"/>s, sizing and positioning them by the cached cumulative
+/// column offsets. The horizontal measure-virtualization itself lives in <see cref="TableViewCell"/>: off-screen
+/// columns (flagged by RealizeVisibleCells) collapse their content and skip the expensive content measure. This
+/// panel always measures each cell at its full column width and arranges it at its column offset, so the row's
+/// clip and RenderTransform pan the cells exactly as before. When the offsets aren't yet available it falls back to
+/// a horizontal StackPanel-equivalent layout.
 /// </summary>
 public partial class TableViewCellsPanel : Panel
 {
@@ -29,13 +29,12 @@ public partial class TableViewCellsPanel : Panel
             return new Size(0, 0);
         }
 
-        var tableView = OwningTableView;
-        var offsets = tableView?.ScrollableColumnOffsets ?? [];
+        var offsets = OwningTableView?.ScrollableColumnOffsets ?? [];
         var height = double.IsInfinity(availableSize.Height) ? 0d : availableSize.Height;
 
-        // Fallback: no virtualization, or the offsets aren't ready / don't line up with the children. Measure every
-        // child the way a horizontal StackPanel would (each cell's explicit Width drives its desired width).
-        if (tableView is null || !tableView.IsColumnVirtualizationEnabled || offsets.Length != count)
+        // Offsets not ready / out of sync with the children: measure the way a horizontal StackPanel would (each
+        // cell's own Width drives its desired width).
+        if (offsets.Length != count)
         {
             var total = 0d;
             for (var i = 0; i < count; i++)
@@ -53,32 +52,19 @@ public partial class TableViewCellsPanel : Panel
             return new Size(total, height);
         }
 
-        var (first, last) = tableView.GetVisibleScrollableRange();
-
+        // Measure every cell at its column width. Off-screen cells collapse their own content internally, so this
+        // stays cheap for non-visible columns while still giving on-screen cells their real width.
         for (var i = 0; i < count; i++)
         {
             var width = offsets[i] - (i == 0 ? 0d : offsets[i - 1]);
-            var child = Children[i];
+            Children[i].Measure(new Size(width, availableSize.Height));
 
-            if (first >= 0 && i >= first && i <= last)
+            if (double.IsInfinity(availableSize.Height))
             {
-                child.Measure(new Size(width, availableSize.Height));
-
-                if (double.IsInfinity(availableSize.Height))
-                {
-                    height = Math.Max(height, child.DesiredSize.Height);
-                }
-            }
-            else
-            {
-                // Off-screen: zero available width makes the cell collapse its content presenter, so the content
-                // subtree is not measured. The cell still gets its real slot in ArrangeOverride.
-                child.Measure(new Size(0d, availableSize.Height));
+                height = Math.Max(height, Children[i].DesiredSize.Height);
             }
         }
 
-        // The panel spans the full scrollable width regardless of which cells were measured, so the row's clip and
-        // RenderTransform (which handle the actual horizontal scroll) behave exactly as before.
         return new Size(offsets[^1], height);
     }
 

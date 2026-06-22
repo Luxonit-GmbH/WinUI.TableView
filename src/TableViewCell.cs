@@ -33,6 +33,7 @@ public partial class TableViewCell : ContentControl
     private RoutedEventArgs? _editingArgs;
     private double _contentDesiredWidth = double.NaN;
     private bool _contentPending;
+    private bool _isInViewport = true;
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
@@ -121,12 +122,13 @@ public partial class TableViewCell : ContentControl
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
-        // The cells panel measures off-screen (non-visible) columns with zero available width. Treat that as
-        // "skip content": collapse the content presenter so its subtree isn't measured, and return cheaply. The
-        // cell is still arranged in its column slot and is re-measured at full width (content restored) when it
-        // scrolls into view. Without this, ConstrainContent would size the content from Column.ActualWidth and
-        // measure the full content subtree anyway, defeating horizontal measure-virtualization.
-        if (availableSize.Width <= 0 && _contentPresenter is not null)
+        // Horizontal measure-virtualization: when the cell's column is outside the viewport (set by
+        // RealizeVisibleCells), collapse the content presenter so its subtree is NOT measured — this is the
+        // expensive part, and it's skipped even when the content has already been realized (e.g. by prefetch).
+        // The cell still occupies its column slot, and SetInViewport(true) re-measures it (content restored)
+        // when it scrolls into view. We key off this flag rather than availableSize because ConstrainContent
+        // sizes the content from Column.ActualWidth and would otherwise measure the full subtree regardless.
+        if (!_isInViewport && _contentPresenter is not null && TableView?.IsColumnVirtualizationEnabled is true)
         {
             _contentPresenter.Visibility = Visibility.Collapsed;
             return base.MeasureOverride(availableSize);
@@ -742,6 +744,22 @@ public partial class TableViewCell : ContentControl
         _contentPending = false;
         SetElement();
         return true;
+    }
+
+    /// <summary>
+    /// Sets whether this cell's column is currently within the horizontal viewport. When it leaves the viewport the
+    /// cell collapses its content (skipping the content measure on subsequent passes); when it re-enters, the content
+    /// is restored. Only meaningful while <see cref="WinUI.TableView.TableView.IsColumnVirtualizationEnabled"/> is set.
+    /// </summary>
+    internal void SetInViewport(bool value)
+    {
+        if (_isInViewport == value)
+        {
+            return;
+        }
+
+        _isInViewport = value;
+        InvalidateMeasure();
     }
 
     /// <summary>
