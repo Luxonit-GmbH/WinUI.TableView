@@ -314,6 +314,25 @@ public partial class TableViewHeaderRow : Control
 
             var height = ActualHeight;
             var availableWidth = TableView.ActualWidth - 32;
+
+            // For AutoSizeMinWidth columns, measure the header unconstrained so its natural width is current.
+            foreach (var column in allColumns)
+            {
+                if (column.AutoSizeMinWidth && column.HeaderControl is { } autoMinHeader)
+                {
+                    autoMinHeader.Measure(new Size(double.PositiveInfinity, height));
+                }
+            }
+
+            // Effective minimum width: the configured MinWidth, plus (when AutoSizeMinWidth is on) the header's
+            // natural width and the accumulated first-render content width, so neither is clipped.
+            double MinWidthFor(TableViewColumn column, TableViewColumnHeader header)
+            {
+                var min = column.MinWidth ?? TableView.MinColumnWidth;
+                return column.AutoSizeMinWidth
+                    ? Math.Max(min, Math.Max(header.DesiredSize.Width, column.AutoMinWidth))
+                    : min;
+            }
             var starUnitWeight = starColumns.Select(x => x.Width.Value).Sum();
             var fixedWidth = autoColumns.Select(x =>
             {
@@ -341,7 +360,7 @@ public partial class TableViewHeaderRow : Control
                     if (column.HeaderControl is { } header)
                     {
                         var width = starUnitWidth * column.Width.Value;
-                        var minWidth = column.MinWidth ?? TableView.MinColumnWidth;
+                        var minWidth = MinWidthFor(column, header);
                         var maxWidth = column.MaxWidth ?? TableView.MaxColumnWidth;
 
                         width = width < minWidth ? minWidth : width;
@@ -371,7 +390,7 @@ public partial class TableViewHeaderRow : Control
                                 : column.Width.IsAbsolute ? column.Width.Value
                                 : Math.Max(header.DesiredSize.Width, column.DesiredWidth);
 
-                    var minWidth = column.MinWidth ?? TableView.MinColumnWidth;
+                    var minWidth = MinWidthFor(column, header);
                     var maxWidth = column.MaxWidth ?? TableView.MaxColumnWidth;
 
                     width = width < minWidth ? minWidth : width;
