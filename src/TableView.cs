@@ -45,7 +45,8 @@ public partial class TableView : ListView
     private (int First, int Last) _lastRealizedRange = (-2, -2);
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _realizeSettleTimer; // debounces realize until horizontal scroll settles
     private const double HorizontalScrollSettleMs = 50; // ms of no horizontal movement before realizing the visible band
-    private bool _prefetchScheduled;
+    private int _realizeGeneration; // bumped on every scroll; an in-flight chunked realize aborts when it changes
+    private const int RealizeRowChunkSize = 8; // rows realized per dispatcher turn (keeps the settle realize off-frame)
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
@@ -519,6 +520,10 @@ public partial class TableView : ListView
             return;
         }
 
+        // A new scroll supersedes any in-flight chunked realize — bump the generation so it aborts (instead of
+        // grinding through a band you've already scrolled away from).
+        _realizeGeneration++;
+
         // Debounce realization until the horizontal offset settles. A scrollbar drag fires a continuous stream of
         // offset changes; realizing each would create + measure every column it sweeps past (brutal the first time,
         // since content is generated then). The transform pan keeps the drag smooth meanwhile; only once scrolling has
@@ -529,10 +534,6 @@ public partial class TableView : ListView
         _realizeSettleTimer ??= CreateRealizeSettleTimer();
         _realizeSettleTimer.Stop();
         _realizeSettleTimer.Start();
-
-        // Progressively realize the remaining off-screen cells during idle, so later scrolls land on cells that are
-        // already materialized and never pay the first-measure cost on the scroll path.
-        SchedulePrefetch();
     }
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateRealizeSettleTimer()
@@ -540,20 +541,47 @@ public partial class TableView : ListView
         var timer = DispatcherQueue.CreateTimer();
         timer.Interval = TimeSpan.FromMilliseconds(HorizontalScrollSettleMs);
         timer.IsRepeating = false;
-        timer.Tick += (_, _) =>
-        {
-            var wide = GetVisibleScrollableRange(ColumnCacheLength);
-            if (wide.First >= 0 && wide != _lastRealizedRange)
-            {
-                _lastRealizedRange = wide;
-
-                foreach (var row in _rows)
-                {
-                    RealizeRowCells(row, wide);
-                }
-            }
-        };
+        timer.Tick += (_, _) => StartBandRealize();
         return timer;
+    }
+
+    /// <summary>
+    /// Realizes the settled visible band across rows in small chunks (one chunk per dispatcher turn) so it never
+    /// blocks a frame, and aborts mid-way if a newer scroll bumps the generation — so reaching the end of a fast
+    /// scroll doesn't grind through creating columns the user has already left.
+    /// </summary>
+    private void StartBandRealize()
+    {
+        var wide = GetVisibleScrollableRange(ColumnCacheLength);
+        if (wide.First < 0 || wide == _lastRealizedRange)
+        {
+            return;
+        }
+
+        RealizeRowChunk(wide, _realizeGeneration, [.. _rows], 0);
+    }
+
+    private void RealizeRowChunk((int First, int Last) range, int generation, TableViewRow[] rows, int start)
+    {
+        if (generation != _realizeGeneration)
+        {
+            return; // superseded by a newer scroll — abandon this band
+        }
+
+        var end = Math.Min(start + RealizeRowChunkSize, rows.Length);
+        for (var i = start; i < end; i++)
+        {
+            RealizeRowCells(rows[i], range);
+        }
+
+        if (end < rows.Length)
+        {
+            DispatcherQueue.TryEnqueue(() => RealizeRowChunk(range, generation, rows, end));
+        }
+        else
+        {
+            _lastRealizedRange = range; // band fully realized
+        }
     }
 
     /// <summary>
@@ -572,7 +600,6 @@ public partial class TableView : ListView
         // other row. Falls back to computing the band when none has been established yet (early load).
         var range = _lastRealizedRange.First >= 0 ? _lastRealizedRange : GetVisibleScrollableRange(ColumnCacheLength);
         RealizeRowCells(row, range);
-        SchedulePrefetch();
     }
 
     private void RealizeRowCells(TableViewRow row, (int First, int Last) range)
@@ -630,66 +657,6 @@ public partial class TableView : ListView
         }
     }
 
-    /// <summary>
-    /// Schedules a Low-priority (idle) pass that progressively realizes still-deferred (off-screen) cells a small
-    /// budget at a time, until none remain — warming up off-screen columns during idle gaps so horizontal scrolling
-    /// lands on already-materialized cells. The Low priority yields to input/render/data work, and the bounded
-    /// budget keeps each pass to a fraction of a frame. Coalesced; no-op unless virtualization is enabled.
-    /// </summary>
-    private void SchedulePrefetch()
-    {
-        if (!IsColumnVirtualizationEnabled || _prefetchScheduled)
-        {
-            return;
-        }
-
-        _prefetchScheduled = true;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, PrefetchStep);
-    }
-
-    private void PrefetchStep()
-    {
-        _prefetchScheduled = false;
-
-        if (!IsColumnVirtualizationEnabled)
-        {
-            return;
-        }
-
-        const int budget = 12; // small chunk; Low priority yields the thread between chunks
-        var realized = 0;
-
-        foreach (var row in _rows)
-        {
-            if (row.RowPresenter is not { } presenter)
-            {
-                continue;
-            }
-
-            foreach (var cell in presenter.Cells)
-            {
-                if (cell.EnsureContent())
-                {
-                    realized++;
-                }
-
-                if (realized >= budget)
-                {
-                    break;
-                }
-            }
-
-            if (realized >= budget)
-            {
-                break;
-            }
-        }
-
-        if (realized > 0)
-        {
-            SchedulePrefetch(); // more deferred cells remain — continue on the next idle tick
-        }
-    }
 
     /// <summary>
     /// The cumulative right-edge offsets of the visible scrollable columns, used by <see cref="TableViewCellsPanel"/>
