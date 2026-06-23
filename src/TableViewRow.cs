@@ -162,7 +162,10 @@ public partial class TableViewRow : ListViewItem
         }
 
         RowPresenter?.InvalidateMeasure(); // The cells presenter does not measure every time.
-        TableView?.EnsureAlternateRowColors();
+
+        // On recycle only THIS row's index (and therefore its alternate color) changed — re-color just this row,
+        // synchronously and O(1), instead of enqueuing a full-grid re-color pass on every recycled container.
+        EnsureAlternateColors();
     }
 
     /// <inheritdoc/>

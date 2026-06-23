@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Diagnostics;
@@ -38,10 +39,14 @@ public partial class TableView : ListView
     private bool _shouldThrowSelectionModeChangedException;
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
+    private bool _settingBaseItemsSource; // allows TableView to assign the inherited ItemsSource (otherwise guarded)
+    private IEnumerable? _directSource; // the raw source bound straight to the ListView when UseCollectionView is false
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
-    private bool _realizePending;
-    private bool _prefetchScheduled;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _realizeSettleTimer; // debounces realize until horizontal scroll settles
+    private const double HorizontalScrollSettleMs = 50; // ms of no horizontal movement before realizing the visible band
+    private int _realizeGeneration; // bumped on every scroll; an in-flight chunked realize aborts when it changes
+    private const int RealizeRowChunkSize = 8; // rows realized per dispatcher turn (keeps the settle realize off-frame)
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
@@ -316,7 +321,7 @@ public partial class TableView : ListView
         }
         else if (e.Key is VirtualKey.Home or VirtualKey.End)
         {
-            var row = ctrlKey ? (e.Key == VirtualKey.Home ? 0 : _collectionView.Count - 1) : CurrentCellSlot?.Row;
+            var row = ctrlKey ? (e.Key == VirtualKey.Home ? 0 : Items.Count - 1) : CurrentCellSlot?.Row;
             var column = e.Key == VirtualKey.Home ? 0 : Columns.VisibleColumns.Count - 1;
 
             var newSlot = new TableViewCellSlot(row ?? -1, column);
@@ -330,7 +335,7 @@ public partial class TableView : ListView
             var row = (LastSelectionUnit is TableViewSelectionUnit.Row ? CurrentRowIndex : CurrentCellSlot?.Row) ?? -1;
             var column = CurrentCellSlot?.Column ?? -1;
 
-            var numRows = CollectionView.Count;
+            var numRows = Items.Count;
             var nextRow = e.Key == VirtualKey.PageDown
                 ? Math.Min(numRows - 1, row + pageSize)
                 : Math.Max(0, row - pageSize);
@@ -515,41 +520,68 @@ public partial class TableView : ListView
             return;
         }
 
-        // Hysteresis: we realize a band that extends ColumnPreloadViewports viewports of columns past the visible
-        // window on each side. While the on-screen columns stay comfortably inside that band, scrolling needs NO
-        // layout at all — the transform pan alone keeps it smooth. We only re-realize when the viewport drifts
-        // within half the band of an edge, which still leaves a margin of realized columns ahead (so nothing turns
-        // white) and happens far less often than once per frame. The re-realize runs off the scroll frame.
-        var trigger = GetVisibleScrollableRange(ColumnCacheLength * 0.5);
-        var band = _lastRealizedRange;
-        var covered = band.First >= 0
-                      && trigger.First >= 0
-                      && trigger.First >= band.First
-                      && trigger.Last <= band.Last;
+        // A new scroll supersedes any in-flight chunked realize — bump the generation so it aborts (instead of
+        // grinding through a band you've already scrolled away from).
+        _realizeGeneration++;
 
-        if (!covered && !_realizePending)
+        // Debounce realization until the horizontal offset settles. A scrollbar drag fires a continuous stream of
+        // offset changes; realizing each would create + measure every column it sweeps past (brutal the first time,
+        // since content is generated then). The transform pan keeps the drag smooth meanwhile; only once scrolling has
+        // been quiet for the settle window do we realize the final visible band. A real timer WAITS (no busy spin —
+        // the earlier reschedule approach hammered the dispatcher), and is reset only on scroll (RealizeVisibleCells
+        // isn't called on data updates), so the 8000/s stream never holds it off. Wheel/slow scroll leave gaps wider
+        // than the window, so they realize promptly.
+        _realizeSettleTimer ??= CreateRealizeSettleTimer();
+        _realizeSettleTimer.Stop();
+        _realizeSettleTimer.Start();
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateRealizeSettleTimer()
+    {
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(HorizontalScrollSettleMs);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => StartBandRealize();
+        return timer;
+    }
+
+    /// <summary>
+    /// Realizes the settled visible band across rows in small chunks (one chunk per dispatcher turn) so it never
+    /// blocks a frame, and aborts mid-way if a newer scroll bumps the generation — so reaching the end of a fast
+    /// scroll doesn't grind through creating columns the user has already left.
+    /// </summary>
+    private void StartBandRealize()
+    {
+        var wide = GetVisibleScrollableRange(ColumnCacheLength);
+        if (wide.First < 0 || wide == _lastRealizedRange)
         {
-            _realizePending = true;
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                _realizePending = false;
-
-                var wide = GetVisibleScrollableRange(ColumnCacheLength);
-                if (wide.First >= 0 && wide != _lastRealizedRange)
-                {
-                    _lastRealizedRange = wide;
-
-                    foreach (var row in _rows)
-                    {
-                        RealizeRowCells(row, wide);
-                    }
-                }
-            });
+            return;
         }
 
-        // Then progressively realize the remaining off-screen cells during idle, so later scrolls land on cells
-        // that are already materialized and never pay the first-measure cost on the scroll path.
-        SchedulePrefetch();
+        RealizeRowChunk(wide, _realizeGeneration, [.. _rows], 0);
+    }
+
+    private void RealizeRowChunk((int First, int Last) range, int generation, TableViewRow[] rows, int start)
+    {
+        if (generation != _realizeGeneration)
+        {
+            return; // superseded by a newer scroll — abandon this band
+        }
+
+        var end = Math.Min(start + RealizeRowChunkSize, rows.Length);
+        for (var i = start; i < end; i++)
+        {
+            RealizeRowCells(rows[i], range);
+        }
+
+        if (end < rows.Length)
+        {
+            DispatcherQueue.TryEnqueue(() => RealizeRowChunk(range, generation, rows, end));
+        }
+        else
+        {
+            _lastRealizedRange = range; // band fully realized
+        }
     }
 
     /// <summary>
@@ -568,7 +600,6 @@ public partial class TableView : ListView
         // other row. Falls back to computing the band when none has been established yet (early load).
         var range = _lastRealizedRange.First >= 0 ? _lastRealizedRange : GetVisibleScrollableRange(ColumnCacheLength);
         RealizeRowCells(row, range);
-        SchedulePrefetch();
     }
 
     private void RealizeRowCells(TableViewRow row, (int First, int Last) range)
@@ -626,72 +657,35 @@ public partial class TableView : ListView
         }
     }
 
-    /// <summary>
-    /// Schedules a Low-priority (idle) pass that progressively realizes still-deferred (off-screen) cells a small
-    /// budget at a time, until none remain — warming up off-screen columns during idle gaps so horizontal scrolling
-    /// lands on already-materialized cells. The Low priority yields to input/render/data work, and the bounded
-    /// budget keeps each pass to a fraction of a frame. Coalesced; no-op unless virtualization is enabled.
-    /// </summary>
-    private void SchedulePrefetch()
-    {
-        if (!IsColumnVirtualizationEnabled || _prefetchScheduled)
-        {
-            return;
-        }
-
-        _prefetchScheduled = true;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, PrefetchStep);
-    }
-
-    private void PrefetchStep()
-    {
-        _prefetchScheduled = false;
-
-        if (!IsColumnVirtualizationEnabled)
-        {
-            return;
-        }
-
-        const int budget = 12; // small chunk; Low priority yields the thread between chunks
-        var realized = 0;
-
-        foreach (var row in _rows)
-        {
-            if (row.RowPresenter is not { } presenter)
-            {
-                continue;
-            }
-
-            foreach (var cell in presenter.Cells)
-            {
-                if (cell.EnsureContent())
-                {
-                    realized++;
-                }
-
-                if (realized >= budget)
-                {
-                    break;
-                }
-            }
-
-            if (realized >= budget)
-            {
-                break;
-            }
-        }
-
-        if (realized > 0)
-        {
-            SchedulePrefetch(); // more deferred cells remain — continue on the next idle tick
-        }
-    }
 
     /// <summary>
     /// The cumulative right-edge offsets of the visible scrollable columns, used by <see cref="TableViewCellsPanel"/>
     /// to measure/arrange cells by column position. Returns an empty array when no columns or widths are known.
     /// </summary>
     internal double[] ScrollableColumnOffsets => (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
+
+    /// <summary>
+    /// The horizontal-scroll clip rect shared (by value) across every row's scrollable cells panel, recomputed once
+    /// per offset change in <see cref="UpdateCellsClipRect"/>. Null when not scrolled or when the row height isn't
+    /// fixed (rows then compute their own clip from their panel). See <see cref="TableViewRowPresenter.ApplyHorizontalScroll"/>.
+    /// </summary>
+    internal Rect? CellsClipRect { get; private set; }
+
+    /// <summary>
+    /// Recomputes <see cref="CellsClipRect"/> from the current horizontal offset. Rows are uniform (same scrollable
+    /// width and row height), so the clip is identical for all of them and need only be built once per offset change
+    /// rather than per row. Only precomputed for a fixed RowHeight; otherwise rows fall back to per-row computation.
+    /// </summary>
+    private void UpdateCellsClipRect()
+    {
+        var h = HorizontalOffset;
+        var offsets = ScrollableColumnOffsets;
+        var width = offsets.Length > 0 ? offsets[^1] : 0d;
+
+        CellsClipRect = h > 0 && width > h && !double.IsNaN(RowHeight)
+            ? new Rect(h, 0, width - h, RowHeight)
+            : null;
+    }
 
     /// <summary>
     /// Computes the inclusive index range of visible scrollable columns (with a small buffer) from the current
@@ -820,7 +814,12 @@ public partial class TableView : ListView
         }
 
         _collectionView.ItemPropertyChanged -= OnItemPropertyChanged;
+        DetachDirectSource();
+
+        // In direct mode detach the raw source from the ListView too, so nothing is held / processed while unloaded.
+        SetBaseItemsSource(_collectionView);
         _collectionView.Source = Enumerable.Empty<object>();
+
         _isItemsSourceSuspended = true;
     }
 
@@ -835,13 +834,94 @@ public partial class TableView : ListView
         }
 
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
+        _isItemsSourceSuspended = false;
 
         if (ItemsSource is IEnumerable source)
         {
-            _collectionView.Source = source;
+            ApplyEffectiveItemsSource(source);
+        }
+    }
+
+    /// <summary>
+    /// Routes the consumer's items source to the underlying ListView. When <see cref="UseCollectionView"/> is true
+    /// (default) it goes through the internal <see cref="WinUI.TableView.CollectionView"/> (sorting/filtering/grouping,
+    /// which keeps a full copy of the source). When false the raw source is bound directly, so the ListView
+    /// virtualizes straight over it with no intermediate copy — essential for very large / data-virtualized sources
+    /// and high-frequency collection changes. In direct mode the built-in sort/filter/group is inert.
+    /// </summary>
+    private void ApplyEffectiveItemsSource(IEnumerable? source)
+    {
+        if (UseCollectionView)
+        {
+            DetachDirectSource();
+            SetBaseItemsSource(_collectionView);
+
+            using var defer = _collectionView.DeferRefresh();
+            _collectionView.Source = source ?? Enumerable.Empty<object>();
+        }
+        else
+        {
+            AttachDirectSource(source);
+            SetBaseItemsSource(source);
+            _collectionView.Source = Enumerable.Empty<object>(); // release the copy now the ListView is on the raw source
+        }
+    }
+
+    /// <summary>
+    /// Assigns the inherited ListView <see cref="ItemsControl.ItemsSource"/> from within the control, bypassing the
+    /// guard in <see cref="OnBaseItemsSourceChanged"/> that blocks external writes.
+    /// </summary>
+    private void SetBaseItemsSource(object? value)
+    {
+        if (ReferenceEquals(base.ItemsSource, value))
+        {
+            return;
         }
 
-        _isItemsSourceSuspended = false;
+        _settingBaseItemsSource = true;
+        try
+        {
+            base.ItemsSource = value;
+        }
+        finally
+        {
+            _settingBaseItemsSource = false;
+        }
+    }
+
+    /// <summary>
+    /// In direct mode, watches the raw source for collection changes so realized rows refresh their cached index
+    /// (the internal CollectionView's VectorChanged does this in CollectionView mode).
+    /// </summary>
+    private void AttachDirectSource(IEnumerable? source)
+    {
+        if (ReferenceEquals(_directSource, source))
+        {
+            return;
+        }
+
+        DetachDirectSource();
+        _directSource = source;
+
+        if (source is INotifyCollectionChanged ncc)
+        {
+            ncc.CollectionChanged += OnDirectSourceCollectionChanged;
+        }
+    }
+
+    private void DetachDirectSource()
+    {
+        if (_directSource is INotifyCollectionChanged ncc)
+        {
+            ncc.CollectionChanged -= OnDirectSourceCollectionChanged;
+        }
+
+        _directSource = null;
+    }
+
+    private void OnDirectSourceCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        InvalidateRowIndices();
     }
 
     /// <summary>
@@ -1209,17 +1289,16 @@ public partial class TableView : ListView
     {
         DetailsPaneStates.Clear();
 
-        using var defer = _collectionView.DeferRefresh();
-        _collectionView.Source = null!;
+        var source = e.NewValue as IEnumerable;
 
-        if (e.NewValue is IEnumerable source)
+        if (source is not null)
         {
             EnsureAutoColumns();
+        }
 
-            if (!_isItemsSourceSuspended)
-            {
-                _collectionView.Source = source;
-            }
+        if (!_isItemsSourceSuspended)
+        {
+            ApplyEffectiveItemsSource(source);
         }
     }
 
