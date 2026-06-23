@@ -697,6 +697,29 @@ public partial class TableView : ListView
     internal double[] ScrollableColumnOffsets => (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
 
     /// <summary>
+    /// The horizontal-scroll clip rect shared (by value) across every row's scrollable cells panel, recomputed once
+    /// per offset change in <see cref="UpdateCellsClipRect"/>. Null when not scrolled or when the row height isn't
+    /// fixed (rows then compute their own clip from their panel). See <see cref="TableViewRowPresenter.ApplyHorizontalScroll"/>.
+    /// </summary>
+    internal Rect? CellsClipRect { get; private set; }
+
+    /// <summary>
+    /// Recomputes <see cref="CellsClipRect"/> from the current horizontal offset. Rows are uniform (same scrollable
+    /// width and row height), so the clip is identical for all of them and need only be built once per offset change
+    /// rather than per row. Only precomputed for a fixed RowHeight; otherwise rows fall back to per-row computation.
+    /// </summary>
+    private void UpdateCellsClipRect()
+    {
+        var h = HorizontalOffset;
+        var offsets = ScrollableColumnOffsets;
+        var width = offsets.Length > 0 ? offsets[^1] : 0d;
+
+        CellsClipRect = h > 0 && width > h && !double.IsNaN(RowHeight)
+            ? new Rect(h, 0, width - h, RowHeight)
+            : null;
+    }
+
+    /// <summary>
     /// Computes the inclusive index range of visible scrollable columns (with a small buffer) from the current
     /// horizontal offset and viewport width. Returns (-1, -1) when the range cannot be determined yet (e.g. before
     /// column widths are known), in which case only frozen columns should be realized.

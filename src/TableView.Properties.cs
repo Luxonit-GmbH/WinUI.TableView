@@ -1226,12 +1226,14 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
-            // Pan via RenderTransform instead of re-running layout on the header + every row each tick.
+            // Pan via RenderTransform instead of re-running layout on the header + every row each tick. The clip is
+            // identical for all uniform rows, so compute it once here and let each row reuse the value.
+            tableView.UpdateCellsClipRect();
             tableView._headerRow?.ApplyHorizontalScroll();
 
             foreach (var row in tableView._rows)
             {
-                row?.RowPresenter?.ApplyHorizontalScroll();
+                row?.RowPresenter?.ApplyHorizontalScroll(useCachedClip: true);
             }
 
             tableView.RealizeVisibleCells();

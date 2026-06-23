@@ -176,7 +176,12 @@ public partial class TableViewRowPresenter : Control
     /// RenderTransform plus a clip, instead of re-arranging the row. Called from <see cref="ArrangeOverride"/> and
     /// directly on HorizontalOffset changes, so horizontal scrolling does not trigger a layout pass per row.
     /// </summary>
-    internal void ApplyHorizontalScroll()
+    /// <param name="useCachedClip">
+    /// On the per-tick horizontal-scroll path the clip rect is identical for every (uniform) row, so the TableView
+    /// computes it once and rows reuse that value here — skipping a per-row panel size read + rect rebuild. The
+    /// arrange / column-resize / auto-row-height paths pass <see langword="false"/> to compute from this panel.
+    /// </param>
+    internal void ApplyHorizontalScroll(bool useCachedClip = false)
     {
         if (TableView is null)
         {
@@ -202,7 +207,9 @@ public partial class TableViewRowPresenter : Control
             else
             {
                 _scrollableCellsClip ??= new RectangleGeometry();
-                _scrollableCellsClip.Rect = new(h, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - h), _scrollableCellsPanel.ActualHeight);
+                _scrollableCellsClip.Rect = useCachedClip && TableView.CellsClipRect is { } cached
+                    ? cached
+                    : new(h, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - h), _scrollableCellsPanel.ActualHeight);
                 _scrollableCellsPanel.Clip = _scrollableCellsClip;
             }
         }
