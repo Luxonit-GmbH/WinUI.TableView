@@ -44,6 +44,8 @@ public partial class TableView : ListView
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
     private bool _realizePending;
+    private long _lastHorizontalScrollTick; // wall-clock of the last horizontal-offset change; gates settle-based realize
+    private const long HorizontalScrollSettleMs = 32; // ~2 frames of no horizontal movement before realizing the band
     private bool _prefetchScheduled;
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
@@ -518,6 +520,14 @@ public partial class TableView : ListView
             return;
         }
 
+        // A realize is already queued (waiting for the scroll to settle): skip the per-tick visible-range
+        // computation — the latest range is read when it finally realizes.
+        if (_realizePending)
+        {
+            SchedulePrefetch();
+            return;
+        }
+
         // Hysteresis: we realize a band that extends ColumnPreloadViewports viewports of columns past the visible
         // window on each side. While the on-screen columns stay comfortably inside that band, scrolling needs NO
         // layout at all — the transform pan alone keeps it smooth. We only re-realize when the viewport drifts
@@ -533,26 +543,45 @@ public partial class TableView : ListView
         if (!covered && !_realizePending)
         {
             _realizePending = true;
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                _realizePending = false;
-
-                var wide = GetVisibleScrollableRange(ColumnCacheLength);
-                if (wide.First >= 0 && wide != _lastRealizedRange)
-                {
-                    _lastRealizedRange = wide;
-
-                    foreach (var row in _rows)
-                    {
-                        RealizeRowCells(row, wide);
-                    }
-                }
-            });
+            ScheduleRealizeWhenSettled();
         }
 
         // Then progressively realize the remaining off-screen cells during idle, so later scrolls land on cells
         // that are already materialized and never pay the first-measure cost on the scroll path.
         SchedulePrefetch();
+    }
+
+    /// <summary>
+    /// Realizes the visible band once the horizontal offset has settled. Dragging the scrollbar fires a continuous
+    /// stream of offset changes; realizing each intermediate position would create + measure every column the drag
+    /// sweeps past (brutal the first time, since content is generated then). Instead we wait out a short settle window
+    /// — the transform pan keeps the drag smooth meanwhile — and then realize only the final visible band. Slow
+    /// scrolling and the mouse wheel leave gaps wider than the window, so they realize as they go. Keyed solely on the
+    /// scroll tick, so the steady stream of data updates never holds this off.
+    /// </summary>
+    private void ScheduleRealizeWhenSettled()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (Environment.TickCount64 - _lastHorizontalScrollTick < HorizontalScrollSettleMs)
+            {
+                ScheduleRealizeWhenSettled();
+                return;
+            }
+
+            _realizePending = false;
+
+            var wide = GetVisibleScrollableRange(ColumnCacheLength);
+            if (wide.First >= 0 && wide != _lastRealizedRange)
+            {
+                _lastRealizedRange = wide;
+
+                foreach (var row in _rows)
+                {
+                    RealizeRowCells(row, wide);
+                }
+            }
+        });
     }
 
     /// <summary>

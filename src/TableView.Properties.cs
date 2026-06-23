@@ -1226,6 +1226,11 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            // Record the moment of this horizontal move so the realize pass can wait for the drag to settle before
+            // materializing columns (see ScheduleRealizeWhenSettled) — a fast scrollbar drag otherwise creates every
+            // column it sweeps past.
+            tableView._lastHorizontalScrollTick = Environment.TickCount64;
+
             // Pan via RenderTransform instead of re-running layout on the header + every row each tick. The clip is
             // identical for all uniform rows, so compute it once here and let each row reuse the value.
             tableView.UpdateCellsClipRect();
