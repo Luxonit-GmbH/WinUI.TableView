@@ -18,6 +18,7 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
 {
     private TableViewColumn[] _itemsCopy = []; // To keep a copy of the items to keep track of removed items
     private bool _movingColumn;
+    private bool _suspendNotifications; // batches AddRange/Reset: the per-item events are coalesced into one
 
     /// <inheritdoc/>
     public event EventHandler<TableViewColumnPropertyChangedEventArgs>? ColumnPropertyChanged;
@@ -52,7 +53,13 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
 
         if (_movingColumn) return; // Skip processing if it's a move action
 
-        UpdateFrozenColumns();
+        // During a batch (AddRange/Reset) the frozen refresh, snapshot and the collection-changed event are deferred
+        // and performed once by the batch method; here we keep only the per-item owner wiring (and cache reset above)
+        // so the columns are immediately usable.
+        if (!_suspendNotifications)
+        {
+            UpdateFrozenColumns();
+        }
 
         var index = (int)args.Index;
 
@@ -64,7 +71,7 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
                     var column = (TableViewColumn)sender[index];
                     column.SetOwningCollection(this);
                     column.SetOwningTableView(((ITableViewColumnsCollection)this).TableView!);
-                    CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Add, column, (int)args.Index));
+                    RaiseCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Add, column, (int)args.Index));
                 }
                 break;
             case CollectionChange.ItemRemoved:
@@ -73,7 +80,7 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
                     var column = _itemsCopy[index];
                     column.SetOwningCollection(null!);
                     column.SetOwningTableView(null!);
-                    CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Remove, column, (int)args.Index));
+                    RaiseCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Remove, column, (int)args.Index));
                 }
                 break;
             case CollectionChange.Reset:
@@ -81,13 +88,30 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
                 {
                     item.SetOwningCollection(null!);
                     item.SetOwningTableView(null!);
-                    CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
                 }
+                // A reset is a single notification, not one per removed item.
+                RaiseCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
                 break;
         }
 
-        _itemsCopy = new TableViewColumn[Count];
-        CopyTo(_itemsCopy, 0);
+        if (!_suspendNotifications)
+        {
+            _itemsCopy = new TableViewColumn[Count];
+            CopyTo(_itemsCopy, 0);
+        }
+    }
+
+    /// <summary>
+    /// Raises <see cref="CollectionChanged"/> unless notifications are currently suspended for a batch operation
+    /// (see <see cref="AddRange"/> and <see cref="Reset"/>), in which case a single coalesced notification is raised
+    /// by the batch method once it completes.
+    /// </summary>
+    /// <param name="args">The change details to report to subscribers.</param>
+    private void RaiseCollectionChanged(NotifyCollectionChangedEventArgs args)
+    {
+        if (_suspendNotifications) return;
+
+        CollectionChanged?.Invoke(this, args);
     }
 
     internal void UpdateFrozenColumns()
@@ -111,6 +135,10 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
             // These change the cumulative scrollable-column offsets used by horizontal virtualization.
             _visibleScrollableColumnOffsetsCached = null;
         }
+
+        // A batch operation refreshes frozen state wholesale and raises a single CollectionChanged at the end, so
+        // the per-column notifications it would otherwise trigger are suppressed here.
+        if (_suspendNotifications) return;
 
         if (Contains(column) && !_movingColumn)
         {
@@ -306,8 +334,84 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
         Insert(newIndex, column);
 
         UpdateFrozenColumns();
-        CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Move, column, newIndex, oldIndex));
+        RaiseCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Move, column, newIndex, oldIndex));
 
         _movingColumn = false;
+    }
+
+    /// <inheritdoc/>
+    public void AddRange(IEnumerable<TableViewColumn> columns)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+
+        // Materialize and validate up front so an invalid item cannot leave a partially populated, un-notified
+        // collection behind.
+        var added = columns.ToList();
+        foreach (var column in added)
+        {
+            ArgumentNullException.ThrowIfNull(column, nameof(columns));
+        }
+
+        if (added.Count == 0) return;
+
+        var startIndex = Count;
+
+        _suspendNotifications = true;
+        try
+        {
+            foreach (var column in added)
+            {
+                Add(column);
+            }
+
+            // Apply the deferred per-item work once for the whole batch, while still suspended so it raises no
+            // intermediate notifications. Frozen state must be correct before subscribers read it below.
+            UpdateFrozenColumns();
+            _itemsCopy = new TableViewColumn[Count];
+            CopyTo(_itemsCopy, 0);
+        }
+        finally
+        {
+            _suspendNotifications = false;
+        }
+
+        // One notification for the whole range. Subscribers (header row, rows) iterate NewItems, so the added
+        // columns are realized incrementally rather than rebuilt.
+        RaiseCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Add, added, startIndex));
+    }
+
+    /// <inheritdoc/>
+    public void Reset(IEnumerable<TableViewColumn> columns)
+    {
+        ArgumentNullException.ThrowIfNull(columns);
+
+        // Materialize and validate up front so an invalid item cannot clear the collection without repopulating it.
+        var newColumns = columns.ToList();
+        foreach (var column in newColumns)
+        {
+            ArgumentNullException.ThrowIfNull(column, nameof(columns));
+        }
+
+        _suspendNotifications = true;
+        try
+        {
+            Clear();
+
+            foreach (var column in newColumns)
+            {
+                Add(column);
+            }
+
+            UpdateFrozenColumns();
+            _itemsCopy = new TableViewColumn[Count];
+            CopyTo(_itemsCopy, 0);
+        }
+        finally
+        {
+            _suspendNotifications = false;
+        }
+
+        // A single Reset tells subscribers to re-sync from the new contents in one pass.
+        RaiseCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
 }
