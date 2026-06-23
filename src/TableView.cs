@@ -43,9 +43,8 @@ public partial class TableView : ListView
     private IEnumerable? _directSource; // the raw source bound straight to the ListView when UseCollectionView is false
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
-    private bool _realizePending;
-    private long _lastHorizontalScrollTick; // wall-clock of the last horizontal-offset change; gates settle-based realize
-    private const long HorizontalScrollSettleMs = 32; // ~2 frames of no horizontal movement before realizing the band
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _realizeSettleTimer; // debounces realize until horizontal scroll settles
+    private const double HorizontalScrollSettleMs = 50; // ms of no horizontal movement before realizing the visible band
     private bool _prefetchScheduled;
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
@@ -520,57 +519,29 @@ public partial class TableView : ListView
             return;
         }
 
-        // A realize is already queued (waiting for the scroll to settle): skip the per-tick visible-range
-        // computation — the latest range is read when it finally realizes.
-        if (_realizePending)
-        {
-            SchedulePrefetch();
-            return;
-        }
+        // Debounce realization until the horizontal offset settles. A scrollbar drag fires a continuous stream of
+        // offset changes; realizing each would create + measure every column it sweeps past (brutal the first time,
+        // since content is generated then). The transform pan keeps the drag smooth meanwhile; only once scrolling has
+        // been quiet for the settle window do we realize the final visible band. A real timer WAITS (no busy spin —
+        // the earlier reschedule approach hammered the dispatcher), and is reset only on scroll (RealizeVisibleCells
+        // isn't called on data updates), so the 8000/s stream never holds it off. Wheel/slow scroll leave gaps wider
+        // than the window, so they realize promptly.
+        _realizeSettleTimer ??= CreateRealizeSettleTimer();
+        _realizeSettleTimer.Stop();
+        _realizeSettleTimer.Start();
 
-        // Hysteresis: we realize a band that extends ColumnPreloadViewports viewports of columns past the visible
-        // window on each side. While the on-screen columns stay comfortably inside that band, scrolling needs NO
-        // layout at all — the transform pan alone keeps it smooth. We only re-realize when the viewport drifts
-        // within half the band of an edge, which still leaves a margin of realized columns ahead (so nothing turns
-        // white) and happens far less often than once per frame. The re-realize runs off the scroll frame.
-        var trigger = GetVisibleScrollableRange(ColumnCacheLength * 0.5);
-        var band = _lastRealizedRange;
-        var covered = band.First >= 0
-                      && trigger.First >= 0
-                      && trigger.First >= band.First
-                      && trigger.Last <= band.Last;
-
-        if (!covered && !_realizePending)
-        {
-            _realizePending = true;
-            ScheduleRealizeWhenSettled();
-        }
-
-        // Then progressively realize the remaining off-screen cells during idle, so later scrolls land on cells
-        // that are already materialized and never pay the first-measure cost on the scroll path.
+        // Progressively realize the remaining off-screen cells during idle, so later scrolls land on cells that are
+        // already materialized and never pay the first-measure cost on the scroll path.
         SchedulePrefetch();
     }
 
-    /// <summary>
-    /// Realizes the visible band once the horizontal offset has settled. Dragging the scrollbar fires a continuous
-    /// stream of offset changes; realizing each intermediate position would create + measure every column the drag
-    /// sweeps past (brutal the first time, since content is generated then). Instead we wait out a short settle window
-    /// — the transform pan keeps the drag smooth meanwhile — and then realize only the final visible band. Slow
-    /// scrolling and the mouse wheel leave gaps wider than the window, so they realize as they go. Keyed solely on the
-    /// scroll tick, so the steady stream of data updates never holds this off.
-    /// </summary>
-    private void ScheduleRealizeWhenSettled()
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateRealizeSettleTimer()
     {
-        DispatcherQueue.TryEnqueue(() =>
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(HorizontalScrollSettleMs);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) =>
         {
-            if (Environment.TickCount64 - _lastHorizontalScrollTick < HorizontalScrollSettleMs)
-            {
-                ScheduleRealizeWhenSettled();
-                return;
-            }
-
-            _realizePending = false;
-
             var wide = GetVisibleScrollableRange(ColumnCacheLength);
             if (wide.First >= 0 && wide != _lastRealizedRange)
             {
@@ -581,7 +552,8 @@ public partial class TableView : ListView
                     RealizeRowCells(row, wide);
                 }
             }
-        });
+        };
+        return timer;
     }
 
     /// <summary>

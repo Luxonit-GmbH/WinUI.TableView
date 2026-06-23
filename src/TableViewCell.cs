@@ -39,6 +39,8 @@ public partial class TableViewCell : ContentControl
     private FrameworkElement? _constrainedElement;
     private double _constrainedColumnWidth = double.NaN;
     private double _constrainedRowHeight = double.NaN;
+    private object? _resolvedContentKey;          // Content reference the cached resolved element was computed for
+    private FrameworkElement? _resolvedContentElement;
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
@@ -160,7 +162,22 @@ public partial class TableViewCell : ContentControl
     /// </summary>
     private FrameworkElement? ResolveContentElement()
     {
-        if (Content is not FrameworkElement element)
+        // Resolving walks Content's type/template; the result only changes when Content itself changes. Cache it
+        // keyed on the Content reference so the per-measure path (hit on every data-tick re-measure) is a ref compare.
+        var content = Content;
+        if (ReferenceEquals(content, _resolvedContentKey))
+        {
+            return _resolvedContentElement;
+        }
+
+        _resolvedContentKey = content;
+        _resolvedContentElement = ResolveContentElementCore(content);
+        return _resolvedContentElement;
+    }
+
+    private FrameworkElement? ResolveContentElementCore(object? content)
+    {
+        if (content is not FrameworkElement element)
         {
             return null;
         }
