@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Diagnostics;
@@ -38,6 +39,8 @@ public partial class TableView : ListView
     private bool _shouldThrowSelectionModeChangedException;
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
+    private bool _settingBaseItemsSource; // allows TableView to assign the inherited ItemsSource (otherwise guarded)
+    private IEnumerable? _directSource; // the raw source bound straight to the ListView when UseCollectionView is false
     private readonly HashSet<TableViewRow> _rows = [];
     private (int First, int Last) _lastRealizedRange = (-2, -2);
     private bool _realizePending;
@@ -316,7 +319,7 @@ public partial class TableView : ListView
         }
         else if (e.Key is VirtualKey.Home or VirtualKey.End)
         {
-            var row = ctrlKey ? (e.Key == VirtualKey.Home ? 0 : _collectionView.Count - 1) : CurrentCellSlot?.Row;
+            var row = ctrlKey ? (e.Key == VirtualKey.Home ? 0 : Items.Count - 1) : CurrentCellSlot?.Row;
             var column = e.Key == VirtualKey.Home ? 0 : Columns.VisibleColumns.Count - 1;
 
             var newSlot = new TableViewCellSlot(row ?? -1, column);
@@ -330,7 +333,7 @@ public partial class TableView : ListView
             var row = (LastSelectionUnit is TableViewSelectionUnit.Row ? CurrentRowIndex : CurrentCellSlot?.Row) ?? -1;
             var column = CurrentCellSlot?.Column ?? -1;
 
-            var numRows = CollectionView.Count;
+            var numRows = Items.Count;
             var nextRow = e.Key == VirtualKey.PageDown
                 ? Math.Min(numRows - 1, row + pageSize)
                 : Math.Max(0, row - pageSize);
@@ -820,7 +823,12 @@ public partial class TableView : ListView
         }
 
         _collectionView.ItemPropertyChanged -= OnItemPropertyChanged;
+        DetachDirectSource();
+
+        // In direct mode detach the raw source from the ListView too, so nothing is held / processed while unloaded.
+        SetBaseItemsSource(_collectionView);
         _collectionView.Source = Enumerable.Empty<object>();
+
         _isItemsSourceSuspended = true;
     }
 
@@ -835,13 +843,94 @@ public partial class TableView : ListView
         }
 
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
+        _isItemsSourceSuspended = false;
 
         if (ItemsSource is IEnumerable source)
         {
-            _collectionView.Source = source;
+            ApplyEffectiveItemsSource(source);
+        }
+    }
+
+    /// <summary>
+    /// Routes the consumer's items source to the underlying ListView. When <see cref="UseCollectionView"/> is true
+    /// (default) it goes through the internal <see cref="WinUI.TableView.CollectionView"/> (sorting/filtering/grouping,
+    /// which keeps a full copy of the source). When false the raw source is bound directly, so the ListView
+    /// virtualizes straight over it with no intermediate copy — essential for very large / data-virtualized sources
+    /// and high-frequency collection changes. In direct mode the built-in sort/filter/group is inert.
+    /// </summary>
+    private void ApplyEffectiveItemsSource(IEnumerable? source)
+    {
+        if (UseCollectionView)
+        {
+            DetachDirectSource();
+            SetBaseItemsSource(_collectionView);
+
+            using var defer = _collectionView.DeferRefresh();
+            _collectionView.Source = source ?? Enumerable.Empty<object>();
+        }
+        else
+        {
+            AttachDirectSource(source);
+            SetBaseItemsSource(source);
+            _collectionView.Source = Enumerable.Empty<object>(); // release the copy now the ListView is on the raw source
+        }
+    }
+
+    /// <summary>
+    /// Assigns the inherited ListView <see cref="ItemsControl.ItemsSource"/> from within the control, bypassing the
+    /// guard in <see cref="OnBaseItemsSourceChanged"/> that blocks external writes.
+    /// </summary>
+    private void SetBaseItemsSource(object? value)
+    {
+        if (ReferenceEquals(base.ItemsSource, value))
+        {
+            return;
         }
 
-        _isItemsSourceSuspended = false;
+        _settingBaseItemsSource = true;
+        try
+        {
+            base.ItemsSource = value;
+        }
+        finally
+        {
+            _settingBaseItemsSource = false;
+        }
+    }
+
+    /// <summary>
+    /// In direct mode, watches the raw source for collection changes so realized rows refresh their cached index
+    /// (the internal CollectionView's VectorChanged does this in CollectionView mode).
+    /// </summary>
+    private void AttachDirectSource(IEnumerable? source)
+    {
+        if (ReferenceEquals(_directSource, source))
+        {
+            return;
+        }
+
+        DetachDirectSource();
+        _directSource = source;
+
+        if (source is INotifyCollectionChanged ncc)
+        {
+            ncc.CollectionChanged += OnDirectSourceCollectionChanged;
+        }
+    }
+
+    private void DetachDirectSource()
+    {
+        if (_directSource is INotifyCollectionChanged ncc)
+        {
+            ncc.CollectionChanged -= OnDirectSourceCollectionChanged;
+        }
+
+        _directSource = null;
+    }
+
+    private void OnDirectSourceCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        InvalidateRowIndices();
     }
 
     /// <summary>
@@ -1209,17 +1298,16 @@ public partial class TableView : ListView
     {
         DetailsPaneStates.Clear();
 
-        using var defer = _collectionView.DeferRefresh();
-        _collectionView.Source = null!;
+        var source = e.NewValue as IEnumerable;
 
-        if (e.NewValue is IEnumerable source)
+        if (source is not null)
         {
             EnsureAutoColumns();
+        }
 
-            if (!_isItemsSourceSuspended)
-            {
-                _collectionView.Source = source;
-            }
+        if (!_isItemsSourceSuspended)
+        {
+            ApplyEffectiveItemsSource(source);
         }
     }
 

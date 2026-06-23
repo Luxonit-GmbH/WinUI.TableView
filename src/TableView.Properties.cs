@@ -68,6 +68,11 @@ public partial class TableView
     public static readonly DependencyProperty ColumnCacheLengthProperty = DependencyProperty.Register(nameof(ColumnCacheLength), typeof(double), typeof(TableView), new PropertyMetadata(0.5d, OnColumnCacheLengthChanged));
 
     /// <summary>
+    /// Identifies the UseCollectionView dependency property.
+    /// </summary>
+    public static readonly DependencyProperty UseCollectionViewProperty = DependencyProperty.Register(nameof(UseCollectionView), typeof(bool), typeof(TableView), new PropertyMetadata(true, OnUseCollectionViewChanged));
+
+    /// <summary>
     /// Identifies the IsColumnVirtualizationEnabled dependency property.
     /// </summary>
     public static readonly DependencyProperty IsColumnVirtualizationEnabledProperty = DependencyProperty.Register(nameof(IsColumnVirtualizationEnabled), typeof(bool), typeof(TableView), new PropertyMetadata(false, OnIsColumnVirtualizationEnabledChanged));
@@ -549,6 +554,20 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets whether the items source is projected through the internal collection view (which provides
+    /// sorting, filtering and grouping but keeps a full in-memory copy of the source). Set to <see langword="false"/>
+    /// to bind the source <b>directly</b> to the underlying list: no copy is made, so the control virtualizes straight
+    /// over very large or data-virtualized sources and high-frequency collection changes flow through without the
+    /// collection-view overhead. In direct mode the built-in sorting/filtering/grouping is disabled — the source is
+    /// expected to own its ordering (e.g. a smart observable collection). Defaults to <see langword="true"/>.
+    /// </summary>
+    public bool UseCollectionView
+    {
+        get => (bool)GetValue(UseCollectionViewProperty);
+        set => SetValue(UseCollectionViewProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets a value indicating whether cell content is generated lazily, only for columns within the
     /// horizontal viewport (column virtualization). This dramatically reduces the number of cell elements created
     /// for grids with many columns. Once generated, a cell's content is retained (it is not released on scroll).
@@ -971,6 +990,18 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Handles changes to the UseCollectionView property by re-routing the current items source through (or around)
+    /// the internal collection view.
+    /// </summary>
+    private static void OnUseCollectionViewChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView && !tableView._isItemsSourceSuspended)
+        {
+            tableView.ApplyEffectiveItemsSource(tableView.ItemsSource as System.Collections.IEnumerable);
+        }
+    }
+
+    /// <summary>
     /// Handles changes to RowHeight, RowMinHeight and RowMaxHeight by pushing the new values to the realized
     /// rows' cells (cells use direct height values rather than per-cell bindings).
     /// </summary>
@@ -1316,7 +1347,10 @@ public partial class TableView
     /// </summary>
     private void OnBaseItemsSourceChanged(DependencyObject sender, DependencyProperty dp)
     {
-        throw new InvalidOperationException("Setting this property directly is not allowed. Use TableView.ItemsSource instead.");
+        if (!_settingBaseItemsSource)
+        {
+            throw new InvalidOperationException("Setting this property directly is not allowed. Use TableView.ItemsSource instead.");
+        }
     }
 
     /// <summary>
