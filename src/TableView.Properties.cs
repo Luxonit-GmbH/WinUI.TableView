@@ -199,7 +199,7 @@ public partial class TableView
     /// <summary>
     /// Identifies the VerticalOffset dependency property.
     /// </summary>
-    public static readonly DependencyProperty VerticalOffsetProperty = DependencyProperty.Register(nameof(VerticalOffset), typeof(double), typeof(TableView), new PropertyMetadata(0d));
+    public static readonly DependencyProperty VerticalOffsetProperty = DependencyProperty.Register(nameof(VerticalOffset), typeof(double), typeof(TableView), new PropertyMetadata(0d, OnVerticalOffsetChanged));
 
     /// <summary>
     /// Identifies the HorizontalOffset dependency property.
@@ -1220,12 +1220,26 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Handles changes to the VerticalOffset property. The first scroll seals AutoSizeMinWidth so its first-render
+    /// capture never runs for rows realized later while scrolling.
+    /// </summary>
+    private static void OnVerticalOffsetChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            tableView.SealAutoSizeMinWidth();
+        }
+    }
+
+    /// <summary>
     /// Handles changes to the HorizontalOffset property.
     /// </summary>
     private static void OnHorizontalOffsetChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is TableView tableView)
         {
+            tableView.SealAutoSizeMinWidth(); // scrolling = past the first cells; stop AutoSizeMinWidth capture
+
             // Pan via RenderTransform instead of re-running layout on the header + every row each tick. The clip is
             // identical for all uniform rows, so compute it once here and let each row reuse the value.
             tableView.UpdateCellsClipRect();

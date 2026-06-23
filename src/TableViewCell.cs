@@ -41,6 +41,7 @@ public partial class TableViewCell : ContentControl
     private double _constrainedRowHeight = double.NaN;
     private object? _resolvedContentKey;          // Content reference the cached resolved element was computed for
     private FrameworkElement? _resolvedContentElement;
+    private bool _autoMinWidthMeasured;           // AutoSizeMinWidth: this cell already contributed its first-render width
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
@@ -108,12 +109,14 @@ public partial class TableViewCell : ContentControl
     {
         base.OnContentChanged(oldContent, newContent);
 
-        // The content element changed, so any cached desired width is stale.
+        // The content element changed, so any cached desired width is stale. Allow AutoSizeMinWidth to re-measure
+        // this NEW content once (a recycled/regenerated element is "first rendered" content, not a data update).
         _contentDesiredWidth = double.NaN;
+        _autoMinWidthMeasured = false;
 
-        // Re-measuring unconstrained once the content loads only feeds the column's desired (auto) width.
-        // Skip subscribing for fixed and star sized columns to avoid an extra measure pass per cell.
-        if (Column?.Width.IsAuto is true && newContent is ContentControl contentControl)
+        // Re-measuring unconstrained once the content loads feeds the column's desired (auto) width and the
+        // AutoSizeMinWidth minimum. Skip subscribing for plain fixed/star columns to avoid an extra measure pass.
+        if ((Column?.Width.IsAuto is true || Column?.AutoSizeMinWidth is true) && newContent is ContentControl contentControl)
         {
             contentControl.Loaded += OnContentLoaded;
         }
@@ -122,6 +125,7 @@ public partial class TableViewCell : ContentControl
         {
             ((ContentControl)sender).Loaded -= OnContentLoaded;
             _contentDesiredWidth = double.NaN;
+            _autoMinWidthMeasured = false; // content is now loaded; let the next pass capture its true width
             InvalidateMeasure();
         }
     }
@@ -148,6 +152,16 @@ public partial class TableViewCell : ContentControl
             if (Column.Width.IsAuto)
             {
                 EnsureDesiredWidth(element);
+            }
+
+            // AutoSizeMinWidth: once, on this cell's first render, measure the content's natural width and grow the
+            // column's auto minimum. Capture is sealed on first scroll (CanCaptureAutoMinWidth), so only the initial
+            // cells contribute — cells realized later while scrolling add no measure overhead. The per-cell flag
+            // also stops data updates / recycles from re-measuring.
+            if (Column.AutoSizeMinWidth && !_autoMinWidthMeasured && TableView?.CanCaptureAutoMinWidth is true)
+            {
+                _autoMinWidthMeasured = true;
+                Column.GrowAutoMinWidth(!double.IsNaN(_contentDesiredWidth) ? _contentDesiredWidth : MeasureContentDesiredWidth(element));
             }
 
             ConstrainContent(element);
