@@ -61,14 +61,14 @@
                 Value="{ThemeResource TableViewHorizontalGridLineStrokeThickness}" />
         <Setter Property="VerticalGridLinesStrokeThickness"
                 Value="{ThemeResource TableViewVerticalGridLineStrokeThickness}" />
+        <!-- No item-container transitions: AddDelete/Reorder animate on row changes, and Content/Entrance animate on
+             recycle and scroll-in respectively, i.e. on every vertical scroll. For a high-frequency data grid those
+             animations are continuous repaints (and on Citrix/VDI every animated frame is re-encoded and sent over the
+             wire). An empty collection = instant rows = smoother scrolling + far less remoting bandwidth. Consumers
+             can re-enable by setting ItemContainerTransitions on the TableView instance. -->
         <win:Setter Property="ItemContainerTransitions">
             <win:Setter.Value>
-                <TransitionCollection>
-                    <AddDeleteThemeTransition />
-                    <ContentThemeTransition />
-                    <ReorderThemeTransition />
-                    <EntranceThemeTransition IsStaggeringEnabled="False" />
-                </TransitionCollection>
+                <TransitionCollection />
             </win:Setter.Value>
         </win:Setter>
         <Setter Property="ItemsPanel">
