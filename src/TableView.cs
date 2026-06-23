@@ -47,6 +47,7 @@ public partial class TableView : ListView
     private const double HorizontalScrollSettleMs = 50; // ms of no horizontal movement before realizing the visible band
     private int _realizeGeneration; // bumped on every scroll; an in-flight chunked realize aborts when it changes
     private const int RealizeRowChunkSize = 8; // rows realized per dispatcher turn (keeps the settle realize off-frame)
+    private bool _autoSizeMinWidthSealed; // AutoSizeMinWidth: stop capturing once the user scrolls past the first cells
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
     private Border? _dragRectangle;
@@ -512,6 +513,18 @@ public partial class TableView : ListView
         _lastRealizedRange = (-2, -2);
         RealizeVisibleCells();
     }
+
+    /// <summary>
+    /// Whether <see cref="TableViewColumn.AutoSizeMinWidth"/> columns may still capture their first-render content
+    /// width. Sealed on the first scroll (see <see cref="SealAutoSizeMinWidth"/>) so the measure runs only for the
+    /// initial cells, never as more cells are realized while scrolling.
+    /// </summary>
+    internal bool CanCaptureAutoMinWidth => !_autoSizeMinWidthSealed;
+
+    /// <summary>
+    /// Permanently stops AutoSizeMinWidth capture. Called the first time the user scrolls either axis.
+    /// </summary>
+    internal void SealAutoSizeMinWidth() => _autoSizeMinWidthSealed = true;
 
     internal void RealizeVisibleCells()
     {

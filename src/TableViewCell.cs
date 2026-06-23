@@ -155,8 +155,10 @@ public partial class TableViewCell : ContentControl
             }
 
             // AutoSizeMinWidth: once, on this cell's first render, measure the content's natural width and grow the
-            // column's auto minimum. The per-cell flag means data updates and recycles never re-measure it.
-            if (Column.AutoSizeMinWidth && !_autoMinWidthMeasured)
+            // column's auto minimum. Capture is sealed on first scroll (CanCaptureAutoMinWidth), so only the initial
+            // cells contribute — cells realized later while scrolling add no measure overhead. The per-cell flag
+            // also stops data updates / recycles from re-measuring.
+            if (Column.AutoSizeMinWidth && !_autoMinWidthMeasured && TableView?.CanCaptureAutoMinWidth is true)
             {
                 _autoMinWidthMeasured = true;
                 Column.GrowAutoMinWidth(!double.IsNaN(_contentDesiredWidth) ? _contentDesiredWidth : MeasureContentDesiredWidth(element));
