@@ -1872,13 +1872,11 @@ public partial class TableView : ListView
             var oldSelection = SelectedCells;
             SelectedCells = [.. SelectedCellRanges.SelectMany(x => x)];
 
-            var rowIndexes = oldSelection.Select(x => x.Row).Concat(SelectedCells.Select(x => x.Row)).Distinct();
-
-            foreach (var rowIndex in rowIndexes)
+            // Only realized rows have visible cells to restyle. Iterating the realized set is cheap and avoids
+            // scanning every selected slot (rows x columns after Select All) just to find the affected rows.
+            foreach (var row in _rows)
             {
-                // O(1) container lookup instead of a linear scan of realized rows per affected index.
-                var row = ContainerFromIndex(rowIndex) as TableViewRow;
-                row?.ApplyCellsSelectionState();
+                row.ApplyCellsSelectionState();
             }
 
             InvokeCellSelectionChangedEvent(oldSelection);
@@ -2280,11 +2278,16 @@ public partial class TableView : ListView
     /// <param name="index">The index of the row to scroll into view.</param>
     public async Task<TableViewRow?> ScrollRowIntoView(int index)
     {
-        if (_scrollViewer is null || index < 0) return default!;
+        if (_scrollViewer is null || index < 0 || index >= Items.Count) return default!;
 
-        var item = Items[index];
-        index = Items.IndexOf(item); // if the ItemsSource has duplicate items in it. ScrollIntoView will only bring first index of the item.
-        ScrollIntoView(item);
+        // ScrollIntoView locates the item with an O(n) IndexOf inside the platform, and the previous
+        // Items.IndexOf(item) here added a second full scan of the source — expensive with tens of thousands of
+        // rows, and this runs on every single-row selection. We already have the index, so only scroll (to realize
+        // the container) when the row isn't realized yet; selecting a row that's already in view now costs neither scan.
+        if (ContainerFromIndex(index) is null)
+        {
+            ScrollIntoView(Items[index]);
+        }
 
         var tries = 0;
         while (tries < 10)
