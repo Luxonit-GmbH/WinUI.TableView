@@ -177,7 +177,12 @@ public partial class TableViewHeaderRow : Control
         }
         else if (e.Action == NotifyCollectionChangedAction.Reset && _scrollableHeadersPanel is not null)
         {
+            // Reset means "re-sync from the current columns": rebuild headers rather than just clearing them.
             ClearHeaders();
+            if (TableView is not null)
+            {
+                AddHeaders(TableView.Columns.VisibleColumns);
+            }
         }
     }
 

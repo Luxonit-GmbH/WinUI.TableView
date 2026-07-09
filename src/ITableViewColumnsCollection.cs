@@ -30,6 +30,32 @@ public interface ITableViewColumnsCollection : IList<TableViewColumn>, INotifyCo
     void Move(int oldIndex, int newIndex);
 
     /// <summary>
+    /// Appends a range of columns to the end of the collection, raising a single
+    /// <see cref="INotifyCollectionChanged.CollectionChanged"/> notification for the whole range.
+    /// </summary>
+    /// <remarks>
+    /// Prefer this over calling <see cref="ICollection{T}.Add"/> in a loop when adding many columns: it suspends the
+    /// per-item notifications and raises one <see cref="NotifyCollectionChangedAction.Add"/> event, so the
+    /// <see cref="WinUI.TableView.TableView"/> realizes the new columns in a single pass instead of once per column.
+    /// </remarks>
+    /// <param name="columns">The columns to append. Must not be <see langword="null"/> nor contain <see langword="null"/> items.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="columns"/> or any contained column is <see langword="null"/>.</exception>
+    void AddRange(IEnumerable<TableViewColumn> columns);
+
+    /// <summary>
+    /// Replaces the entire contents of the collection with the specified columns, raising a single
+    /// <see cref="NotifyCollectionChangedAction.Reset"/> notification.
+    /// </summary>
+    /// <remarks>
+    /// Equivalent to clearing the collection and adding <paramref name="columns"/>, but performed as one batch: a
+    /// single <see cref="INotifyCollectionChanged.CollectionChanged"/> reset event is raised, prompting subscribers to
+    /// re-synchronize from the new contents in a single pass rather than reacting to each removal and addition.
+    /// </remarks>
+    /// <param name="columns">The columns that become the new contents. Must not be <see langword="null"/> nor contain <see langword="null"/> items.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="columns"/> or any contained column is <see langword="null"/>.</exception>
+    void Reset(IEnumerable<TableViewColumn> columns);
+
+    /// <summary>
     /// Gets the list of visible <see cref="TableViewColumn"/>s.
     /// </summary>
     /// <remarks>

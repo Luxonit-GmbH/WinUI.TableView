@@ -278,7 +278,9 @@ public partial class TableViewRow : ListViewItem
                 RowPresenter?.MoveCells(e.NewItems.OfType<TableViewColumn>().First(), e.NewStartingIndex);
                 break;
             case NotifyCollectionChangedAction.Reset when RowPresenter is not null:
-                RowPresenter.ClearCells();
+                // Reset means "re-sync from the current columns": rebuild this row's cells, not just clear them.
+                _ensureCells = true;
+                EnsureCells();
                 break;
         }
     }
