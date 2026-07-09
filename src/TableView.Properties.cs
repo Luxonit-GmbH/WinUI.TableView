@@ -500,7 +500,7 @@ public partial class TableView
     /// <summary>
     /// Gets the bound value of every selected cell (via <see cref="TableViewColumn.GetCellContent"/>), ordered by
     /// row then column. Empty when the current selection is row-based — use <see cref="SelectedValues"/> for the
-    /// row items.
+    /// row items, or <see cref="GetCellValue"/> for a specific (e.g. right-clicked) cell.
     /// </summary>
     public IEnumerable<object?> SelectedCellValues
     {
@@ -517,6 +517,22 @@ public partial class TableView
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Gets the bound value of the cell at the given slot (via <see cref="TableViewColumn.GetCellContent"/>),
+    /// independent of any selection state or <see cref="SelectionUnit"/>. Pairs with events that carry a cell slot —
+    /// e.g. <see cref="CellContextFlyoutOpening"/> on right-click, which fires in row-selection mode too.
+    /// Returns <see langword="null"/> when the slot is out of range.
+    /// </summary>
+    /// <param name="slot">The row index and visible-column index identifying the cell.</param>
+    public object? GetCellValue(TableViewCellSlot slot)
+    {
+        var visibleColumns = Columns.VisibleColumns;
+
+        return slot.Row >= 0 && slot.Row < Items.Count && slot.Column >= 0 && slot.Column < visibleColumns.Count
+            ? visibleColumns[slot.Column].GetCellContent(Items[slot.Row])
+            : null;
     }
 
     /// <summary>
