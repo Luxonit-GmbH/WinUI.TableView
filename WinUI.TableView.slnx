@@ -1,16 +1,20 @@
 <Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
   <Folder Name="/samples/">
     <Project Path="samples/AotTestApp/AotTestApp.csproj">
       <Platform Project="x64" />
       <Deploy />
     </Project>
-    <Project Path="samples/WinUI.TableView.SampleApp.Uno/WinUI.TableView.SampleApp.Uno.csproj" />
     <Project Path="samples/WinUI.TableView.SampleApp/WinUI.TableView.SampleApp.csproj">
       <Platform Project="x64" />
       <Deploy />
     </Project>
   </Folder>
-  <Project Path="src/WinUI.TableView.csproj" />
+  <Project Path="src/WinUI.TableView.csproj">
+    <Platform Project="x64" />
+  </Project>
   <Project Path="tests/WinUI.TableView.Tests.csproj">
     <Platform Project="x64" />
     <Deploy />

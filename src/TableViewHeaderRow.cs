@@ -347,7 +347,8 @@ public partial class TableViewHeaderRow : Control
             {
                 if (column.AutoSizeMinWidth && column.HeaderControl is { } autoMinHeader)
                 {
-                    autoMinHeader.Measure(new Size(double.PositiveInfinity, height));
+                    // ActualHeight, not Height: the Height property defaults to NaN, which is invalid for Measure.
+                    autoMinHeader.Measure(new Size(double.PositiveInfinity, ActualHeight));
                 }
             }
 

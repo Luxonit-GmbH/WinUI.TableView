@@ -1,10 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-   <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
 		<TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
 		<WindowsSdkPackageVersion>10.0.26100.84</WindowsSdkPackageVersion>
-		<Platforms>x64</Platforms>
+		<Platforms>x86;x64;ARM64</Platforms>
 		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>x86;x64;ARM64</Platforms>

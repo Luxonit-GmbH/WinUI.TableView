@@ -127,12 +127,24 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// </summary>
     internal void HandleColumnPropertyChanged(TableViewColumn column, string propertyName)
     {
-        if (propertyName is nameof(TableViewColumn.ActualWidth)
-            or nameof(TableViewColumn.Visibility)
+        if (propertyName is nameof(TableViewColumn.Visibility)
             or nameof(TableViewColumn.Order)
             or nameof(TableViewColumn.IsFrozen))
         {
-            // These change the cumulative scrollable-column offsets used by horizontal virtualization.
+            // Membership or order of the visible column sets changed; every derived cache is stale, not just the
+            // offsets (a hidden column must disappear from VisibleColumns immediately).
+            _visibleColumnsCached = null;
+            _visibleColumnsMapCached = null;
+            _visibleFrozenColumnsCached = null;
+            _visibleFrozenColumnsMapCached = null;
+            _visibleScrollableColumnsCached = null;
+            _visibleScrollableColumnsMapCached = null;
+            _visibleScrollableColumnOffsetsCached = null;
+        }
+        else if (propertyName is nameof(TableViewColumn.ActualWidth))
+        {
+            // Width changes keep membership/order intact; only the cumulative offsets used by horizontal
+            // virtualization depend on it.
             _visibleScrollableColumnOffsetsCached = null;
         }
 
@@ -214,30 +226,47 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// <returns></returns>
     public int VisibleColumnIndex(TableViewColumn column)
     {
-        _visibleColumnsMapCached ??= VisibleColumns.Select((x, i) => (i , x)).ToDictionary(x => x.x, x => x.i);
+        _visibleColumnsMapCached ??= BuildIndexMap(VisibleColumns);
         return _visibleColumnsMapCached.GetValueOrDefault(column, -1);
     }
 
     /// <summary>
-    /// 
+    ///
     /// </summary>
     /// <param name="column"></param>
     /// <returns></returns>
     public int VisibleFrozenColumnIndex(TableViewColumn column)
     {
-        _visibleFrozenColumnsMapCached ??= VisibleFrozenColumns.Select((x, i) => (i , x)).ToDictionary(x => x.x, x => x.i);
+        _visibleFrozenColumnsMapCached ??= BuildIndexMap(VisibleFrozenColumns);
         return _visibleFrozenColumnsMapCached.GetValueOrDefault(column, -1);
     }
 
     /// <summary>
-    /// 
+    ///
     /// </summary>
     /// <param name="column"></param>
     /// <returns></returns>
     public int VisibleScrollableColumnIndex(TableViewColumn column)
     {
-        _visibleScrollableColumnsMapCached ??= VisibleScrollableColumns.Select((x, i) => (i , x)).ToDictionary(x => x.x, x => x.i);
+        _visibleScrollableColumnsMapCached ??= BuildIndexMap(VisibleScrollableColumns);
         return _visibleScrollableColumnsMapCached.GetValueOrDefault(column, -1);
+    }
+
+    /// <summary>
+    /// Builds a column-to-index lookup. The first index wins when the same column instance appears more than once,
+    /// matching <c>IndexOf</c> semantics (a plain ToDictionary would throw on the duplicate key — and, raised inside
+    /// a VectorChanged callback, that surfaces as a baffling WinRT "parameter is incorrect" error on Add).
+    /// </summary>
+    private static Dictionary<TableViewColumn, int> BuildIndexMap(IList<TableViewColumn> columns)
+    {
+        var map = new Dictionary<TableViewColumn, int>(columns.Count);
+
+        for (var i = 0; i < columns.Count; i++)
+        {
+            map.TryAdd(columns[i], i);
+        }
+
+        return map;
     }
 
     TableViewColumn IList<TableViewColumn>.this[int index]
