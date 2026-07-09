@@ -1,4 +1,4 @@
-﻿using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using System;
@@ -25,7 +25,12 @@ public partial class TableViewTimeColumn : TableViewBoundColumn, IDefaultTableVi
     /// </summary>
     public TableViewTimeColumn()
     {
-        ClockIdentifier = DateTimeFormatter.LongTime.Clock;
+#if WINDOWS
+        var clocks = Windows.System.UserProfile.GlobalizationPreferences.Clocks;
+        ClockIdentifier = clocks.Count > 0 ? clocks[0] : "24HourClock";
+#else
+        ClockIdentifier = Windows.Globalization.DateTimeFormatting.DateTimeFormatter.ShortTime.Clock;
+#endif
     }
 
     /// <summary>

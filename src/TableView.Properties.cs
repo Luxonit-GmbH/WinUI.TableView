@@ -247,6 +247,11 @@ public partial class TableView
     public static readonly DependencyProperty RowHeaderTemplateSelectorProperty = DependencyProperty.Register(nameof(RowHeaderTemplateSelector), typeof(DataTemplateSelector), typeof(TableView), new PropertyMetadata(null, OnRowHeaderTemplateChanged));
 
     /// <summary>
+    /// Identifies the ColumnAutoWidthMode dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ColumnAutoWidthModeProperty = DependencyProperty.Register(nameof(ColumnAutoWidthMode), typeof(TableViewColumnAutoWidthMode), typeof(TableView), new PropertyMetadata(TableViewColumnAutoWidthMode.Both, OnColumnAutoWidthModeChanged));
+
+    /// <summary>
     /// Identifies the FrozenColumnCount dependency property.
     /// </summary>
     public static readonly DependencyProperty FrozenColumnCountProperty = DependencyProperty.Register(nameof(FrozenColumnCount), typeof(int), typeof(TableView), new PropertyMetadata(0, OnFrozenColumnCountChanged));
@@ -889,6 +894,15 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets the ColumnAutoWidthMode for all columns.
+    /// </summary>
+    public TableViewColumnAutoWidthMode ColumnAutoWidthMode
+    {
+        get => (TableViewColumnAutoWidthMode)GetValue(ColumnAutoWidthModeProperty);
+        set => SetValue(ColumnAutoWidthModeProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets the number of columns that stays in view on horizontal scroll.
     /// </summary>
     public int FrozenColumnCount
@@ -1117,9 +1131,18 @@ public partial class TableView
         {
             tableView.OnIsReadOnlyChanged(e);
 
-            if ((tableView.SelectionMode is ListViewSelectionMode.None
+            if (!tableView.IsReadOnly) return;
+
+            if (tableView.IsEditing &&
+                tableView.CurrentCellSlot is not null &&
+                tableView.GetCellFromSlot(tableView.CurrentCellSlot.Value) is { } currentCell &&
+                tableView.EndCellEditing(TableViewEditAction.Cancel, currentCell))
+            {
+                tableView.SetIsEditing(false);
+            }
+
+            if (tableView.SelectionMode is ListViewSelectionMode.None
                 || tableView.SelectionUnit is TableViewSelectionUnit.Row)
-                && tableView.IsReadOnly)
             {
                 tableView.CurrentCellSlot = null;
             }
@@ -1158,6 +1181,17 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Handles changes to the ColumnAutoWidthMode property.
+    /// </summary>
+    private static void OnColumnAutoWidthModeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            tableView.RefreshColumnsAutoWidth();
+        }
+    }
+
+    /// <summary>
     /// Handles changes to the MinColumnWidth property.
     /// </summary>
     private static void OnMinColumnWidthChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -1186,7 +1220,7 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
-            if (tableView.SelectionUnit is TableViewSelectionUnit.Row)
+            if (tableView.SelectionUnit is TableViewSelectionUnit.Row or TableViewSelectionUnit.CellWithRow)
             {
                 tableView.SelectedCellRanges.Clear();
                 tableView.OnCellSelectionChanged();

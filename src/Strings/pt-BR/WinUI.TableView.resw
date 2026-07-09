@@ -186,4 +186,7 @@
   <data name="PasteCommandDescription" xml:space="preserve">
     <value>Cola o conteúdo da área de transferência nas células.</value>
   </data>
+  <data name="Filtered" xml:space="preserve">
+    <value>Filtrado</value>
+  </data>
 </root>

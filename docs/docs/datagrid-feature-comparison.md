@@ -32,7 +32,7 @@ WinUI.TableView is actively maintained and continues to add new features based o
 ## Feature comparison
 
 | Feature | WPF DataGrid | WCT DataGrid | WinUI.TableView | Notes |
-|---|---:|---:|---:|---|
+|---|---|---|---|---|
 | Auto-generate columns | ✅ | ✅ | ✅ | |
 | Text column | ✅ | ✅ | ✅ |  |
 | CheckBox column | ✅ | ✅ | ✅ |  |
@@ -67,7 +67,7 @@ WinUI.TableView is actively maintained and continues to add new features based o
 | Alternating rows | ✅ | ✅ | ✅ |  |
 | Conditional styling | ❌| ❌ | ✅ | TableView supports conditional cell styling. |
 | Cell and row context flyouts | ❌ | ❌ | ✅ | TableView has built-in support for row and cell context flyouts. |
-| Accessibility / Narrator | Not verified | ✅ | ❌ |  |
+| Accessibility / Narrator | Not verified | ✅ | ✅ |  |
 | Validation | ✅ | ❌ | ❌ | WPF has strong cell and row validation support. TableView editing events may help. |
 | Row virtualization | ✅ | ✅ | ✅ |  |
 

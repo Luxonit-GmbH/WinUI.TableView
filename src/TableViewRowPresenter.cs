@@ -592,4 +592,28 @@ public partial class TableViewRowPresenter : Control
     /// Gets a value indicating whether the row details panel is currently visible.
     /// </summary>
     internal bool IsDetailsPanelVisible => _detailsPanel?.Visibility is Visibility.Visible;
+
+    /// <summary>
+    /// Gets the realized row header element.
+    /// </summary>
+    internal TableViewRowHeader? RowHeader => _rowHeader;
+
+    /// <summary>
+    /// Programmatically shows or hides the details pane.
+    /// Only takes effect when <see cref="TableView.RowDetailsVisibilityMode"/> is
+    /// <see cref="TableViewRowDetailsVisibilityMode.VisibleWhenExpanded"/>.
+    /// </summary>
+    /// <param name="visible"><see langword="true"/> to expand; <see langword="false"/> to collapse.</param>
+    internal void ShowDetailPane(bool visible)
+    {
+        if (TableView?.RowDetailsVisibilityMode is TableViewRowDetailsVisibilityMode.VisibleWhenExpanded)
+        {
+            if (_detailsToggleButton is not null)
+            {
+                _detailsToggleButton.IsChecked = visible;
+            }
+
+            ToggleDetailsPane(TableViewRow?.Content, visible);
+        }
+    }
 }

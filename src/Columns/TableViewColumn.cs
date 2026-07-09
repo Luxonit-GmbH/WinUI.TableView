@@ -249,6 +249,15 @@ public abstract partial class TableViewColumn : DependencyObject
     }
 
     /// <summary>
+    /// Gets or sets the ColumnAutoWidthMode of the column.
+    /// </summary>
+    public TableViewColumnAutoWidthMode? ColumnAutoWidthMode
+    {
+        get => (TableViewColumnAutoWidthMode?)GetValue(ColumnAutoWidthModeProperty);
+        set => SetValue(ColumnAutoWidthModeProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets a value indicating whether the column can be resized.
     /// </summary>
     public bool CanResize
@@ -531,12 +540,42 @@ public abstract partial class TableViewColumn : DependencyObject
                 column.OwningCollection.HandleColumnPropertyChanged(column, nameof(MinWidth));
             else if (e.Property == ActualWidthProperty)
                 column.OwningCollection.HandleColumnPropertyChanged(column, nameof(ActualWidth));
-            else if (e.Property == IsReadOnlyProperty)
-                column.OwningCollection.HandleColumnPropertyChanged(column, nameof(IsReadOnly));
             else if (e.Property == VisibilityProperty)
                 column.OwningCollection.HandleColumnPropertyChanged(column, nameof(Visibility));
             else if (e.Property == OrderProperty)
                 column.OwningCollection.HandleColumnPropertyChanged(column, nameof(Order));
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the ColumnAutoWidthMode property.
+    /// </summary>
+    private static void OnColumnAutoWidthModeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableViewColumn column)
+        {
+            column.TableView?.RefreshColumnsAutoWidth([column]);
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the IsReadOnly property.
+    /// </summary>
+    private static void OnIsReadOnlyChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableViewColumn column)
+        {
+            if (column.TableView is TableView tableView &&
+                tableView.IsReadOnly &&
+                tableView.IsEditing &&
+                tableView.CurrentCellSlot is not null &&
+                tableView.GetCellFromSlot(tableView.CurrentCellSlot.Value) is { } currentCell &&
+                tableView.EndCellEditing(TableViewEditAction.Cancel, currentCell))
+            {
+                tableView.SetIsEditing(false);
+            }
+
+            column.OwningCollection?.HandleColumnPropertyChanged(column, nameof(IsReadOnly));
         }
     }
 
@@ -617,6 +656,11 @@ public abstract partial class TableViewColumn : DependencyObject
     public static readonly DependencyProperty ActualWidthProperty = DependencyProperty.Register(nameof(ActualWidth), typeof(double), typeof(TableViewColumn), new PropertyMetadata(0d, OnPropertyChanged));
 
     /// <summary>
+    /// Identifies the ColumnAutoWidthMode dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ColumnAutoWidthModeProperty = DependencyProperty.Register(nameof(ColumnAutoWidthMode), typeof(TableViewColumnAutoWidthMode?), typeof(TableViewColumn), new PropertyMetadata(null, OnColumnAutoWidthModeChanged));
+
+    /// <summary>
     /// Identifies the CanResize dependency property.
     /// </summary>
     public static readonly DependencyProperty CanResizeProperty = DependencyProperty.Register(nameof(CanResize), typeof(bool), typeof(TableViewColumn), new PropertyMetadata(true));
@@ -624,7 +668,7 @@ public abstract partial class TableViewColumn : DependencyObject
     /// <summary>
     /// Identifies the IsReadOnly dependency property.
     /// </summary>
-    public static readonly DependencyProperty IsReadOnlyProperty = DependencyProperty.Register(nameof(IsReadOnly), typeof(bool), typeof(TableViewColumn), new PropertyMetadata(false, OnPropertyChanged));
+    public static readonly DependencyProperty IsReadOnlyProperty = DependencyProperty.Register(nameof(IsReadOnly), typeof(bool), typeof(TableViewColumn), new PropertyMetadata(false, OnIsReadOnlyChanged));
 
     /// <summary>
     /// Identifies the Visibility dependency property.

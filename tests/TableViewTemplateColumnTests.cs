@@ -63,4 +63,16 @@ public class TableViewTemplateColumnTests
         Assert.AreSame(displayTemplate, displayElement.ContentTemplate);
         Assert.AreSame(editingTemplate, editingElement.ContentTemplate);
     }
+
+    [UITestMethod]
+    public void TableViewCell_IsNotReadOnly_WhenTemplateColumnUsesEditingTemplateSelector()
+    {
+        var cell = new TableViewCell();
+        cell.Column = new TableViewTemplateColumn
+        {
+            EditingTemplateSelector = new ConstantTemplateSelector(TableViewColumnTestHelpers.CreateTemplate("selected-edit"))
+        };
+
+        Assert.IsFalse(cell.IsReadOnly);
+    }
 }
