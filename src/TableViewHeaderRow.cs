@@ -43,6 +43,7 @@ public partial class TableViewHeaderRow : Control
     private TranslateTransform? _scrollableHeadersTransform;
     private TranslateTransform? _columnDropIndicatorTransform;
     private Image? _dragHeaderImage;
+    private DispatcherTimer? _desiredWidthTimer;
     private bool _calculatingHeaderWidths;
     private bool _headerWidthsUpdateQueued;
     private int _dropColumnIndex;
@@ -240,6 +241,28 @@ public partial class TableViewHeaderRow : Control
                 InvalidateHeaderWidths();
             }
         }
+        else if (e.PropertyName is nameof(TableViewColumn.DesiredWidth))
+        {
+            // Coalesce multiple updates (see in-loop Measure() call in CalculateHeaderWidths) to avoid excessive header width calculations.
+            _desiredWidthTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            _desiredWidthTimer.Tick -= OnDesiredWidthTimerTick;
+            _desiredWidthTimer.Tick += OnDesiredWidthTimerTick;
+            _desiredWidthTimer.Stop();
+            _desiredWidthTimer.Start();
+        }
+    }
+
+    /// <summary>
+    /// Recalculates header widths after deferred desired-width updates.
+    /// </summary>
+    private void OnDesiredWidthTimerTick(object? sender, object e)
+    {
+        _desiredWidthTimer?.Stop();
+
+        if (!_calculatingHeaderWidths)
+        {
+            CalculateHeaderWidths();
+        }
     }
 
     /// <summary>
@@ -317,7 +340,6 @@ public partial class TableViewHeaderRow : Control
             var autoColumns = allColumns.Where(x => x.Width.IsAuto).ToList();
             var absoluteColumns = allColumns.Where(x => x.Width.IsAbsolute).ToList();
 
-            var height = ActualHeight;
             var availableWidth = TableView.ActualWidth - 32;
 
             // For AutoSizeMinWidth columns, measure the header unconstrained so its natural width is current.
@@ -325,7 +347,8 @@ public partial class TableViewHeaderRow : Control
             {
                 if (column.AutoSizeMinWidth && column.HeaderControl is { } autoMinHeader)
                 {
-                    autoMinHeader.Measure(new Size(double.PositiveInfinity, height));
+                    // ActualHeight, not Height: the Height property defaults to NaN, which is invalid for Measure.
+                    autoMinHeader.Measure(new Size(double.PositiveInfinity, ActualHeight));
                 }
             }
 
@@ -339,16 +362,8 @@ public partial class TableViewHeaderRow : Control
                     : min;
             }
             var starUnitWeight = starColumns.Select(x => x.Width.Value).Sum();
-            var fixedWidth = autoColumns.Select(x =>
-            {
-                if (x.HeaderControl is { } header)
-                {
-                    header.Measure(new Size(double.PositiveInfinity, height));
-                    return Math.Max(x.DesiredWidth, header.DesiredSize.Width);
-                }
 
-                return x.DesiredWidth;
-            }).Sum();
+            var fixedWidth = autoColumns.Select(GetColumnDesiredWidth).Sum();
             fixedWidth += absoluteColumns.Select(x => x.ActualWidth).Sum();
 
             availableWidth -= fixedWidth;
@@ -393,7 +408,7 @@ public partial class TableViewHeaderRow : Control
                     var width = column.Width.IsStar
                                 ? starUnitWidth * column.Width.Value
                                 : column.Width.IsAbsolute ? column.Width.Value
-                                : Math.Max(header.DesiredSize.Width, column.DesiredWidth);
+                                : GetColumnDesiredWidth(column);
 
                     var minWidth = MinWidthFor(column, header);
                     var maxWidth = column.MaxWidth ?? TableView.MaxColumnWidth;
@@ -401,7 +416,6 @@ public partial class TableViewHeaderRow : Control
                     width = width < minWidth ? minWidth : width;
                     width = width > maxWidth ? maxWidth : width;
                     header.Width = width;
-                    header.MaxWidth = width;
 
                     DispatcherQueue.TryEnqueue(() =>
                         header.Measure(
@@ -418,23 +432,45 @@ public partial class TableViewHeaderRow : Control
     }
 
     /// <summary>
+    /// Gets the desired width of a column based on its header and cells.
+    /// </summary>
+    private double GetColumnDesiredWidth(TableViewColumn column)
+    {
+        var autoWidthMode = column.ColumnAutoWidthMode ?? TableView?.ColumnAutoWidthMode;
+        var width = column.DesiredWidth;
+
+        if (column.HeaderControl is { } header && autoWidthMode is not TableViewColumnAutoWidthMode.Cells)
+        {
+            header.Width = double.NaN;
+            header.Measure(new Size(double.PositiveInfinity, ActualHeight));
+            width = Math.Max(width, header.DesiredSize.Width);
+        }
+
+        return width;
+    }
+
+    /// <summary>
     /// Handles the selection changed event for the TableView.
     /// </summary>
     private void OnTableViewSelectionChanged()
     {
         if (TableView is not null && _selectAllCheckBox is not null)
         {
+            // Count via SelectedRanges (O(ranges)): works both with the built-in selection tracking and with
+            // ISelectionInfo sources (direct-mode), where SelectedItems stays empty by design.
+            var selectedCount = TableView.SelectedRanges.Sum(range => (long)range.Length);
+
             if (TableView.Items.Count == 0)
             {
                 _selectAllCheckBox.IsChecked = null;
                 _selectAllCheckBox.IsEnabled = false;
             }
-            else if (TableView.SelectedItems.Count == TableView.Items.Count)
+            else if (selectedCount == TableView.Items.Count)
             {
                 _selectAllCheckBox.IsChecked = true;
                 _selectAllCheckBox.IsEnabled = true;
             }
-            else if (TableView.SelectedItems.Count > 0)
+            else if (selectedCount > 0)
             {
                 _selectAllCheckBox.IsChecked = null;
                 _selectAllCheckBox.IsEnabled = true;

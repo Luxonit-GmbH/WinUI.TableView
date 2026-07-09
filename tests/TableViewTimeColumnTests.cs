@@ -4,7 +4,7 @@ using Microsoft.UI.Xaml.Data;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
 using System;
-using Windows.Globalization.DateTimeFormatting;
+using Windows.System.UserProfile;
 using WinUI.TableView.Controls;
 using WinUI.TableView.Helpers;
 
@@ -33,7 +33,8 @@ public class TableViewTimeColumnTests
         Assert.AreEqual(TableViewLocalizedStrings.TimePickerPlaceholder, element.PlaceholderText);
         Assert.AreEqual(typeof(TimeOnly), element.SourceType);
         Assert.AreEqual(item.AppointmentTime, column.PrepareCellForEdit(cell, new RoutedEventArgs()));
-        Assert.AreEqual(DateTimeFormatter.LongTime.Clock, new TableViewTimeColumn().ClockIdentifier);
+        var clocks = GlobalizationPreferences.Clocks;
+        Assert.AreEqual(clocks.Count > 0 ? clocks[0] : "24HourClock", new TableViewTimeColumn().ClockIdentifier);
     }
 
     [UITestMethod]

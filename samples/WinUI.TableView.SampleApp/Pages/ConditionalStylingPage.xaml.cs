@@ -17,9 +17,9 @@ public sealed partial class ConditionalStylingPage : Page
     {
         if (!(SalesViewModel.SalesList.Count > 0))
         {
-            App.Current.MainPage.SetLoading(true);
+            App.Current.MainWindow.SetLoading(true);
             await SalesViewModel.InitializeItemsAsync();
-            App.Current.MainPage.SetLoading(false);
+            App.Current.MainWindow.SetLoading(false);
         }
 
         ViewModel.SalesData = [.. SalesViewModel.SalesList];

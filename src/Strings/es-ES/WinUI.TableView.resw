@@ -186,4 +186,7 @@
   <data name="PasteCommandDescription" xml:space="preserve">
     <value>Pega el contenido del portapapeles en las celdas.</value>
   </data>
+  <data name="Filtered" xml:space="preserve">
+    <value>Filtrado</value>
+  </data>
 </root>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <root>
   <!-- 
     Microsoft ResX Schema 
@@ -193,5 +193,8 @@
   </data>
   <data name="PasteCommandDescription" xml:space="preserve">
     <value>クリップボードのコンテンツをセルに貼り付けます。</value>
+  </data>
+  <data name="Filtered" xml:space="preserve">
+    <value>フィルター済み</value>
   </data>
 </root>

@@ -186,4 +186,7 @@
   <data name="PasteCommandDescription" xml:space="preserve">
     <value>將剪貼簿內容貼上到儲存格中。</value>
   </data>
+  <data name="Filtered" xml:space="preserve">
+    <value>已篩選</value>
+  </data>
 </root>

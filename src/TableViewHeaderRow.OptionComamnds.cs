@@ -114,7 +114,9 @@ partial class TableViewHeaderRow
 
     private void CanExecuteDeselectAllCommand(XamlUICommand sender, CanExecuteRequestedEventArgs e)
     {
-        e.CanExecute = TableView?.IsEditing is false && (TableView.SelectedItems.Count > 0 || TableView.SelectedCells.Count > 0);
+        // SelectedRanges instead of SelectedItems: works with ISelectionInfo sources (direct-mode), where
+        // SelectedItems stays empty by design.
+        e.CanExecute = TableView?.IsEditing is false && (TableView.SelectedRanges.Count > 0 || TableView.SelectedCells.Count > 0);
     }
 
     private void ExecuteCopyCommand(XamlUICommand sender, ExecuteRequestedEventArgs e)
@@ -131,7 +133,7 @@ partial class TableViewHeaderRow
     private void CanExecuteCopyCommand(XamlUICommand sender, CanExecuteRequestedEventArgs e)
     {
         e.CanExecute = TableView?.CanCopy is true
-            && (TableView?.SelectedItems.Count > 0 || TableView?.SelectedCells.Count > 0 || TableView?.CurrentCellSlot.HasValue is true);
+            && (TableView?.SelectedRanges.Count > 0 || TableView?.SelectedCells.Count > 0 || TableView?.CurrentCellSlot.HasValue is true);
     }
 
     private void CanExecutePasteCommand(XamlUICommand sender, CanExecuteRequestedEventArgs e)
@@ -158,6 +160,6 @@ partial class TableViewHeaderRow
 
     private void CanExecuteExportSelectedToCSVCommand(XamlUICommand sender, CanExecuteRequestedEventArgs e)
     {
-        e.CanExecute = TableView?.IsEditing is false && (TableView.SelectedItems.Count > 0 || TableView.SelectedCells.Count > 0 || TableView.CurrentCellSlot.HasValue);
+        e.CanExecute = TableView?.IsEditing is false && (TableView.SelectedRanges.Count > 0 || TableView.SelectedCells.Count > 0 || TableView.CurrentCellSlot.HasValue);
     }
 }

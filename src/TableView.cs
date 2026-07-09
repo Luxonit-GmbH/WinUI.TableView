@@ -53,6 +53,7 @@ public partial class TableView : ListView
     private Border? _dragRectangle;
     private Point? _dragStartPoint;
     private bool _cellSelectionDirty;
+    private bool _suppressSelectionChangedCellClear;
     private Point? _lastDragCanvasPoint;
     private DispatcherTimer? _autoScrollTimer;
     private double _autoScrollVerticalDelta;
@@ -118,25 +119,34 @@ public partial class TableView : ListView
     /// </summary>
     private void TableView_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!KeyboardHelper.IsCtrlKeyDown())
+        if (_suppressSelectionChangedCellClear)
         {
-            SelectedCellRanges.Clear();
+            _suppressSelectionChangedCellClear = false;
         }
         else
         {
-            SelectedCellRanges.RemoveWhere(slots =>
+            if (!KeyboardHelper.IsCtrlKeyDown())
             {
-                slots.RemoveWhere(slot => SelectedRanges.Any(range => range.IsInRange(slot.Row)));
-                return slots.Count == 0;
-            });
+                SelectedCellRanges.Clear();
+            }
+            else
+            {
+                SelectedCellRanges.RemoveWhere(slots =>
+                {
+                    slots.RemoveWhere(slot => SelectedRanges.Any(range => range.IsInRange(slot.Row)));
+                    return slots.Count == 0;
+                });
+            }
+
+            CurrentCellSlot = null;
+            OnCellSelectionChanged();
         }
 
-        CurrentCellSlot = null;
-        OnCellSelectionChanged();
-
-        if (SelectedItems?.Count == 1)
+        // Range-based single-selection check: SelectedRanges works both with the built-in selection tracking and
+        // with ISelectionInfo sources (direct-mode), where SelectedItems stays empty by design.
+        if (SelectedRanges is [{ Length: 1 } singleRange])
         {
-            DispatcherQueue.TryEnqueue(async () => await ScrollRowIntoView(SelectedIndex));
+            DispatcherQueue.TryEnqueue(async () => await ScrollRowIntoView(singleRange.FirstIndex));
         }
     }
 
@@ -250,6 +260,13 @@ public partial class TableView : ListView
         }
         else if (e.Key is VirtualKey.Escape && currentCell is not null && IsEditing)
         {
+            // Transfer focus from the editing element (e.g. TextBox) to the cell
+            // itself BEFORE EndCellEditing tears down that element.  If we wait,
+            // WinUI's focus manager will move focus to the next focusable sibling
+            // the moment the editing element is removed from the visual tree, and
+            // screen readers will announce that sibling instead of the current cell.
+            currentCell.Focus(FocusState.Programmatic);
+
             e.Handled = EndCellEditing(TableViewEditAction.Cancel, currentCell);
             SetIsEditing(false);
         }
@@ -452,6 +469,11 @@ public partial class TableView : ListView
     /// </summary>
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        if (_isItemsSourceSuspended) // indicates that the control was unloaded and loaded back
+        {
+            _headerRow?.CalculateHeaderWidths();  // Needed when switching back to an existing TableView (without provided column Widths)
+        }
+
         ResumeItemsSource();
         EnsureAutoColumns();
         ApplyCacheLength();
@@ -1078,7 +1100,7 @@ public partial class TableView : ListView
     {
         var slots = Enumerable.Empty<TableViewCellSlot>();
 
-        if (SelectedItems.Any() || SelectedCells.Count != 0)
+        if (SelectedRanges.Count > 0 || SelectedCells.Count != 0)
         {
             slots = SelectedRanges.SelectMany(x => Enumerable.Range(x.FirstIndex, (int)x.Length))
                                   .SelectMany(r => Enumerable.Range(0, Columns.VisibleColumns.Count)
@@ -1666,9 +1688,13 @@ public partial class TableView : ListView
         {
             ctrlKey = ctrlKey || SelectionMode is ListViewSelectionMode.Multiple;
 
-            if (SelectionUnit is TableViewSelectionUnit.Row
-               || (LastSelectionUnit is TableViewSelectionUnit.Row && slot.IsValidRow(this) && !slot.IsValidColumn(this))
-               || (SelectionUnit is TableViewSelectionUnit.CellOrRow && slot.IsValidRow(this) && !slot.IsValidColumn(this)))
+            _suppressSelectionChangedCellClear = SelectionUnit is TableViewSelectionUnit.CellWithRow;
+            var shouldSelectRows = SelectionUnit is TableViewSelectionUnit.Row
+                || (SelectionUnit is TableViewSelectionUnit.CellWithRow && !slot.IsValidColumn(this))
+                || (LastSelectionUnit is TableViewSelectionUnit.Row && slot.IsValidRow(this) && !slot.IsValidColumn(this))
+                || (SelectionUnit is TableViewSelectionUnit.CellOrRow && slot.IsValidRow(this) && !slot.IsValidColumn(this));
+
+            if (shouldSelectRows)
             {
                 if (!ctrlKey)
                     DeselectAllCells();
@@ -1677,8 +1703,15 @@ public partial class TableView : ListView
             }
             else
             {
-                if (!ctrlKey)
+                if (SelectionUnit is TableViewSelectionUnit.CellWithRow)
+                {                    
+                    SelectRows(slot, shiftKey, ctrlKey);
+                }
+                else if (!ctrlKey)
+                {
                     DeselectAllItems();
+                }
+
                 SelectCells(slot, shiftKey, ctrlKey);
                 LastSelectionUnit = TableViewSelectionUnit.Cell;
             }
@@ -1702,7 +1735,7 @@ public partial class TableView : ListView
         {
             DeselectRange(new ItemIndexRange(slot.Row, 1));
         }
-        else if ((!shiftKey && !ctrlKey && SelectedItems.Count <= 1) || SelectionMode is ListViewSelectionMode.Single)
+        else if ((!shiftKey && !ctrlKey && SelectedRanges.Sum(range => (long)range.Length) <= 1) || SelectionMode is ListViewSelectionMode.Single)
         {
             SelectionStartRowIndex = CurrentRowIndex = SelectedIndex = slot.Row;
         }
@@ -1762,12 +1795,29 @@ public partial class TableView : ListView
 
         if (!ctrlKey || !(SelectionMode is ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended))
         {
-            DeselectAll();
+            if (SelectionUnit is TableViewSelectionUnit.CellWithRow)
+            {
+                DeselectAllCells();
+            }
+            else
+            {
+                DeselectAll();
+            }
         }
 
         var selectionRange = (SelectionStartCellSlot is null ? null : SelectedCellRanges.LastOrDefault(x => SelectionStartCellSlot.HasValue && x.Contains(SelectionStartCellSlot.Value))) ?? [];
-        SelectedCellRanges.Remove(selectionRange);
-        selectionRange.Clear();
+
+        if (ctrlKey && SelectionMode is ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended)
+        {
+            selectionRange = SelectedCellRanges.SelectMany(x => x).ToHashSet();
+            SelectedCellRanges.Clear();
+        }
+        else
+        {
+            SelectedCellRanges.Remove(selectionRange);
+            selectionRange.Clear();
+        }
+
         SelectionStartCellSlot ??= CurrentCellSlot;
         SelectionStartCellSlot ??= slot;
 
@@ -2380,7 +2430,6 @@ public partial class TableView : ListView
     private void UpdateBaseSelectionMode()
     {
         _shouldThrowSelectionModeChangedException = true;
-
         base.SelectionMode = SelectionUnit is TableViewSelectionUnit.Cell ? ListViewSelectionMode.None : SelectionMode;
 
         UpdateHorizontalScrollBarMargin();
@@ -2421,6 +2470,38 @@ public partial class TableView : ListView
                 row.EnsureAlternateColors();
             }
         });
+    }
+
+    /// <summary>
+    /// Resets the auto-calculated widths of the specified columns and recalculates them.
+    /// </summary>
+    /// <param name="columns">The columns to refresh. When null, all columns are refreshed.</param>
+    internal void RefreshColumnsAutoWidth(IEnumerable<TableViewColumn>? columns = null)
+    {
+        var targetColumns = (columns ?? Columns).ToHashSet();
+        if (targetColumns.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var column in targetColumns)
+        {
+            column.DesiredWidth = 0d;
+            column.HeaderControl?.InvalidateMeasure();
+        }
+
+        foreach (var row in _rows)
+        {
+            foreach (var cell in row.Cells)
+            {
+                if (cell.Column is { } cellColumn && targetColumns.Contains(cellColumn))
+                {
+                    cell.InvalidateMeasure();
+                }
+            }
+        }
+
+        DispatcherQueue.TryEnqueue(() => _headerRow?.CalculateHeaderWidths());
     }
 
     /// <summary>

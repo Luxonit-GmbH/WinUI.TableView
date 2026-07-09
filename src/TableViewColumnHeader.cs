@@ -1,6 +1,7 @@
 using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -10,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Windows.Foundation;
 using Windows.System;
 using Windows.UI.Core;
 using WinUI.TableView.Collections;
@@ -63,7 +65,10 @@ public partial class TableViewColumnHeader : ContentControl
     /// </summary>
     private void OnWidthChanged(DependencyObject sender, DependencyProperty dp)
     {
-        Column?.ActualWidth = Width;
+        if (!double.IsNaN(Width))
+        {
+            Column?.ActualWidth = Width;
+        }
     }
 
     /// <summary>
@@ -485,6 +490,22 @@ public partial class TableViewColumnHeader : ContentControl
         _reorderStarted = false;
     }
 
+    /// <inheritdoc/>
+    protected override Size MeasureOverride(Size availableSize)
+    {
+        if (Column is not null && _tableView is not null)
+        {
+            var autoWidthMode = Column.ColumnAutoWidthMode ?? _tableView.ColumnAutoWidthMode;
+            if (autoWidthMode is TableViewColumnAutoWidthMode.Header or TableViewColumnAutoWidthMode.Both)
+            {
+                var desiredHeaderSize = base.MeasureOverride(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                Column.DesiredWidth = Math.Max(Column.DesiredWidth, desiredHeaderSize.Width);
+            }
+        }
+
+        return base.MeasureOverride(availableSize);
+    }
+
     /// <summary>
     /// Ensures grid lines are applied.
     /// </summary>
@@ -535,4 +556,21 @@ public partial class TableViewColumnHeader : ContentControl
     /// Gets or sets the filter items control associated with the column header.
     /// </summary>
     internal TableViewFilterItemsControl? FilterItemsControl { get; set; }
+
+    /// <summary>
+    /// Cycles through sort directions (ascending → descending → unsorted) for automation support.
+    /// </summary>
+    internal void InvokeSortCycle()
+    {
+        if (CanSort && Column is not null)
+        {
+            DoSort(GetNextSortDirection());
+        }
+    }
+
+    /// <inheritdoc/>
+    protected override AutomationPeer OnCreateAutomationPeer()
+    {
+        return new AutomationPeers.TableViewColumnHeaderAutomationPeer(this);
+    }
 }
