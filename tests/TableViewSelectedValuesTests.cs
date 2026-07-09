@@ -89,6 +89,35 @@ public class TableViewSelectedValuesTests
         await UnloadAsync(tableView);
     }
 
+    [UITestMethod]
+    public async Task RightClickInRowMode_CellContextFlyoutOpening_IdentifiesTheCell()
+    {
+        var (tableView, items) = await LoadAsync(); // row-based selection (default SelectionUnit)
+
+        TableViewCellSlot? clickedSlot = null;
+        object? clickedItem = null;
+        tableView.CellContextFlyoutOpening += (_, e) =>
+        {
+            clickedSlot = e.Slot;
+            clickedItem = e.Item;
+        };
+
+        // Drive the exact path a right-click takes (TableViewCell.OnContextRequested -> ShowCellContext).
+        var row = (TableViewRow)tableView.ContainerFromIndex(7)!;
+        _ = tableView.ShowCellContext(row.Cells[1], default);
+
+        Assert.AreEqual(new TableViewCellSlot(7, 1), clickedSlot);
+        Assert.AreSame(items[7], clickedItem);
+
+        // In row mode no cells are selected, so SelectedCellValues is empty — GetCellValue(slot) is the way to
+        // resolve the right-clicked cell's value.
+        Assert.AreEqual(0, tableView.SelectedCellValues.Count());
+        Assert.AreEqual(items[7].Value, tableView.GetCellValue(clickedSlot!.Value));
+        Assert.IsNull(tableView.GetCellValue(new TableViewCellSlot(999, 0)));
+
+        await UnloadAsync(tableView);
+    }
+
     private static async Task<(TableView TableView, ObservableCollection<ValueItem> Items)> LoadAsync()
     {
         var items = new ObservableCollection<ValueItem>(
