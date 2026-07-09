@@ -506,7 +506,7 @@ public class PerformanceBenchmarks
     /// dynamic data needs to implement (plus shifting the intervals on insert/remove, and re-mapping or clearing
     /// them on resort/refilter, which static benchmark data doesn't exercise).
     /// </summary>
-    private sealed class SelectionInfoList : IList, INotifyCollectionChanged, ISelectionInfo
+    private sealed class SelectionInfoList : IList, INotifyCollectionChanged, ISelectionInfo, IItemsRangeInfo
     {
         private readonly List<BenchItem> _items;
         private readonly List<(int First, int Last)> _ranges = [];
@@ -516,6 +516,25 @@ public class PerformanceBenchmarks
         public event NotifyCollectionChangedEventHandler? CollectionChanged;
 
         public int SelectRangeCalls { get; private set; }
+
+        // ---- IItemsRangeInfo: the platform reports which rows are visible/buffered on every viewport change.
+        // A real source would feed this straight into its update limiter / data-virtualization pager; keep the
+        // handler trivial — it runs on the UI thread during scrolling.
+
+        public int RangesChangedCalls { get; private set; }
+        public ItemIndexRange? LastVisibleRange { get; private set; }
+        public IReadOnlyList<ItemIndexRange> LastTrackedItems { get; private set; } = [];
+
+        public void RangesChanged(ItemIndexRange visibleRange, IReadOnlyList<ItemIndexRange> trackedItems)
+        {
+            RangesChangedCalls++;
+            LastVisibleRange = visibleRange;
+            LastTrackedItems = trackedItems;
+        }
+
+        public void Dispose()
+        {
+        }
 
         // ---- ISelectionInfo ----
 
@@ -599,6 +618,40 @@ public class PerformanceBenchmarks
         public void Insert(int index, object? value) => throw new NotSupportedException();
         public void Remove(object? value) => throw new NotSupportedException();
         public void RemoveAt(int index) => throw new NotSupportedException();
+    }
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Probe_ItemsRangeInfo_ReportsVisibleRows()
+    {
+        // Verifies that a direct-mode source implementing IItemsRangeInfo gets authoritative visible/buffered row
+        // ranges from the platform — the official feed for "only update visible rows" throttling.
+        var (tableView, source) = await LoadSelectionInfoGridAsync();
+        await Task.Delay(100);
+
+        var initialCalls = source.RangesChangedCalls;
+        var initial = source.LastVisibleRange;
+
+        _ = await tableView.ScrollRowIntoView(5_000);
+        await Task.Delay(250);
+
+        var afterScroll = source.LastVisibleRange;
+        var tracked = string.Join(";", source.LastTrackedItems.Select(r => $"{r.FirstIndex}-{r.LastIndex}"));
+        var findings =
+            $"itemsRangeInfo: initialCalls={initialCalls}, initialVisible={initial?.FirstIndex}..{initial?.LastIndex}, " +
+            $"callsAfterScroll={source.RangesChangedCalls}, visibleAfterScroll={afterScroll?.FirstIndex}..{afterScroll?.LastIndex}, tracked={tracked}";
+
+        TestContext.WriteLine(findings);
+        File.WriteAllText(Path.Combine(Path.GetTempPath(), "WinUI.TableView.Probe.txt"), findings);
+
+        // The platform must have reported ranges on load, and again around row 5000 after the scroll.
+        Assert.IsTrue(initialCalls > 0, "RangesChanged was never called on load");
+        Assert.IsNotNull(afterScroll);
+        Assert.IsTrue(source.RangesChangedCalls > initialCalls, "RangesChanged did not fire on scroll");
+        Assert.IsTrue(afterScroll!.FirstIndex <= 5_000 && afterScroll.LastIndex >= 5_000,
+            $"visible range {afterScroll.FirstIndex}..{afterScroll.LastIndex} does not contain the scrolled-to row");
+
+        await UnloadAsync(tableView);
     }
 
     [UITestMethod]
