@@ -456,17 +456,21 @@ public partial class TableViewHeaderRow : Control
     {
         if (TableView is not null && _selectAllCheckBox is not null)
         {
+            // Count via SelectedRanges (O(ranges)): works both with the built-in selection tracking and with
+            // ISelectionInfo sources (direct-mode), where SelectedItems stays empty by design.
+            var selectedCount = TableView.SelectedRanges.Sum(range => (long)range.Length);
+
             if (TableView.Items.Count == 0)
             {
                 _selectAllCheckBox.IsChecked = null;
                 _selectAllCheckBox.IsEnabled = false;
             }
-            else if (TableView.SelectedItems.Count == TableView.Items.Count)
+            else if (selectedCount == TableView.Items.Count)
             {
                 _selectAllCheckBox.IsChecked = true;
                 _selectAllCheckBox.IsEnabled = true;
             }
-            else if (TableView.SelectedItems.Count > 0)
+            else if (selectedCount > 0)
             {
                 _selectAllCheckBox.IsChecked = null;
                 _selectAllCheckBox.IsEnabled = true;

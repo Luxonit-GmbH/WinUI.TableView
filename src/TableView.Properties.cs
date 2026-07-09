@@ -444,6 +444,82 @@ public partial class TableView
     internal HashSet<HashSet<TableViewCellSlot>> SelectedCellRanges { get; } = [];
 
     /// <summary>
+    /// Gets the slots (row and visible-column indexes) of the currently selected cells. Empty when the current
+    /// selection is row-based (see <see cref="SelectionUnit"/>); membership can be tested with
+    /// <see cref="ICollection{T}.Contains"/> in O(1).
+    /// </summary>
+    public IReadOnlyCollection<TableViewCellSlot> SelectedCellSlots => SelectedCells;
+
+    /// <summary>
+    /// Gets the distinct data items behind the current selection, whatever the selection unit: items of selected
+    /// rows and items of rows that own selected cells, in row order. This is the unified "what data is selected"
+    /// view — with row selection it matches <see cref="Selector.SelectedItem"/>/SelectedItems, with cell selection
+    /// it yields each affected row's item once.
+    /// </summary>
+    /// <remarks>
+    /// Evaluated lazily: enumerating after a select-all walks every selected index, so with very large sources
+    /// enumerate only what is needed (e.g. <c>Take</c>).
+    /// </remarks>
+    public IEnumerable<object?> SelectedValues
+    {
+        get
+        {
+            // Ranges are disjoint but not necessarily contiguous (ctrl-selecting every other row yields many
+            // length-1 ranges); expanding them visits exactly the selected indexes, skipped rows are never yielded.
+            if (SelectedCells.Count == 0)
+            {
+                // Rows-only fast path: disjoint ranges stream directly (only the range list is sorted, not the
+                // indexes), so enumeration stays O(taken) without buffering every selected index first.
+                foreach (var range in SelectedRanges.OrderBy(range => range.FirstIndex))
+                {
+                    for (var index = Math.Max(0, range.FirstIndex); index <= range.LastIndex && index < Items.Count; index++)
+                    {
+                        yield return Items[index];
+                    }
+                }
+
+                yield break;
+            }
+
+            // Cells are selected too: their rows can duplicate or interleave the row ranges, so dedupe and order.
+            var rowIndexes = SelectedRanges.SelectMany(range => Enumerable.Range(range.FirstIndex, (int)range.Length))
+                                           .Concat(SelectedCells.Select(slot => slot.Row))
+                                           .Distinct()
+                                           .OrderBy(index => index);
+
+            foreach (var index in rowIndexes)
+            {
+                if (index >= 0 && index < Items.Count)
+                {
+                    yield return Items[index];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the bound value of every selected cell (via <see cref="TableViewColumn.GetCellContent"/>), ordered by
+    /// row then column. Empty when the current selection is row-based — use <see cref="SelectedValues"/> for the
+    /// row items.
+    /// </summary>
+    public IEnumerable<object?> SelectedCellValues
+    {
+        get
+        {
+            var visibleColumns = Columns.VisibleColumns;
+
+            foreach (var slot in SelectedCells.OrderBy(slot => slot.Row).ThenBy(slot => slot.Column))
+            {
+                if (slot.Row >= 0 && slot.Row < Items.Count &&
+                    slot.Column >= 0 && slot.Column < visibleColumns.Count)
+                {
+                    yield return visibleColumns[slot.Column].GetCellContent(Items[slot.Row]);
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// Gets or sets a value indicating whether the TableView is in editing mode.
     /// </summary>
     internal bool IsEditing { get; private set; }

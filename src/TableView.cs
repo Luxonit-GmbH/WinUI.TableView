@@ -142,9 +142,11 @@ public partial class TableView : ListView
             OnCellSelectionChanged();
         }
 
-        if (SelectedItems?.Count == 1)
+        // Range-based single-selection check: SelectedRanges works both with the built-in selection tracking and
+        // with ISelectionInfo sources (direct-mode), where SelectedItems stays empty by design.
+        if (SelectedRanges is [{ Length: 1 } singleRange])
         {
-            DispatcherQueue.TryEnqueue(async () => await ScrollRowIntoView(SelectedIndex));
+            DispatcherQueue.TryEnqueue(async () => await ScrollRowIntoView(singleRange.FirstIndex));
         }
     }
 
@@ -1098,7 +1100,7 @@ public partial class TableView : ListView
     {
         var slots = Enumerable.Empty<TableViewCellSlot>();
 
-        if (SelectedItems.Any() || SelectedCells.Count != 0)
+        if (SelectedRanges.Count > 0 || SelectedCells.Count != 0)
         {
             slots = SelectedRanges.SelectMany(x => Enumerable.Range(x.FirstIndex, (int)x.Length))
                                   .SelectMany(r => Enumerable.Range(0, Columns.VisibleColumns.Count)
@@ -1733,7 +1735,7 @@ public partial class TableView : ListView
         {
             DeselectRange(new ItemIndexRange(slot.Row, 1));
         }
-        else if ((!shiftKey && !ctrlKey && SelectedItems.Count <= 1) || SelectionMode is ListViewSelectionMode.Single)
+        else if ((!shiftKey && !ctrlKey && SelectedRanges.Sum(range => (long)range.Length) <= 1) || SelectionMode is ListViewSelectionMode.Single)
         {
             SelectionStartRowIndex = CurrentRowIndex = SelectedIndex = slot.Row;
         }
