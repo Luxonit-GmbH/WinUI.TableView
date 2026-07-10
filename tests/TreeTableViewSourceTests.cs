@@ -378,6 +378,25 @@ public class TreeTableViewSourceTests
     }
 
     [TestMethod]
+    public void ResortViaRemoveAndInsert_MovedNodeKeepsExpansionAndSubtree()
+    {
+        // A data-layer resort arrives as remove+insert on the children collection. The moved node's expansion
+        // state lives on the NODE, so its whole visible subtree re-materializes at the new position.
+        var (source, a, _) = CreateTree(); // flat: A, A1, A2(expanded), A2a, B
+
+        var a2 = (Node)a.Children![1];
+        a.Children!.RemoveAt(1);
+        a.Children!.Insert(0, a2); // A2 sorted before A1 now
+
+        Assert.IsTrue(a2.IsExpanded);
+        AssertFlat(source, "A", "A2", "A2a", "A1", "B");
+
+        // And its branch is live again: streaming into the moved subtree still flows.
+        ((ObservableCollection<ITableViewTreeItem>)a2.ChildrenSource!).Add(new Node("A2b", 2));
+        AssertFlat(source, "A", "A2", "A2a", "A2b", "A1", "B");
+    }
+
+    [TestMethod]
     public void Fuzz_RandomMutations_AlwaysMatchReferenceFlatten()
     {
         // The order-statistic backing store is only trustworthy under adversarial interleavings — drive random
