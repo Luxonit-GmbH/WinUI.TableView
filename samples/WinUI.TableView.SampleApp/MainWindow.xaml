@@ -126,6 +126,11 @@
                         <FontIcon Glyph="&#xE92D;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Content="Tree">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8B7;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem Content="Conditional Cell Styling">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE794;" />

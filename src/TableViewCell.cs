@@ -556,6 +556,15 @@ public partial class TableViewCell : ContentControl
 
         if (e.Handled) return;
 
+        // Double-clicking a tree cell of an expandable node toggles expansion instead of entering edit mode
+        // (works in every selection unit, unlike the arrow keys). Leaf nodes fall through to normal editing.
+        if (Column is TableViewTreeColumn && TableView is TreeTableView treeTableView
+            && treeTableView.ToggleExpandCollapseFromCell(this))
+        {
+            e.Handled = true;
+            return;
+        }
+
         base.OnDoubleTapped(e);
 
         if (!IsReadOnly && TableView is not null && !TableView.IsEditing && !Column?.UseSingleElement is true)

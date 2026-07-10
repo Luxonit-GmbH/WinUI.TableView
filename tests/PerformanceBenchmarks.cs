@@ -705,6 +705,226 @@ public class PerformanceBenchmarks
         await UnloadAsync(tableView);
     }
 
+    [TestMethod]
+    [TestCategory("Benchmark")]
+    public void Tree_StreamingChildInserts_2000_Into50kVisibleRows()
+    {
+        // The heavy-streaming tree case: 100 expanded branches x 500 children = ~50k visible rows, then 2000
+        // children inserted at random branches/positions. Order-statistic backing keeps each insert O(log n);
+        // a naive flat list would scan/shift ~50k rows per insert.
+        var branches = new List<ObservableCollection<ITableViewTreeItem>>();
+        var roots = new ObservableCollection<ITableViewTreeItem>();
+
+        for (var r = 0; r < 100; r++)
+        {
+            var children = new ObservableCollection<ITableViewTreeItem>(
+                Enumerable.Range(0, 500).Select(i => (ITableViewTreeItem)new BenchTreeNode($"R{r}C{i}", 1)));
+            branches.Add(children);
+            roots.Add(new BenchTreeNode($"R{r}", 0) { Children = children, IsExpanded = true });
+        }
+
+        using var source = new TreeTableViewSource(roots);
+        var random = new Random(42);
+        var inserted = new List<(ObservableCollection<ITableViewTreeItem> Branch, BenchTreeNode Node)>();
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 0; i < 2_000; i++)
+                {
+                    var branch = branches[random.Next(branches.Count)];
+                    var node = new BenchTreeNode($"S{i}", 1);
+                    branch.Insert(random.Next(branch.Count + 1), node);
+                    inserted.Add((branch, node));
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                foreach (var (branch, node) in inserted)
+                {
+                    branch.Remove(node);
+                }
+
+                inserted.Clear();
+            }));
+    }
+
+    [TestMethod]
+    [TestCategory("Benchmark")]
+    public void Tree_HugeWideBranch_500kChildren_StreamInserts_1000()
+    {
+        // Worst case for the branch shadow (a List): one enormous expanded branch. Every streamed insert pays a
+        // shadow memmove proportional to the branch size, on top of the O(log n) flat-tree work.
+        var children = new ObservableCollection<ITableViewTreeItem>(
+            Enumerable.Range(0, 500_000).Select(i => (ITableViewTreeItem)new BenchTreeNode($"C{i}", 1)));
+        var roots = new ObservableCollection<ITableViewTreeItem>
+        {
+            new BenchTreeNode("R", 0) { Children = children, IsExpanded = true },
+        };
+
+        using var source = new TreeTableViewSource(roots);
+        var random = new Random(42);
+        var inserted = new List<BenchTreeNode>();
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 0; i < 1_000; i++)
+                {
+                    var node = new BenchTreeNode($"S{i}", 1);
+                    children.Insert(random.Next(children.Count + 1), node);
+                    inserted.Add(node);
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                foreach (var node in inserted)
+                {
+                    children.Remove(node);
+                }
+
+                inserted.Clear();
+            }));
+    }
+
+    [TestMethod]
+    [TestCategory("Benchmark")]
+    public void Tree_ManyBranches_500x1000_StreamInserts_2000()
+    {
+        // The app's stated shape: many expanded branches (500 x 1000 = ~500k visible rows), streaming inserts
+        // spread across all of them. Shadow memmoves stay small (1k children); flat-tree work is O(log 500k).
+        var branches = new List<ObservableCollection<ITableViewTreeItem>>();
+        var roots = new ObservableCollection<ITableViewTreeItem>();
+
+        for (var r = 0; r < 500; r++)
+        {
+            var children = new ObservableCollection<ITableViewTreeItem>(
+                Enumerable.Range(0, 1_000).Select(i => (ITableViewTreeItem)new BenchTreeNode($"R{r}C{i}", 1)));
+            branches.Add(children);
+            roots.Add(new BenchTreeNode($"R{r}", 0) { Children = children, IsExpanded = true });
+        }
+
+        using var source = new TreeTableViewSource(roots);
+        var random = new Random(42);
+        var inserted = new List<(ObservableCollection<ITableViewTreeItem> Branch, BenchTreeNode Node)>();
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 0; i < 2_000; i++)
+                {
+                    var branch = branches[random.Next(branches.Count)];
+                    var node = new BenchTreeNode($"S{i}", 1);
+                    branch.Insert(random.Next(branch.Count + 1), node);
+                    inserted.Add((branch, node));
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                foreach (var (branch, node) in inserted)
+                {
+                    branch.Remove(node);
+                }
+
+                inserted.Clear();
+            }));
+    }
+
+    [TestMethod]
+    [TestCategory("Benchmark")]
+    public void Tree_CollapseThenExpand_100kChildBranch()
+    {
+        // Wholesale open/close of a huge branch: 100k row removals + 100k row insertions with per-row events.
+        var children = new ObservableCollection<ITableViewTreeItem>(
+            Enumerable.Range(0, 100_000).Select(i => (ITableViewTreeItem)new BenchTreeNode($"C{i}", 1)));
+        var rootNode = new BenchTreeNode("R", 0) { Children = children, IsExpanded = true };
+        var roots = new ObservableCollection<ITableViewTreeItem> { rootNode };
+
+        using var source = new TreeTableViewSource(roots);
+
+        Report(Measure(
+            () =>
+            {
+                source.Collapse(rootNode);
+                source.Expand(rootNode);
+            },
+            warmup: 1,
+            iterations: 3));
+    }
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_IndexOf_AdapterVsPlatformItems_200kRows()
+    {
+        // Answers "is Items.IndexOf actually fast?": resolve the LAST of ~200k rows 100 times via the adapter's
+        // handle map vs via the platform ItemCollection. RequestExpandCollapse(item, expand) uses the adapter path.
+        var roots = new ObservableCollection<ITableViewTreeItem>();
+        for (var r = 0; r < 200; r++)
+        {
+            var children = new ObservableCollection<ITableViewTreeItem>(
+                Enumerable.Range(0, 1_000).Select(i => (ITableViewTreeItem)new BenchTreeNode($"R{r}C{i}", 1)));
+            roots.Add(new BenchTreeNode($"R{r}", 0) { Children = children, IsExpanded = true });
+        }
+
+        using var source = new TreeTableViewSource(roots);
+        var lastItem = source[source.Count - 1];
+
+        var treeTableView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            UseCollectionView = false,
+            Width = 1200,
+            Height = 800,
+        };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(200, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(BenchTreeNode.Name)) },
+        });
+        treeTableView.ItemsSource = source;
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+
+        Report(Measure(() =>
+        {
+            for (var i = 0; i < 100; i++)
+            {
+                _ = source.IndexOf(lastItem);
+            }
+        }, warmup: 2, iterations: 5), "Tree_IndexOf_Adapter_100x_200kRows");
+
+        Report(Measure(() =>
+        {
+            for (var i = 0; i < 100; i++)
+            {
+                _ = treeTableView.Items.IndexOf(lastItem);
+            }
+        }, warmup: 2, iterations: 5), "Tree_IndexOf_PlatformItems_100x_200kRows");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    private sealed class BenchTreeNode(string name, int depth) : ITableViewTreeNode
+    {
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public string Name { get; } = name;
+        public int Depth { get; } = depth;
+        public ObservableCollection<ITableViewTreeItem>? Children { get; init; }
+        public IEnumerable<ITableViewTreeItem>? ChildrenSource => Children;
+        public bool HasChildren => Children is { Count: > 0 };
+        public bool IsExpanded { get; set; }
+        public bool IsLoading => false;
+
+        private void OnPropertyChanged() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Harness
     // ---------------------------------------------------------------------------------------------------------
@@ -794,9 +1014,9 @@ public class PerformanceBenchmarks
             Iterations: iterations);
     }
 
-    private void Report(BenchResult result)
+    private void Report(BenchResult result, string? benchmarkName = null)
     {
-        var name = TestContext.TestName ?? "unknown";
+        var name = benchmarkName ?? TestContext.TestName ?? "unknown";
 #if DEBUG
         const string configuration = "Debug";
         TestContext.WriteLine("WARNING: Debug build — timings are NOT representative. Benchmark in Release.");
