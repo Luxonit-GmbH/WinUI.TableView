@@ -18,6 +18,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
+using Windows.Foundation.Collections;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.System;
@@ -926,7 +927,10 @@ public partial class TableView : ListView
 
     /// <summary>
     /// In direct mode, watches the raw source for collection changes so realized rows refresh their cached index
-    /// (the internal CollectionView's VectorChanged does this in CollectionView mode).
+    /// (the internal CollectionView's VectorChanged does this in CollectionView mode). Native
+    /// <see cref="IObservableVector{T}"/> sources are preferred over <see cref="INotifyCollectionChanged"/> — the
+    /// XAML platform consumes them without the INCC-to-vector interop conversion; when a source implements both,
+    /// only VectorChanged is subscribed so a change is not handled twice.
     /// </summary>
     private void AttachDirectSource(IEnumerable? source)
     {
@@ -938,7 +942,11 @@ public partial class TableView : ListView
         DetachDirectSource();
         _directSource = source;
 
-        if (source is INotifyCollectionChanged ncc)
+        if (source is IObservableVector<object> vector)
+        {
+            vector.VectorChanged += OnDirectSourceVectorChanged;
+        }
+        else if (source is INotifyCollectionChanged ncc)
         {
             ncc.CollectionChanged += OnDirectSourceCollectionChanged;
         }
@@ -946,7 +954,11 @@ public partial class TableView : ListView
 
     private void DetachDirectSource()
     {
-        if (_directSource is INotifyCollectionChanged ncc)
+        if (_directSource is IObservableVector<object> vector)
+        {
+            vector.VectorChanged -= OnDirectSourceVectorChanged;
+        }
+        else if (_directSource is INotifyCollectionChanged ncc)
         {
             ncc.CollectionChanged -= OnDirectSourceCollectionChanged;
         }
@@ -955,6 +967,11 @@ public partial class TableView : ListView
     }
 
     private void OnDirectSourceCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        InvalidateRowIndices();
+    }
+
+    private void OnDirectSourceVectorChanged(IObservableVector<object> sender, IVectorChangedEventArgs args)
     {
         InvalidateRowIndices();
     }

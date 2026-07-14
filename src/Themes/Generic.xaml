@@ -38,6 +38,11 @@
     <Style TargetType="local:TableView"
            BasedOn="{StaticResource DefaultTableViewStyle}" />
 
+    <!-- Also registers TreeTableView in the generated XAML metadata; without a XAML reference the runtime cannot
+         resolve the type (it falls back to ListView) and style application fails for code-created instances. -->
+    <Style TargetType="local:TreeTableView"
+           BasedOn="{StaticResource DefaultTableViewStyle}" />
+
     <Style TargetType="controls:TableViewTimePicker"
            BasedOn="{StaticResource DefaultTableViewTimePickerStyle}" />
 

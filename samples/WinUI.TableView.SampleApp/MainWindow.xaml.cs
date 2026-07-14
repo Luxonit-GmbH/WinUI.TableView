@@ -16,9 +16,10 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-
+#if WINDOWS
         ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AppTitleBar);
+        SetTitleBar(AppTitleBar);  
+#endif
         AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         AppWindow.SetIcon("Assets/TableView.ico");
     }
@@ -61,6 +62,7 @@ public sealed partial class MainWindow : Window
                 "Context Flyouts" => typeof(ContextFlyoutsPage),
                 "Row Reorder" => typeof(ReorderRowsPage),
                 "Pagination" => typeof(PaginationPage),
+                "Incremental Loading" => typeof(IncrementalLoadingPage),
                 "Filtering" => typeof(FilteringPage),
                 "Customize Filter Flyout" => typeof(CustomizeFilterPage),
                 "External Filtering" => typeof(ExternalFilteringPage),
@@ -70,6 +72,7 @@ public sealed partial class MainWindow : Window
                 "Custom Sorting" => typeof(CustomizeSortingPage),
                 "Data Export" => typeof(ExportPage),
                 "Large Dataset" => typeof(LargeDataPage),
+                "Tree" => typeof(TreePage),
                 "Conditional Cell Styling" => typeof(ConditionalStylingPage),
                 "Column Sizing" => typeof(ColumnSizingPage),
                 _ => typeof(BlankPage)

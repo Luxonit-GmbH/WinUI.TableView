@@ -76,7 +76,7 @@ public partial class TableViewRowAutomationPeer : ListViewItemAutomationPeer, IE
     /// <inheritdoc/>
     protected override object GetPatternCore(PatternInterface patternInterface)
     {
-        if (patternInterface == PatternInterface.ExpandCollapse && HasRowDetails())
+        if (patternInterface == PatternInterface.ExpandCollapse && (IsTreeRow() || HasRowDetails()))
         {
             return this;
         }
@@ -84,36 +84,93 @@ public partial class TableViewRowAutomationPeer : ListViewItemAutomationPeer, IE
         return base.GetPatternCore(patternInterface);
     }
 
-    // IExpandCollapseProvider
+    /// <inheritdoc/>
+    protected override int GetLevelCore()
+    {
+        // Report the tree level (1-based, per UIA) so screen readers announce the hierarchy.
+        return _owner.Content is ITableViewTreeItem item && _owner.TableView is TreeTableView
+            ? item.Depth + 1
+            : base.GetLevelCore();
+    }
+
+    /// <inheritdoc/>
+    protected override int GetPositionInSetCore()
+        => GetTreeSiblingInfo() is { } info ? info.Position : base.GetPositionInSetCore();
+
+    /// <inheritdoc/>
+    protected override int GetSizeOfSetCore()
+        => GetTreeSiblingInfo() is { } info ? info.Count : base.GetSizeOfSetCore();
 
     /// <summary>
-    /// Gets the expanded/collapsed state of the row details panel.
+    /// Sibling position/count for tree rows ("item 2 of 5"), available when the tree is fed by a
+    /// <see cref="TreeTableViewSource"/> (which owns the sibling structure).
     /// </summary>
-    public ExpandCollapseState ExpandCollapseState =>
-        (_owner.RowPresenter?.IsDetailsPanelVisible ?? false)
-            ? ExpandCollapseState.Expanded
-            : ExpandCollapseState.Collapsed;
+    private (int Position, int Count)? GetTreeSiblingInfo()
+    {
+        return _owner.TableView is TreeTableView { ItemsSource: TreeTableViewSource source }
+            && _owner.Content is { } item
+            ? source.GetSiblingInfo(item)
+            : null;
+    }
+
+    // IExpandCollapseProvider — a tree row exposes its tree expansion; otherwise the row details panel.
 
     /// <summary>
-    /// Expands the row details panel if one is available.
+    /// Gets the expanded/collapsed state of the row: tree expansion for a <see cref="TreeTableView"/> row whose
+    /// item is an <see cref="ITableViewTreeItem"/> (leaves report LeafNode), otherwise the row details panel state.
+    /// </summary>
+    public ExpandCollapseState ExpandCollapseState
+    {
+        get
+        {
+            if (IsTreeRow())
+            {
+                var item = (ITableViewTreeItem)_owner.Content!;
+                return item.IsFinalItem || !item.HasChildren ? ExpandCollapseState.LeafNode
+                    : item.IsExpanded ? ExpandCollapseState.Expanded
+                    : item.IsLoading ? ExpandCollapseState.PartiallyExpanded
+                    : ExpandCollapseState.Collapsed;
+            }
+
+            return (_owner.RowPresenter?.IsDetailsPanelVisible ?? false)
+                ? ExpandCollapseState.Expanded
+                : ExpandCollapseState.Collapsed;
+        }
+    }
+
+    /// <summary>
+    /// Expands the tree row (via <see cref="TreeTableView.RequestExpandCollapse"/>) or the row details panel.
     /// </summary>
     public void Expand()
     {
-        if (_owner.TableView is not null && HasRowDetails())
+        if (IsTreeRow())
+        {
+            ((TreeTableView)_owner.TableView!).RequestExpandCollapse((ITableViewTreeItem)_owner.Content!, _owner.Index, expand: true);
+        }
+        else if (_owner.TableView is not null && HasRowDetails())
         {
             _owner.RowPresenter?.ShowDetailPane(visible: true);
         }
     }
 
     /// <summary>
-    /// Collapses the row details panel if one is available.
+    /// Collapses the tree row (via <see cref="TreeTableView.RequestExpandCollapse"/>) or the row details panel.
     /// </summary>
     public void Collapse()
     {
-        if (_owner.TableView is not null && HasRowDetails())
+        if (IsTreeRow())
+        {
+            ((TreeTableView)_owner.TableView!).RequestExpandCollapse((ITableViewTreeItem)_owner.Content!, _owner.Index, expand: false);
+        }
+        else if (_owner.TableView is not null && HasRowDetails())
         {
             _owner.RowPresenter?.ShowDetailPane(visible: false);
         }
+    }
+
+    private bool IsTreeRow()
+    {
+        return _owner.TableView is TreeTableView && _owner.Content is ITableViewTreeItem;
     }
 
     private bool HasRowDetails()
