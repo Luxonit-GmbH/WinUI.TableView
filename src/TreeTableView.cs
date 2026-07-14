@@ -59,7 +59,8 @@ public partial class TreeTableView : TableView
     {
         ArgumentNullException.ThrowIfNull(item);
 
-        if (item.IsLoading || expand == item.IsExpanded || (expand && !item.HasChildren))
+        // IsFinalItem is the definitive leaf marker: no expand/collapse event is EVER raised for such items.
+        if (item.IsFinalItem || item.IsLoading || expand == item.IsExpanded || (expand && !item.HasChildren))
         {
             return;
         }
@@ -102,7 +103,8 @@ public partial class TreeTableView : TableView
     /// </summary>
     internal bool ToggleExpandCollapseFromCell(TableViewCell cell)
     {
-        if (cell.Row is { Content: ITableViewTreeItem item } row && (item.HasChildren || item.IsLoading))
+        if (cell.Row is { Content: ITableViewTreeItem { IsFinalItem: false } item } row
+            && (item.HasChildren || item.IsLoading))
         {
             RequestExpandCollapse(item, row.Index, !item.IsExpanded);
             return true;
@@ -127,7 +129,7 @@ public partial class TreeTableView : TableView
 
             // Only consume the key when it maps to an actual state change, so an already-collapsed row keeps
             // default Left behavior (if any) instead of swallowing the key.
-            if (!item.IsLoading && expand != item.IsExpanded && (!expand || item.HasChildren))
+            if (!item.IsFinalItem && !item.IsLoading && expand != item.IsExpanded && (!expand || item.HasChildren))
             {
                 RequestExpandCollapse(item, rowIndex, expand);
                 e.Handled = true;

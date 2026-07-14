@@ -126,7 +126,7 @@ public partial class TableViewRowAutomationPeer : ListViewItemAutomationPeer, IE
             if (IsTreeRow())
             {
                 var item = (ITableViewTreeItem)_owner.Content!;
-                return !item.HasChildren ? ExpandCollapseState.LeafNode
+                return item.IsFinalItem || !item.HasChildren ? ExpandCollapseState.LeafNode
                     : item.IsExpanded ? ExpandCollapseState.Expanded
                     : item.IsLoading ? ExpandCollapseState.PartiallyExpanded
                     : ExpandCollapseState.Collapsed;

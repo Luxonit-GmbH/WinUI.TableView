@@ -4,39 +4,40 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Windows.Foundation.Collections;
 
 namespace WinUI.TableView;
 
 /// <summary>
-/// Flattens a nested (collection-in-collection) hierarchy of <see cref="ITableViewTreeNode"/> items into the flat,
+/// Flattens a nested (collection-in-collection) hierarchy of <see cref="ITableViewTreeItem"/> items into the flat,
 /// read-only <see cref="IObservableVector{T}"/> view a <see cref="TreeTableView"/> binds to (use with
 /// <see cref="TableView.UseCollectionView"/> = <see langword="false"/>).
 /// </summary>
 /// <remarks>
-/// <para>The app keeps its natural shape: nodes own children collections in the app's ordering, and mutations go to
-/// those collections — this adapter owns all flat-position math. While a node is expanded its children collection is
-/// tracked live (<see cref="IObservableVector{T}"/> of object natively, or
+/// <para>The app keeps its natural shape: items own children collections in the app's ordering, and mutations go to
+/// those collections — this adapter owns all flat-position math. While an item is expanded its children collection
+/// is tracked live (<see cref="IObservableVector{T}"/> of object natively, or
 /// <see cref="INotifyCollectionChanged"/>); collapsed branches cost nothing, so subscriptions scale with the number
-/// of expanded nodes, not with data size.</para>
-/// <para>Built for heavy streaming into expanded branches: rows live in an order-statistic structure and subtree
-/// sizes are maintained incrementally, so a child insert/remove costs O(log visibleRows + depth) — independent of
-/// how many rows are visible — instead of the linear scans a naive flat list would need.</para>
+/// of expanded items, not with data size.</para>
+/// <para>Built for heavy streaming into expanded branches: rows live in an order-statistic structure and per-item
+/// bookkeeping (row handle, visible-subtree size, parent, branch subscription) is a SINGLE dictionary entry, so a
+/// child insert/remove costs O(log visibleRows + depth) with one hash lookup per touched item.</para>
 /// <para>Expansion flow: wire <see cref="TreeTableView.ExpandRequested"/> to (optionally fetch children, then) call
 /// <see cref="Expand"/>, and <see cref="TreeTableView.CollapseRequested"/> to <see cref="Collapse"/>. Collapsing
-/// keeps descendants' own expansion state, so re-expanding restores the previous shape.</para>
-/// <para>Node instances must be unique within the visible tree (flat positions are resolved by reference).</para>
+/// keeps descendants' own expansion state, so re-expanding restores the previous shape. Items with
+/// <see cref="ITableViewTreeItem.IsFinalItem"/> are never expanded.</para>
+/// <para>Item instances must be unique within the visible tree (flat positions are resolved by reference), and all
+/// mutations must happen on the UI thread.</para>
 /// </remarks>
 public partial class TreeTableViewSource : IObservableVector<object>, ISelectionInfo, IItemsRangeInfo, IDisposable
 {
     private static readonly object RootsKey = new();
 
     private readonly IndexedRows _rows = new();
-    private readonly Dictionary<object, IndexedRows.Row> _handles = [];
-    private readonly Dictionary<object, int> _subtreeSizes = [];
-    private readonly Dictionary<object, object> _parents = [];
-    private readonly Dictionary<object, Branch> _branches = [];
+    private readonly Dictionary<object, NodeEntry> _nodes = [];
     private readonly List<(int First, int Last)> _selection = []; // sorted, disjoint, inclusive flat-index intervals
+    private Branch? _rootsBranch;
 
     /// <inheritdoc/>
     public event VectorChangedEventHandler<object>? VectorChanged;
@@ -48,10 +49,10 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     public event EventHandler? RangesChanged;
 
     /// <summary>
-    /// Initializes the source over the given root nodes. Pre-expanded nodes (with a populated
-    /// <see cref="ITableViewTreeNode.ChildrenSource"/>) are flattened immediately.
+    /// Initializes the source over the given root items. Pre-expanded items (with a populated
+    /// <see cref="ITableViewTreeItem.ChildrenSource"/>) are flattened immediately.
     /// </summary>
-    /// <param name="roots">The root nodes; tracked live when observable (see <see cref="ITableViewTreeNode.ChildrenSource"/>).</param>
+    /// <param name="roots">The root items; tracked live when observable (see <see cref="ITableViewTreeItem.ChildrenSource"/>).</param>
     public TreeTableViewSource(IEnumerable<ITableViewTreeItem> roots)
     {
         ArgumentNullException.ThrowIfNull(roots);
@@ -66,47 +67,53 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     }
 
     /// <summary>
-    /// Shows the node's children (sets <see cref="ITableViewTreeNode.IsExpanded"/> and splices its
-    /// <see cref="ITableViewTreeNode.ChildrenSource"/> — including pre-expanded descendants — into the flat view).
+    /// Shows the item's children (sets <see cref="ITableViewTreeItem.IsExpanded"/> and splices its
+    /// <see cref="ITableViewTreeItem.ChildrenSource"/> — including pre-expanded descendants — into the flat view).
     /// Call after the children collection is populated; typical wiring is from
-    /// <see cref="TreeTableView.ExpandRequested"/>, after any asynchronous fetch completes.
+    /// <see cref="TreeTableView.ExpandRequested"/>, after any asynchronous fetch completes. No-op for
+    /// <see cref="ITableViewTreeItem.IsFinalItem"/> items.
     /// </summary>
-    /// <param name="node">The node to expand.</param>
-    public void Expand(ITableViewTreeNode node)
+    /// <param name="item">The item to expand.</param>
+    public void Expand(ITableViewTreeItem item)
     {
-        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(item);
 
-        if (_branches.ContainsKey(node))
+        if (item.IsFinalItem || GetBranch(item) is not null)
         {
             return;
         }
 
-        node.IsExpanded = true;
+        item.IsExpanded = true;
 
-        if (node.ChildrenSource is not { } children || !_handles.TryGetValue(node, out var handle))
+        if (item.ChildrenSource is not { } children || !_nodes.TryGetValue(item, out var entry))
         {
             return;
         }
 
-        var branch = Subscribe(node, children);
-        var flatIndex = _rows.IndexOf(handle) + 1;
+        var branch = Subscribe(item, children);
+        var flatIndex = _rows.IndexOf(entry.Handle) + 1;
 
         foreach (var child in branch.Shadow)
         {
-            flatIndex += InsertSubtree(flatIndex, child, node);
+            flatIndex += InsertSubtree(flatIndex, child, item);
         }
     }
 
     /// <summary>
-    /// Hides the node's visible descendants and sets <see cref="ITableViewTreeNode.IsExpanded"/> to
+    /// Hides the item's visible descendants and sets <see cref="ITableViewTreeItem.IsExpanded"/> to
     /// <see langword="false"/>. Descendants keep their own expansion state for a later re-expand.
     /// </summary>
-    /// <param name="node">The node to collapse.</param>
-    public void Collapse(ITableViewTreeNode node)
+    /// <param name="item">The item to collapse.</param>
+    public void Collapse(ITableViewTreeItem item)
     {
-        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(item);
 
-        if (_branches.TryGetValue(node, out var branch))
+        if (item.IsFinalItem)
+        {
+            return;
+        }
+
+        if (GetBranch(item) is { } branch)
         {
             foreach (var child in branch.Shadow.ToList())
             {
@@ -116,7 +123,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             Unsubscribe(branch);
         }
 
-        node.IsExpanded = false;
+        item.IsExpanded = false;
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -124,7 +131,19 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     // ---------------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// A tracked children collection: the roots, or an expanded node's ChildrenSource. The shadow list resolves
+    /// All per-visible-item bookkeeping in one dictionary slot: the flat-row handle, the visible-subtree size,
+    /// the parent key, and (while expanded) the children subscription — one hash lookup per touched item.
+    /// </summary>
+    private struct NodeEntry
+    {
+        public IndexedRows.Row Handle;
+        public int SubtreeSize;
+        public object ParentKey;
+        public Branch? Branch;
+    }
+
+    /// <summary>
+    /// A tracked children collection: the roots, or an expanded item's ChildrenSource. The shadow list resolves
     /// removed items (vector change events carry only the index) and preserves child order.
     /// </summary>
     private sealed class Branch
@@ -134,6 +153,26 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
         public List<object> Shadow { get; } = [];
         public VectorChangedEventHandler<object>? VectorHandler { get; set; }
         public NotifyCollectionChangedEventHandler? InccHandler { get; set; }
+    }
+
+    private Branch? GetBranch(object key)
+        => ReferenceEquals(key, RootsKey) ? _rootsBranch
+            : _nodes.TryGetValue(key, out var entry) ? entry.Branch : null;
+
+    private void SetBranch(object key, Branch? branch)
+    {
+        if (ReferenceEquals(key, RootsKey))
+        {
+            _rootsBranch = branch;
+            return;
+        }
+
+        ref var entry = ref CollectionsMarshal.GetValueRefOrNullRef(_nodes, key);
+
+        if (!System.Runtime.CompilerServices.Unsafe.IsNullRef(ref entry))
+        {
+            entry.Branch = branch;
+        }
     }
 
     private Branch Subscribe(object key, IEnumerable<ITableViewTreeItem> source)
@@ -152,7 +191,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             incc.CollectionChanged += branch.InccHandler;
         }
 
-        _branches[key] = branch;
+        SetBranch(key, branch);
         return branch;
     }
 
@@ -167,36 +206,37 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             incc.CollectionChanged -= branch.InccHandler;
         }
 
-        _branches.Remove(branch.Key);
+        SetBranch(branch.Key, null);
     }
 
     /// <summary>
-    /// Collects the node and (recursively) its expanded, tracked descendants, recording parentage and storing each
-    /// node's visible-subtree size. Returns the node's own visible size.
+    /// Collects the item and (recursively) its expanded, tracked descendants into the buffer, creating each item's
+    /// bookkeeping entry (parent, subtree size, branch subscription) along the way. Returns the visible size.
     /// </summary>
     private int BuildSubtree(object node, object parentKey, List<object> buffer)
     {
         buffer.Add(node);
-        _parents[node] = parentKey;
+        _nodes[node] = new NodeEntry { ParentKey = parentKey };
         var size = 1;
 
-        if (node is ITableViewTreeNode { IsExpanded: true, ChildrenSource: { } children } treeNode
-            && !_branches.ContainsKey(treeNode))
+        if (node is ITableViewTreeItem { IsFinalItem: false, IsExpanded: true, ChildrenSource: { } children } item
+            && GetBranch(item) is null)
         {
-            var branch = Subscribe(treeNode, children);
+            var branch = Subscribe(item, children);
 
             foreach (var child in branch.Shadow)
             {
-                size += BuildSubtree(child, treeNode, buffer);
+                size += BuildSubtree(child, item, buffer);
             }
         }
 
-        _subtreeSizes[node] = size;
+        ref var entry = ref CollectionsMarshal.GetValueRefOrNullRef(_nodes, node);
+        entry.SubtreeSize = size;
         return size;
     }
 
     /// <summary>
-    /// Inserts the node's visible subtree at the flat index (one ItemInserted per row), grows the ancestors'
+    /// Inserts the item's visible subtree at the flat index (one ItemInserted per row), grows the ancestors'
     /// stored sizes, and returns the number of rows inserted.
     /// </summary>
     private int InsertSubtree(int flatIndex, object node, object parentKey)
@@ -206,7 +246,8 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
 
         for (var i = 0; i < buffer.Count; i++)
         {
-            _handles[buffer[i]] = _rows.InsertAt(flatIndex + i, buffer[i]);
+            ref var entry = ref CollectionsMarshal.GetValueRefOrNullRef(_nodes, buffer[i]);
+            entry.Handle = _rows.InsertAt(flatIndex + i, buffer[i]);
             ShiftSelectionForInsert(flatIndex + i);
             VectorChanged?.Invoke(this, new VectorChangedArgs(CollectionChange.ItemInserted, (uint)(flatIndex + i)));
         }
@@ -216,30 +257,30 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     }
 
     /// <summary>
-    /// Removes the node's visible subtree from the flat view (one ItemRemoved per row), shrinks the ancestors'
-    /// stored sizes, and drops the subscriptions of the node and its tracked descendants.
+    /// Removes the item's visible subtree from the flat view (one ItemRemoved per row), shrinks the ancestors'
+    /// stored sizes, and drops the subscriptions of the item and its tracked descendants.
     /// </summary>
     private void RemoveSubtree(object node)
     {
-        var size = _subtreeSizes[node];
-        var parentKey = _parents[node];
-        var flatIndex = _rows.IndexOf(_handles[node]);
+        var entry = _nodes[node];
+        var size = entry.SubtreeSize;
+        var parentKey = entry.ParentKey;
+        var flatIndex = _rows.IndexOf(entry.Handle);
+
+        // Unsubscribe the whole subtree BEFORE the entries disappear (the walk needs their Branch references).
+        DropBranchesRecursive(node);
 
         for (var i = 0; i < size; i++)
         {
             var handle = _rows.SelectAt(flatIndex);
-            var value = handle.Value;
 
             _rows.Remove(handle);
-            _handles.Remove(value);
-            _subtreeSizes.Remove(value);
-            _parents.Remove(value);
+            _nodes.Remove(handle.Value);
             ShiftSelectionForRemove(flatIndex);
 
             VectorChanged?.Invoke(this, new VectorChangedArgs(CollectionChange.ItemRemoved, (uint)flatIndex));
         }
 
-        DropBranchesRecursive(node);
         GrowAncestors(parentKey, -size);
     }
 
@@ -247,8 +288,15 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     {
         while (!ReferenceEquals(key, RootsKey))
         {
-            _subtreeSizes[key] += delta;
-            key = _parents[key];
+            ref var entry = ref CollectionsMarshal.GetValueRefOrNullRef(_nodes, key);
+
+            if (System.Runtime.CompilerServices.Unsafe.IsNullRef(ref entry))
+            {
+                return;
+            }
+
+            entry.SubtreeSize += delta;
+            key = entry.ParentKey;
         }
     }
 
@@ -258,7 +306,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// </summary>
     internal (int Position, int Count)? GetSiblingInfo(object item)
     {
-        if (!_parents.TryGetValue(item, out var parentKey) || !_branches.TryGetValue(parentKey, out var branch))
+        if (!_nodes.TryGetValue(item, out var entry) || GetBranch(entry.ParentKey) is not { } branch)
         {
             return null;
         }
@@ -269,7 +317,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
 
     private void DropBranchesRecursive(object node)
     {
-        if (_branches.TryGetValue(node, out var branch))
+        if (GetBranch(node) is { } branch)
         {
             foreach (var child in branch.Shadow)
             {
@@ -288,16 +336,16 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     {
         if (childIndex < branch.Shadow.Count)
         {
-            return _rows.IndexOf(_handles[branch.Shadow[childIndex]]);
+            return _rows.IndexOf(_nodes[branch.Shadow[childIndex]].Handle);
         }
 
         if (branch.Shadow.Count > 0)
         {
-            var last = branch.Shadow[^1];
-            return _rows.IndexOf(_handles[last]) + _subtreeSizes[last];
+            var lastEntry = _nodes[branch.Shadow[^1]];
+            return _rows.IndexOf(lastEntry.Handle) + lastEntry.SubtreeSize;
         }
 
-        return ReferenceEquals(branch.Key, RootsKey) ? 0 : _rows.IndexOf(_handles[branch.Key]) + 1;
+        return ReferenceEquals(branch.Key, RootsKey) ? 0 : _rows.IndexOf(_nodes[branch.Key].Handle) + 1;
     }
 
     private void OnBranchVectorChanged(Branch branch, IObservableVector<object> sender, IVectorChangedEventArgs args)
@@ -593,7 +641,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     public bool IsReadOnly => true;
 
     /// <inheritdoc/>
-    public bool Contains(object item) => _handles.ContainsKey(item);
+    public bool Contains(object item) => _nodes.ContainsKey(item);
 
     /// <inheritdoc/>
     public void CopyTo(object[] array, int arrayIndex)
@@ -605,7 +653,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     }
 
     /// <inheritdoc/>
-    public int IndexOf(object item) => _handles.TryGetValue(item, out var handle) ? _rows.IndexOf(handle) : -1;
+    public int IndexOf(object item) => _nodes.TryGetValue(item, out var entry) ? _rows.IndexOf(entry.Handle) : -1;
 
     /// <inheritdoc/>
     public IEnumerator<object> GetEnumerator() => _rows.GetEnumerator();
@@ -632,9 +680,14 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// </summary>
     public void Dispose()
     {
-        foreach (var branch in _branches.Values.ToList())
+        if (_rootsBranch is { } roots)
         {
-            Unsubscribe(branch);
+            Unsubscribe(roots);
+        }
+
+        foreach (var entry in _nodes.Values.Where(entry => entry.Branch is not null).ToList())
+        {
+            Unsubscribe(entry.Branch!);
         }
 
         GC.SuppressFinalize(this);

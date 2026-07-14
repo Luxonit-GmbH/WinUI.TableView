@@ -148,8 +148,8 @@ public class TreeTableViewSourceTests
         });
 
         // The entire app-side wiring for already-loaded children: two one-liners.
-        treeTableView.ExpandRequested += (_, e) => source.Expand((ITableViewTreeNode)e.Item);
-        treeTableView.CollapseRequested += (_, e) => source.Collapse((ITableViewTreeNode)e.Item);
+        treeTableView.ExpandRequested += (_, e) => source.Expand((ITableViewTreeItem)e.Item);
+        treeTableView.CollapseRequested += (_, e) => source.Collapse((ITableViewTreeItem)e.Item);
 
         treeTableView.ItemsSource = source;
         await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
@@ -310,7 +310,7 @@ public class TreeTableViewSourceTests
             Width = new GridLength(250, GridUnitType.Pixel),
             Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
         });
-        treeTableView.ExpandRequested += (_, e) => source.Expand((ITableViewTreeNode)e.Item);
+        treeTableView.ExpandRequested += (_, e) => source.Expand((ITableViewTreeItem)e.Item);
 
         treeTableView.ItemsSource = source;
         await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
@@ -470,7 +470,7 @@ public class TreeTableViewSourceTests
         {
             yield return item;
 
-            if (item is ITableViewTreeNode { IsExpanded: true, ChildrenSource: { } children })
+            if (item is ITableViewTreeItem { IsExpanded: true, ChildrenSource: { } children })
             {
                 foreach (var descendant in children.SelectMany(ReferenceFlatten))
                 {
@@ -511,7 +511,7 @@ public class TreeTableViewSourceTests
         return events;
     }
 
-    private sealed class Node(string name, int depth) : ITableViewTreeNode
+    private sealed class Node(string name, int depth) : ITableViewTreeItem
     {
         public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -521,6 +521,7 @@ public class TreeTableViewSourceTests
         public IEnumerable<ITableViewTreeItem>? ChildrenSource { get; private set; }
 
         public bool HasChildren => Children is { Count: > 0 };
+        public bool IsFinalItem => false;
 
         public bool IsExpanded
         {

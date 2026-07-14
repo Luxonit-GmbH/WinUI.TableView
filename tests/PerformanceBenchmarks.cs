@@ -910,7 +910,7 @@ public class PerformanceBenchmarks
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
     }
 
-    private sealed class BenchTreeNode(string name, int depth) : ITableViewTreeNode
+    private sealed class BenchTreeNode(string name, int depth) : ITableViewTreeItem
     {
         public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -919,6 +919,7 @@ public class PerformanceBenchmarks
         public ObservableCollection<ITableViewTreeItem>? Children { get; init; }
         public IEnumerable<ITableViewTreeItem>? ChildrenSource => Children;
         public bool HasChildren => Children is { Count: > 0 };
+        public bool IsFinalItem => false;
         public bool IsExpanded { get; set; }
         public bool IsLoading => false;
 

@@ -194,6 +194,32 @@ public class TreeTableViewTests
     }
 
     [UITestMethod]
+    public async Task FinalItem_NeverRaisesExpandOrCollapse_OnAnyPath()
+    {
+        var (treeTableView, _) = await LoadAsync();
+        var requests = 0;
+        treeTableView.ExpandRequested += (_, _) => requests++;
+        treeTableView.CollapseRequested += (_, _) => requests++;
+
+        // Contradictory state on purpose: claims children AND finality — IsFinalItem must win on every path.
+        var finalItem = new TreeNode { Name = "Final", Depth = 0, ChildCount = 5, IsFinalItem = true };
+
+        treeTableView.RequestExpandCollapse(finalItem, 0, expand: true);
+        treeTableView.RequestExpandCollapse(finalItem, expand: true);
+        treeTableView.RequestExpandCollapse(finalItem, 0, expand: false);
+
+        Assert.AreEqual(0, requests);
+
+        // The double-click path does not consume the gesture either (falls through to editing).
+        var row = (TableViewRow)treeTableView.ContainerFromIndex(0)!;
+        row.Content = finalItem;
+        Assert.IsFalse(treeTableView.ToggleExpandCollapseFromCell(row.Cells[0]));
+        Assert.AreEqual(0, requests);
+
+        await UnloadAsync(treeTableView);
+    }
+
+    [UITestMethod]
     public async Task RequestExpandCollapse_IndexFreeOverload_ResolvesIndex()
     {
         var (treeTableView, source) = await LoadAsync();
@@ -437,6 +463,8 @@ public class TreeTableViewTests
         public int ChildCount { get; init; }
 
         public bool HasChildren => ChildCount > 0;
+        public bool IsFinalItem { get; init; }
+        public System.Collections.Generic.IEnumerable<ITableViewTreeItem>? ChildrenSource => null; // flat-source model
 
         public bool IsExpanded
         {

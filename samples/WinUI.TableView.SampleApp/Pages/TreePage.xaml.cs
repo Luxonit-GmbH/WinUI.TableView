@@ -15,9 +15,9 @@ public sealed partial class TreePage : Page
         // Nested collections in the app's natural shape; TreeTableViewSource flattens them for the grid.
         var roots = new ObservableCollection<ITableViewTreeItem>();
 
-        for (var i = 1; i <= 25; i++)
+        for (var i = 1; i <= 50000; i++)
         {
-            roots.Add(new TreeItemModel($"Portfolio {i:D2}", "Portfolio", depth: 0, childCount: Random.Shared.Next(3, 8)));
+            roots.Add(new TreeItemModel($"Portfolio {i:D2}", "Portfolio", depth: 0, childCount: Random.Shared.Next(3, 100)));
         }
 
         _source = new TreeTableViewSource(roots);
@@ -55,7 +55,7 @@ public sealed partial class TreePage : Page
 /// <summary>
 /// Demo tree item: three levels (Portfolio - Book - Order), children created lazily on first expand.
 /// </summary>
-public sealed partial class TreeItemModel : ITableViewTreeNode
+public sealed partial class TreeItemModel : ITableViewTreeItem
 {
     private bool _isExpanded;
     private bool _isLoading;
@@ -82,6 +82,9 @@ public sealed partial class TreeItemModel : ITableViewTreeNode
 
     public bool ChildrenLoaded => Children is not null;
     public bool HasChildren => ChildCount > 0;
+
+    // Orders are terminal: no expand/collapse event is ever raised for them, no matter the gesture.
+    public bool IsFinalItem => Kind == "Order";
 
     public bool IsExpanded
     {
