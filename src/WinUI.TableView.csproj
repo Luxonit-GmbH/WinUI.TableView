@@ -14,6 +14,10 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<IsAOTCompatible>true</IsAOTCompatible>
 	</PropertyGroup>
+  <PropertyGroup Condition="!$(Configurations.Contains('$(Configuration)')) And '$(Configuration)' != ''">
+    <!-- This appends the active build configuration to the recognized list -->
+    <Configurations>$(Configurations);$(Configuration)</Configurations>
+  </PropertyGroup>
 	<ItemGroup>
 		<Compile Update="TableView.*.cs">
 			<DependentUpon>TableView.cs</DependentUpon>
