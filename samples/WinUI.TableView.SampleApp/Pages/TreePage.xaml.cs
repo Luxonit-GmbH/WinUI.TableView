@@ -6,13 +6,11 @@ namespace WinUI.TableView.SampleApp.Pages;
 
 public sealed partial class TreePage : Page
 {
-    private readonly TreeTableViewSource _source;
-
     public TreePage()
     {
         InitializeComponent();
 
-        // Nested collections in the app's natural shape; TreeTableViewSource flattens them for the grid.
+        // Nested collections in the app's natural shape; the control wraps them in a TreeTableViewSource itself.
         var roots = new ObservableCollection<ITableViewTreeItem>();
 
         for (var i = 1; i <= 50000; i++)
@@ -20,11 +18,11 @@ public sealed partial class TreePage : Page
             roots.Add(new TreeItemModel($"Portfolio {i:D2}", "Portfolio", depth: 0, childCount: Random.Shared.Next(3, 100)));
         }
 
-        _source = new TreeTableViewSource(roots);
-        treeView.ItemsSource = _source;
+        treeView.TreeItemsSource = roots; // one line: adapter created, UseCollectionView off, bound
 
+        // Collapse needs no wiring at all (automatic). Expand only needs a handler because children are fetched
+        // lazily from a "backend" here — a fully pre-loaded tree would need no handlers whatsoever.
         treeView.ExpandRequested += OnExpandRequested;
-        treeView.CollapseRequested += (_, e) => _source.Collapse((TreeItemModel)e.Item);
 
         indentSlider.Value = treeColumn.IndentWidth;
         indentSlider.ValueChanged += (_, e) => treeColumn.IndentWidth = e.NewValue;
@@ -46,9 +44,11 @@ public sealed partial class TreePage : Page
 
             node.LoadChildren();
             node.IsLoading = false;
-        }
 
-        _source.Expand(node);
+            // Complete the deferred expansion now that the children exist (the automatic expand ran before the
+            // fetch finished and could only mark the item expanded).
+            treeView.TreeSource!.Expand(node);
+        }
     }
 }
 
