@@ -128,6 +128,164 @@ public class TreeTableViewSourceTests
     }
 
     [UITestMethod]
+    public async Task TreeItemsSource_OneLineBinding_WrapsRootsAndDisplaysTree()
+    {
+        var (source, _, roots) = CreateTree();
+        source.Dispose(); // roots reused; the control creates its own adapter
+
+        var treeTableView = new TreeTableView { AutoGenerateColumns = false, Width = 600, Height = 400 };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+
+        treeTableView.TreeItemsSource = roots; // the entire wiring
+
+        Assert.IsInstanceOfType<TreeTableViewSource>(treeTableView.ItemsSource);
+        Assert.IsFalse(treeTableView.UseCollectionView);
+        Assert.IsNotNull(treeTableView.TreeSource);
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        Assert.AreEqual(5, treeTableView.Items.Count); // pre-expanded fixture fully flattened
+
+        treeTableView.TreeItemsSource = null;
+        Assert.IsNull(treeTableView.ItemsSource);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public async Task AutoExpandCollapse_NoHandlersNeeded()
+    {
+        var (source, a, roots) = CreateTree();
+        source.Collapse(a);
+        source.Dispose();
+
+        var treeTableView = new TreeTableView { AutoGenerateColumns = false, Width = 600, Height = 400 };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+        treeTableView.TreeItemsSource = roots;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        Assert.AreEqual(2, treeTableView.Items.Count);
+
+        treeTableView.RequestExpandCollapse(a, 0, expand: true); // no handlers wired anywhere
+
+        Assert.IsTrue(a.IsExpanded);
+        Assert.AreEqual(5, treeTableView.Items.Count);
+
+        treeTableView.RequestExpandCollapse(a, 0, expand: false);
+
+        Assert.IsFalse(a.IsExpanded);
+        Assert.AreEqual(2, treeTableView.Items.Count);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public async Task AutoExpand_EmptyLiveChildren_ThenStreamedRowsAppear()
+    {
+        // The streaming-backend shape: children collection exists (empty) before any data arrives; expanding
+        // subscribes the empty branch and rows stream in afterwards with no further calls.
+        var streamingChildren = new ObservableCollection<ITableViewTreeItem>();
+        var root = new Node("R", 0) { ForceHasChildren = true };
+        root.SetChildren(streamingChildren);
+        var roots = new ObservableCollection<ITableViewTreeItem> { root };
+
+        var treeTableView = new TreeTableView { AutoGenerateColumns = false, Width = 600, Height = 400 };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+        treeTableView.TreeItemsSource = roots;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        treeTableView.RequestExpandCollapse(root, 0, expand: true); // auto: subscribes the empty branch
+
+        Assert.IsTrue(root.IsExpanded);
+        Assert.AreEqual(1, treeTableView.Items.Count);
+
+        streamingChildren.Add(new Node("R1", 1)); // "backend" data arrives later
+        streamingChildren.Add(new Node("R2", 1));
+
+        Assert.AreEqual(3, treeTableView.Items.Count);
+        Assert.AreSame(streamingChildren[0], treeTableView.Items[1]);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public async Task CancelOnArgs_SuppressesAutoExpansion()
+    {
+        var (source, a, roots) = CreateTree();
+        source.Collapse(a);
+        source.Dispose();
+
+        var treeTableView = new TreeTableView { AutoGenerateColumns = false, Width = 600, Height = 400 };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+        treeTableView.TreeItemsSource = roots;
+        treeTableView.ExpandRequested += (_, e) => e.Cancel = true; // strict fetch-then-expand apps own the timing
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        treeTableView.RequestExpandCollapse(a, 0, expand: true);
+
+        Assert.IsFalse(a.IsExpanded);
+        Assert.AreEqual(2, treeTableView.Items.Count);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public async Task HandlerCallingExpandItself_PlusAuto_YieldsNoDoubleRows()
+    {
+        var (source, a, roots) = CreateTree();
+        source.Collapse(a);
+        source.Dispose();
+
+        var treeTableView = new TreeTableView { AutoGenerateColumns = false, Width = 600, Height = 400 };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+        treeTableView.TreeItemsSource = roots;
+
+        // Migrating apps may still expand inside the handler; the follow-up auto call must be a no-op.
+        treeTableView.ExpandRequested += (_, e) => treeTableView.TreeSource!.Expand(e.Item);
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        treeTableView.RequestExpandCollapse(a, 0, expand: true);
+
+        Assert.AreEqual(5, treeTableView.Items.Count); // exactly once
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
     public async Task BoundToTreeTableView_DirectMode_ChevronFlowExpands()
     {
         var (source, a, _) = CreateTree();
@@ -520,7 +678,10 @@ public class TreeTableViewSourceTests
         public IList? Children { get; private set; }
         public IEnumerable<ITableViewTreeItem>? ChildrenSource { get; private set; }
 
-        public bool HasChildren => Children is { Count: > 0 };
+        /// <summary>Backend-count style: children exist but are not loaded/derivable from the collection yet.</summary>
+        public bool ForceHasChildren { get; init; }
+
+        public bool HasChildren => ForceHasChildren || Children is { Count: > 0 };
         public bool IsFinalItem => false;
 
         public bool IsExpanded

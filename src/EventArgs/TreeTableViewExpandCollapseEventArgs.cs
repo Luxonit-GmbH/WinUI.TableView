@@ -31,4 +31,12 @@ public partial class TreeTableViewExpandCollapseEventArgs : EventArgs
     /// time — with asynchronous expansion, locate the item by reference/key when inserting children.
     /// </summary>
     public int Index { get; }
+
+    /// <summary>
+    /// Gets or sets whether the automatic expansion is suppressed. When a <see cref="TreeTableViewSource"/> is
+    /// bound, the <see cref="TreeTableView"/> performs the expand/collapse itself after raising the event; set
+    /// this to <see langword="true"/> to take full control of the timing (e.g. strict fetch-then-expand: start
+    /// the query here, then call <see cref="TreeTableViewSource.Expand"/> when the children have arrived).
+    /// </summary>
+    public bool Cancel { get; set; }
 }

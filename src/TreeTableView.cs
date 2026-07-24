@@ -1,5 +1,7 @@
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using System;
+using System.Collections.Generic;
 using Windows.System;
 
 namespace WinUI.TableView;
@@ -17,6 +19,8 @@ namespace WinUI.TableView;
 /// </remarks>
 public partial class TreeTableView : TableView
 {
+    private bool _ownsTreeSource;
+
     /// <summary>
     /// Initializes a new instance of the TreeTableView class.
     /// </summary>
@@ -25,6 +29,60 @@ public partial class TreeTableView : TableView
         // Own style slot (BasedOn the TableView style in Generic.xaml) so the implicit style's TargetType matches
         // exactly and consumers can restyle trees independently of plain tables.
         DefaultStyleKey = typeof(TreeTableView);
+    }
+
+    /// <summary>
+    /// Gets or sets the tree's ROOT items. Setting this wraps the collection in a control-owned
+    /// <see cref="TreeTableViewSource"/>, switches <see cref="TableView.UseCollectionView"/> off (the adapter
+    /// notifies via <see cref="Windows.Foundation.Collections.IObservableVector{T}"/> only) and binds it as the
+    /// items source — the one-line way to get a working tree. Bind a prepared <see cref="TreeTableViewSource"/>
+    /// to <see cref="TableView.ItemsSource"/> directly instead when you need to own the adapter's lifetime.
+    /// </summary>
+    public IEnumerable<ITableViewTreeItem>? TreeItemsSource
+    {
+        get => (IEnumerable<ITableViewTreeItem>?)GetValue(TreeItemsSourceProperty);
+        set => SetValue(TreeItemsSourceProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the TreeItemsSource dependency property.
+    /// </summary>
+    public static readonly DependencyProperty TreeItemsSourceProperty = DependencyProperty.Register(
+        nameof(TreeItemsSource), typeof(object), typeof(TreeTableView), new PropertyMetadata(null, OnTreeItemsSourceChanged));
+
+    /// <summary>
+    /// Gets the bound flattening adapter, or <see langword="null"/> when the items source is not a
+    /// <see cref="TreeTableViewSource"/>. Use it to complete deferred expansions
+    /// (<see cref="TreeTableViewSource.Expand"/> after an asynchronous child fetch) or for fast item lookups.
+    /// </summary>
+    public TreeTableViewSource? TreeSource => ItemsSource as TreeTableViewSource;
+
+    private static void OnTreeItemsSourceChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TreeTableView treeTableView)
+        {
+            treeTableView.ApplyTreeItemsSource(e.NewValue as IEnumerable<ITableViewTreeItem>);
+        }
+    }
+
+    private void ApplyTreeItemsSource(IEnumerable<ITableViewTreeItem>? roots)
+    {
+        if (_ownsTreeSource && ItemsSource is TreeTableViewSource ownedSource)
+        {
+            ownedSource.Dispose();
+        }
+
+        _ownsTreeSource = false;
+
+        if (roots is null)
+        {
+            ItemsSource = null;
+            return;
+        }
+
+        UseCollectionView = false;
+        ItemsSource = new TreeTableViewSource(roots);
+        _ownsTreeSource = true;
     }
 
     /// <summary>
@@ -74,6 +132,24 @@ public partial class TreeTableView : TableView
         else
         {
             CollapseRequested?.Invoke(this, args);
+        }
+
+        // With a TreeTableViewSource bound, the control performs the expansion ITSELF — the events are data hooks
+        // (start an async child fetch, veto via args.Cancel), not the mechanism. Safe when a handler already called
+        // Expand/Collapse (both are re-entry no-ops), and inert for apps that maintain their own flat source.
+        // Async note: an auto-Expand before children exist only marks the item expanded; calling
+        // TreeSource.Expand(item) again once ChildrenSource is populated completes the expansion and splices the
+        // rows — or set args.Cancel for strict fetch-then-expand timing.
+        if (!args.Cancel && ItemsSource is TreeTableViewSource treeSource)
+        {
+            if (expand)
+            {
+                treeSource.Expand(item);
+            }
+            else
+            {
+                treeSource.Collapse(item);
+            }
         }
     }
 
