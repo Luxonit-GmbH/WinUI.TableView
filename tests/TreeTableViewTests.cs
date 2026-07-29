@@ -464,7 +464,7 @@ public class TreeTableViewTests
 
         public bool HasChildren => ChildCount > 0;
         public bool IsFinalItem { get; init; }
-        public System.Collections.Generic.IEnumerable<ITableViewTreeItem>? ChildrenSource => null; // flat-source model
+        public System.Collections.IEnumerable? ChildrenSource => null; // flat-source model
 
         public bool IsExpanded
         {

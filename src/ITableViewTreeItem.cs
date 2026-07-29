@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+using System.Collections;
 using System.ComponentModel;
 
 namespace WinUI.TableView;
@@ -62,12 +62,13 @@ public interface ITableViewTreeItem : INotifyPropertyChanged
     /// when not (yet) loaded or not applicable (e.g. app-maintained flat sources, or final items).
     /// </summary>
     /// <remarks>
-    /// The static type is the covariant <see cref="IEnumerable{T}"/> so any typed app collection fits without
-    /// casts; observability is a runtime capability — collections implementing
-    /// <see cref="Windows.Foundation.Collections.IObservableVector{T}"/> of <see cref="object"/> (preferred,
-    /// native; e.g. <see cref="TreeTableViewChildrenView"/>) or
+    /// Deliberately the non-generic <see cref="IEnumerable"/>: collections may be object-typed (e.g.
+    /// <see cref="Windows.Foundation.Collections.IObservableVector{T}"/> of <see cref="object"/>) and may MIX
+    /// expandable items (implementing <see cref="ITableViewTreeItem"/>) with plain leaf rows that implement
+    /// nothing — each child is inspected per item during flattening. Observability is a runtime capability:
+    /// collections implementing <c>IObservableVector&lt;object&gt;</c> (preferred, native) or
     /// <see cref="System.Collections.Specialized.INotifyCollectionChanged"/> are tracked live while the item is
-    /// expanded, and static collections are simply enumerated once.
+    /// expanded; static collections are enumerated once.
     /// </remarks>
-    IEnumerable<ITableViewTreeItem>? ChildrenSource { get; }
+    IEnumerable? ChildrenSource { get; }
 }

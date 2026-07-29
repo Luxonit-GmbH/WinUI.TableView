@@ -20,7 +20,7 @@ namespace WinUI.TableView.Tests;
 /// index math and raises native VectorChanged for the grid.
 /// </summary>
 [TestClass]
-public class TreeTableViewSourceTests
+public partial class TreeTableViewSourceTests
 {
     [TestMethod]
     public void InitialFlatten_IncludesPreExpandedBranches()
@@ -160,12 +160,67 @@ public class TreeTableViewSourceTests
     }
 
     [UITestMethod]
-    public void TreeItemsSource_WrongCollectionType_FailsFast()
+    public void TreeItemsSource_AcceptsAnyEnumerable_RejectsOnlyNonEnumerables()
     {
         var treeTableView = new TreeTableView();
 
-        // object-typed for easy binding, but a non-tree collection must throw, not silently show an empty grid.
-        Assert.ThrowsExactly<ArgumentException>(() => treeTableView.TreeItemsSource = new List<int> { 1, 2, 3 });
+        // Items are deliberately NOT type-checked: rows without ITableViewTreeItem are plain leaves.
+        treeTableView.TreeItemsSource = new List<int> { 1, 2, 3 };
+        Assert.AreEqual(3, treeTableView.TreeSource!.Count);
+
+        // Only a value that cannot be enumerated at all fails fast.
+        Assert.ThrowsExactly<ArgumentException>(() => treeTableView.TreeItemsSource = new object());
+    }
+
+    [UITestMethod]
+    public async Task MixedCollection_PlainRowsAndTreeItems_ExpandWorks_PlainRowsShowNoChevron()
+    {
+        // The app's model: only expandable items implement ITableViewTreeItem; plain rows implement nothing.
+        var group = new Node("Group", 0) { ForceHasChildren = true };
+        group.SetChildren(new ObservableCollection<ITableViewTreeItem> { new Node("Child", 1) });
+        var roots = new TestObservableVector { "plain leaf", group }; // IObservableVector<object>, mixed items
+
+        var treeTableView = new TreeTableView { AutoGenerateColumns = false, Width = 600, Height = 400 };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+        });
+        treeTableView.TreeItemsSource = roots;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        Assert.AreEqual(2, treeTableView.Items.Count);
+
+        // Expanding the interface-implementing item works (auto-expansion, no handlers).
+        treeTableView.RequestExpandCollapse(group, 1, expand: true);
+        treeTableView.UpdateLayout();
+        Assert.AreEqual(3, treeTableView.Items.Count);
+
+        // Let the dispatcher deliver the (asynchronously raised) DataContextChanged/Loaded notifications the
+        // virtualization churn produced before asserting the visuals they drive.
+        await Task.Yield();
+        await Task.Yield();
+        treeTableView.UpdateLayout();
+
+        // The plain row's tree cell fails CLOSED: chevron glyph collapsed via binding FallbackValue.
+        var plainRow = (TableViewRow)treeTableView.ContainerFromIndex(0)!;
+        var plainChevronGlyph = ((Grid)((Button)((Grid)plainRow.Cells[0].Content).Children[1]).Content).Children[0];
+        Assert.AreEqual(Visibility.Collapsed, plainChevronGlyph.Visibility);
+
+        var groupRow = (TableViewRow)treeTableView.ContainerFromIndex(1)!;
+        var groupCellContent = (Grid)groupRow.Cells[0].Content;
+        var groupChevronGlyph = ((Grid)((Button)groupCellContent.Children[1]).Content).Children[0];
+        Assert.AreEqual(Visibility.Visible, groupChevronGlyph.Visibility,
+            $"diag: rowContent={groupRow.Content?.GetType().Name}, sameAsGroup={ReferenceEquals(groupRow.Content, group)}, " +
+            $"cellDataContext={groupCellContent.DataContext?.GetType().Name ?? "null"}, " +
+            $"dcSameAsGroup={ReferenceEquals(groupCellContent.DataContext, group)}, hasChildren={group.HasChildren}");
+
+        // And the double-click path does not consume the gesture on a plain row.
+        Assert.IsFalse(treeTableView.ToggleExpandCollapseFromCell(plainRow.Cells[0]));
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
     }
 
     [UITestMethod]
@@ -640,7 +695,7 @@ public class TreeTableViewSourceTests
 
             if (item is ITableViewTreeItem { IsExpanded: true, ChildrenSource: { } children })
             {
-                foreach (var descendant in children.SelectMany(ReferenceFlatten))
+                foreach (var descendant in children.Cast<ITableViewTreeItem>().SelectMany(ReferenceFlatten))
                 {
                     yield return descendant;
                 }
@@ -679,14 +734,17 @@ public class TreeTableViewSourceTests
         return events;
     }
 
-    private sealed class Node(string name, int depth) : ITableViewTreeItem
+    // Source-generated binding metadata: the tree column's {Binding} paths (HasChildren/IsExpanded/...) must
+    // resolve on this model inside the test host, where plain reflection binding is unreliable.
+    [WinRT.GeneratedBindableCustomProperty]
+    public sealed partial class Node(string name, int depth) : ITableViewTreeItem
     {
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public string Name { get; } = name;
         public int Depth { get; } = depth;
         public IList? Children { get; private set; }
-        public IEnumerable<ITableViewTreeItem>? ChildrenSource { get; private set; }
+        public IEnumerable? ChildrenSource { get; private set; }
 
         /// <summary>Backend-count style: children exist but are not loaded/derivable from the collection yet.</summary>
         public bool ForceHasChildren { get; init; }
@@ -709,7 +767,7 @@ public class TreeTableViewSourceTests
 
         public bool IsLoading => false;
 
-        public void SetChildren(IEnumerable<ITableViewTreeItem> children)
+        public void SetChildren(IEnumerable children)
         {
             ChildrenSource = children;
             Children = children as IList;

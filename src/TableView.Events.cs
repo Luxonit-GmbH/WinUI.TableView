@@ -177,6 +177,38 @@ partial class TableView
     }
 
     /// <summary>
+    /// Occurs when a filter is being applied to a column in the TableView — the filtering counterpart of
+    /// <see cref="Sorting"/>. Handle it (setting <see cref="System.ComponentModel.HandledEventArgs.Handled"/>) to
+    /// filter the data in the application layer using the supplied
+    /// <see cref="TableViewFilteringEventArgs.Descriptor"/>.
+    /// </summary>
+    public event EventHandler<TableViewFilteringEventArgs>? Filtering;
+
+    /// <summary>
+    /// Called before the <see cref="Filtering"/> event occurs.
+    /// </summary>
+    /// <param name="args">Handleable event args.</param>
+    protected internal virtual void OnFiltering(TableViewFilteringEventArgs args)
+    {
+        Filtering?.Invoke(this, args);
+    }
+
+    /// <summary>
+    /// Occurs when a column filter (or every filter) is being cleared in the TableView — the filtering counterpart
+    /// of <see cref="ClearSorting"/>.
+    /// </summary>
+    public event EventHandler<TableViewClearFilterEventArgs>? ClearFilter;
+
+    /// <summary>
+    /// Called before the <see cref="ClearFilter"/> event occurs.
+    /// </summary>
+    /// <param name="args">The event data.</param>
+    protected internal virtual void OnClearFilter(TableViewClearFilterEventArgs args)
+    {
+        ClearFilter?.Invoke(this, args);
+    }
+
+    /// <summary>
     /// Event triggered when selected cells change.
     /// </summary>
     public event EventHandler<TableViewCellSelectionChangedEventArgs>? CellSelectionChanged;

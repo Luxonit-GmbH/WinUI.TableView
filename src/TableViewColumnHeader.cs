@@ -33,6 +33,7 @@ namespace WinUI.TableView;
 public partial class TableViewColumnHeader : ContentControl
 {
     private TableView? _tableView;
+    private TextBlock? _sortPriorityText;
     private TableViewHeaderRow? _headerRow;
     private Button? _optionsButton;
     private TableViewFilterMenuFlyout? _optionsFlyout;
@@ -91,35 +92,45 @@ public partial class TableViewColumnHeader : ContentControl
     /// </summary>
     private void DoSort(SD? direction, bool singleSorting = true)
     {
-        if (CanSort && Column is not null && _tableView is { CollectionView: CollectionView { } collectionView })
+        if (!CanSort || Column is null || _tableView is null)
         {
-            var eventArgs = new TableViewSortingEventArgs(Column);
-            _tableView.OnSorting(eventArgs);
-
-            if (eventArgs.Handled) return;
-
-            using var defer = collectionView.DeferRefresh();
-            if (singleSorting)
-            {
-                _tableView.ClearAllSortingWithEvent();
-            }
-            else
-            {
-                ClearSortingWithEvent();
-            }
-
-            if (direction is not null)
-            {
-                var boundColumn = Column as TableViewBoundColumn;
-                Column.SortDirection = direction;
-
-                // Prefer explicit SortMemberPath if provided, otherwise use bound column's property path
-                var sortPath = Column.SortMemberPath ?? boundColumn?.PropertyPath;
-
-                _tableView.SortDescriptions.Add(
-                    new ColumnSortDescription(Column!, sortPath, direction.Value));
-            }
+            return;
         }
+
+        // Build the chain this action WOULD produce, so the Sorting event can hand the app the complete ordered
+        // sort ("column 2 desc, then 4 asc, then 7 desc") instead of just the column that was clicked.
+        var chain = new List<TableViewSortDescription>();
+
+        if (!singleSorting)
+        {
+            // Ctrl+click: keep the existing chain, minus this column (it is re-added below at the end).
+            chain.AddRange(_tableView.SortChain.Where(description => description.Column != Column));
+        }
+
+        if (direction is not null)
+        {
+            var sortPath = Column.SortMemberPath ?? (Column as TableViewBoundColumn)?.PropertyPath;
+            chain.Add(new TableViewSortDescription(Column, sortPath, direction.Value, chain.Count));
+        }
+
+        // Cap the chain, dropping the OLDEST entries (the newly clicked column always survives).
+        var max = Math.Max(1, _tableView.MaxSortColumns);
+        if (chain.Count > max)
+        {
+            chain.RemoveRange(0, chain.Count - max);
+        }
+
+        for (var i = 0; i < chain.Count; i++)
+        {
+            chain[i] = chain[i].WithPriority(i);
+        }
+
+        var eventArgs = new TableViewSortingEventArgs(Column, direction, !singleSorting, chain);
+        _tableView.OnSorting(eventArgs);
+
+        if (eventArgs.Handled) return;
+
+        _tableView.ApplySort(chain);
     }
 
     /// <summary>
@@ -165,8 +176,15 @@ public partial class TableViewColumnHeader : ContentControl
         }
         else if (shouldApplyFilter && _tableView is not null)
         {
-            _tableView.FilterHandler.SelectedValues[Column!] = GetSelectedValues();
-            _tableView.FilterHandler?.ApplyFilter(Column!);
+            // Always keep the checkbox selection in sync (the flyout shows it again next time), then apply the
+            // descriptor so an operator chosen in the flyout (Equals, Larger than, Between, …) is honored.
+            var selectedValues = GetSelectedValues();
+            _tableView.FilterHandler.SelectedValues[Column!] = selectedValues;
+
+            var descriptor = FilterItemsControl?.BuildDescriptor(Column!, selectedValues)
+                ?? new TableViewFilterDescriptor(Column!, TableViewFilterOperator.SelectedValues, selectedValues: selectedValues);
+
+            _tableView.FilterHandler?.ApplyFilter(descriptor);
         }
     }
 
@@ -242,6 +260,8 @@ public partial class TableViewColumnHeader : ContentControl
         _optionsFlyout = GetTemplateChild("OptionsFlyout") as TableViewFilterMenuFlyout;
         _contentPresenter = GetTemplateChild("ContentPresenter") as ContentPresenter;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
+        _sortPriorityText = GetTemplateChild("SortPriorityText") as TextBlock; // template (re)applied: re-resolve
+        UpdateSortPriorityIndicator();
 
         if (_tableView is null || _optionsButton is null || _optionsFlyout is null)
         {
@@ -282,6 +302,35 @@ public partial class TableViewColumnHeader : ContentControl
         else
         {
             VisualStates.GoToState(this, false, VisualStates.StateUnsorted);
+        }
+
+        UpdateSortPriorityIndicator();
+    }
+
+    /// <summary>
+    /// Shows this column's 1-based position in the multi-column sort chain next to the sort arrow, and hides it
+    /// when fewer than two columns are sorted (a single sort needs no number).
+    /// </summary>
+    internal void UpdateSortPriorityIndicator()
+    {
+        _sortPriorityText ??= GetTemplateChild("SortPriorityText") as TextBlock;
+
+        if (_sortPriorityText is null)
+        {
+            return;
+        }
+
+        var sortedCount = _tableView?.SortChain.Count ?? 0;
+        var priority = Column?.SortDirection is not null ? Column.SortPriority : -1;
+
+        if (sortedCount > 1 && priority >= 0)
+        {
+            _sortPriorityText.Text = (priority + 1).ToString(System.Globalization.CultureInfo.CurrentCulture);
+            _sortPriorityText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            _sortPriorityText.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -568,11 +617,14 @@ public partial class TableViewColumnHeader : ContentControl
     /// <summary>
     /// Cycles through sort directions (ascending → descending → unsorted) for automation support.
     /// </summary>
-    internal void InvokeSortCycle()
+    /// <param name="multiSort">
+    /// Whether to add the column to the existing sort chain (the Ctrl+click behavior) instead of replacing it.
+    /// </param>
+    internal void InvokeSortCycle(bool multiSort = false)
     {
         if (CanSort && Column is not null)
         {
-            DoSort(GetNextSortDirection());
+            DoSort(GetNextSortDirection(), !multiSort);
         }
     }
 

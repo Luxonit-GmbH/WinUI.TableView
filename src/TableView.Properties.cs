@@ -90,7 +90,7 @@ public partial class TableView
     /// <summary>
     /// Identifies the ColumnsSource dependency property.
     /// </summary>
-    public static readonly DependencyProperty ColumnsSourceProperty = DependencyProperty.Register(nameof(ColumnsSource), typeof(IEnumerable<TableViewColumn>), typeof(TableView), new PropertyMetadata(null, OnColumnsSourceChanged));
+    public static readonly DependencyProperty ColumnsSourceProperty = DependencyProperty.Register(nameof(ColumnsSource), typeof(object), typeof(TableView), new PropertyMetadata(null, OnColumnsSourceChanged));
 
     /// <summary>
     /// Identifies the IsReadOnly dependency property.
@@ -355,6 +355,53 @@ public partial class TableView
     public IList<SortDescription> SortDescriptions => _collectionView.SortDescriptions;
 
     /// <summary>
+    /// Gets the current multi-column sort chain in priority order (0 = primary sort), derived from the columns'
+    /// <see cref="TableViewColumn.SortDirection"/> and <see cref="TableViewColumn.SortPriority"/>.
+    /// </summary>
+    public IReadOnlyList<TableViewSortDescription> SortChain =>
+    [
+        .. Columns
+            .Where(column => column.SortDirection is not null)
+            .OrderBy(column => column.SortPriority < 0 ? int.MaxValue : column.SortPriority)
+            .Select((column, index) => new TableViewSortDescription(
+                column,
+                column.SortMemberPath ?? (column as TableViewBoundColumn)?.PropertyPath,
+                column.SortDirection!.Value,
+                index))
+    ];
+
+    /// <summary>
+    /// Gets or sets how many columns may take part in the multi-column sort chain (Ctrl+click adds a column).
+    /// When the chain would grow past this, the oldest entry is dropped. Defaults to 5.
+    /// </summary>
+    public int MaxSortColumns
+    {
+        get => (int)GetValue(MaxSortColumnsProperty);
+        set => SetValue(MaxSortColumnsProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the MaxSortColumns dependency property.
+    /// </summary>
+    public static readonly DependencyProperty MaxSortColumnsProperty = DependencyProperty.Register(nameof(MaxSortColumns), typeof(int), typeof(TableView), new PropertyMetadata(5));
+
+    /// <summary>
+    /// Gets or sets whether the column filter flyout offers comparison operators (Equals, Larger than, Contains,
+    /// Between, …) above the value checkbox list. When <see langword="false"/> the flyout shows only the classic
+    /// checkbox list. Defaults to <see langword="true"/>.
+    /// </summary>
+    public bool ShowFilterOperators
+    {
+        get => (bool)GetValue(ShowFilterOperatorsProperty);
+        set => SetValue(ShowFilterOperatorsProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the ShowFilterOperators dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ShowFilterOperatorsProperty = DependencyProperty.Register(nameof(ShowFilterOperators), typeof(bool), typeof(TableView), new PropertyMetadata(true));
+
+    /// <summary>
     /// Gets the collection of filter descriptions applied to the items.
     /// </summary>
     public IList<FilterDescription> FilterDescriptions => _collectionView.FilterDescriptions;
@@ -585,11 +632,14 @@ public partial class TableView
     /// <see cref="System.Collections.ObjectModel.ObservableCollection{T}"/>), subsequent additions, removals, moves and
     /// resets are mirrored into <see cref="Columns"/> automatically. While a non-<see langword="null"/> source is set it
     /// is authoritative: automatic column generation (<see cref="AutoGenerateColumns"/>) is skipped so generated columns
-    /// are not mixed in.
+    /// are not mixed in. Every assignment also invalidates the cached column layout and rebuilds the realized rows
+    /// (see <see cref="InvalidateColumns"/>), so swapping whole column sets cannot leave rows on the old set.
+    /// Typed <see cref="object"/> like other WinUI source properties so any view-model property binds via
+    /// <c>x:Bind</c> without casts; the value must be a collection of <see cref="TableViewColumn"/> at runtime.
     /// </remarks>
-    public IEnumerable<TableViewColumn>? ColumnsSource
+    public object? ColumnsSource
     {
-        get => (IEnumerable<TableViewColumn>?)GetValue(ColumnsSourceProperty);
+        get => GetValue(ColumnsSourceProperty);
         set => SetValue(ColumnsSourceProperty, value);
     }
 
@@ -1199,7 +1249,12 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
-            tableView.OnColumnsSourceChanged(e.OldValue as IEnumerable<TableViewColumn>, e.NewValue as IEnumerable<TableViewColumn>);
+            // object-typed for binding ergonomics; accept any collection of columns.
+            tableView.OnColumnsSourceChanged(
+                (e.OldValue as System.Collections.IEnumerable)?.OfType<TableViewColumn>(),
+                (e.NewValue as System.Collections.IEnumerable)?.OfType<TableViewColumn>(),
+                e.OldValue as System.Collections.Specialized.INotifyCollectionChanged,
+                e.NewValue as System.Collections.Specialized.INotifyCollectionChanged);
         }
     }
 
