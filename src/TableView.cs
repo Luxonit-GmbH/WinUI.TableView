@@ -70,6 +70,11 @@ public partial class TableView : ListView
         DefaultStyleKey = typeof(TableView);
 
         Columns = new TableViewColumnsCollection(this);
+        // Any change to the column set invalidates the cached realized band: a new set can span the same numeric
+        // index range as the old one, and without this the realize pass is skipped and freshly created cells stay
+        // collapsed — rows then render with columns missing. The realize itself is debounced, so bulk column
+        // rebuilds still cost a single pass.
+        Columns.CollectionChanged += (_, _) => InvalidateColumnBand();
         FilterHandler = new ColumnFilterHandler(this);
 
         base.ItemsSource = _collectionView;
@@ -1373,11 +1378,19 @@ public partial class TableView : ListView
     /// Replaces <see cref="Columns"/> with a newly assigned <see cref="ColumnsSource"/> and (un)subscribes from the
     /// previous/new source so its changes are mirrored live.
     /// </summary>
-    /// <param name="oldSource">The previously assigned source, if any.</param>
-    /// <param name="newSource">The newly assigned source, if any.</param>
-    private void OnColumnsSourceChanged(IEnumerable<TableViewColumn>? oldSource, IEnumerable<TableViewColumn>? newSource)
+    /// <param name="oldSource">The previously assigned source's columns, if any.</param>
+    /// <param name="newSource">The newly assigned source's columns, if any.</param>
+    /// <param name="oldNotifier">The previously assigned source when observable, so it can be unsubscribed.</param>
+    /// <param name="newNotifier">The newly assigned source when observable, so its changes are mirrored live.</param>
+    private void OnColumnsSourceChanged(
+        IEnumerable<TableViewColumn>? oldSource,
+        IEnumerable<TableViewColumn>? newSource,
+        INotifyCollectionChanged? oldNotifier,
+        INotifyCollectionChanged? newNotifier)
     {
-        if (oldSource is INotifyCollectionChanged oldNotifier)
+        _ = oldSource;
+
+        if (oldNotifier is not null)
         {
             oldNotifier.CollectionChanged -= OnColumnsSourceCollectionChanged;
         }
@@ -1385,10 +1398,35 @@ public partial class TableView : ListView
         // Replace the whole column set in one pass (also drops any previously auto-generated columns).
         Columns.Reset(newSource ?? []);
 
-        if (newSource is INotifyCollectionChanged newNotifier)
+        if (newNotifier is not null)
         {
             newNotifier.CollectionChanged += OnColumnsSourceCollectionChanged;
         }
+
+        InvalidateColumns();
+    }
+
+    /// <summary>
+    /// Gets the realized header row, or <see langword="null"/> before the template is applied.
+    /// </summary>
+    internal TableViewHeaderRow? HeaderRow => _headerRow;
+
+    /// <summary>
+    /// Drops every cached column layout and forces all realized rows and the header to rebuild from the CURRENT
+    /// column set. Call after replacing the columns imperatively (e.g. <c>Columns.Clear()</c> followed by adds);
+    /// assigning <see cref="ColumnsSource"/> does it automatically.
+    /// </summary>
+    public void InvalidateColumns()
+    {
+        (Columns as TableViewColumnsCollection)?.InvalidateCaches();
+        _headerRow?.InvalidateHeaderWidths();
+
+        foreach (var row in _rows)
+        {
+            row.InvalidateCells();
+        }
+
+        InvalidateColumnBand(); // recompute the virtualized band against the new columns
     }
 
     /// <summary>

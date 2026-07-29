@@ -146,11 +146,10 @@ public partial class TableViewRow : ListViewItem
     {
         base.OnContentChanged(oldContent, newContent);
 
-        if (_ensureCells)
-        {
-            EnsureCells();
-        }
-        else
+        // EnsureCells also detects a cell set that no longer matches the columns (see its self-healing guard), so a
+        // container recycled across a column-set change rebuilds here instead of rendering the wrong columns.
+        // Freshly built cells need no refresh pass, hence the else.
+        if (!EnsureCells())
         {
             foreach (var cell in Cells)
             {
@@ -231,24 +230,47 @@ public partial class TableViewRow : ListViewItem
     }
 
     /// <summary>
-    /// Ensures cells are created for the row.
+    /// Marks the row's cells as stale and rebuilds them immediately when the row is already templated. Used by
+    /// <see cref="WinUI.TableView.TableView.InvalidateColumns"/> after the column set is replaced.
     /// </summary>
-    internal void EnsureCells()
+    internal void InvalidateCells()
+    {
+        _ensureCells = true;
+        EnsureCells();
+    }
+
+    /// <summary>
+    /// Ensures cells are created for the row, rebuilding them when they no longer match the visible columns.
+    /// </summary>
+    /// <returns>Whether the cells were (re)built by this call.</returns>
+    internal bool EnsureCells()
     {
         if (TableView is null)
         {
-            return;
+            return false;
+        }
+
+        // Self-healing guard: rebuild whenever the realized cells no longer match the visible column set, even if
+        // no flag was raised (a column-set swap can interleave with container recycling in ways that lose events).
+        if (RowPresenter is not null && !_ensureCells && Cells.Count != TableView.Columns.VisibleColumns.Count)
+        {
+            _ensureCells = true;
         }
 
         if (RowPresenter is not null && _ensureCells)
         {
             RowPresenter.ClearCells();
 
-            AddCells(TableView.Columns.VisibleColumns);
+            // Clear the flag BEFORE adding: AddCells re-raises it when it cannot build (no presenter), and must not
+            // be undone by this reset.
             _ensureCells = false;
+            AddCells(TableView.Columns.VisibleColumns);
 
             TableView.RealizeRowCells(this); // No-op unless column virtualization is enabled.
+            return true;
         }
+
+        return false;
     }
 
     /// <summary>
@@ -278,8 +300,10 @@ public partial class TableViewRow : ListViewItem
             case NotifyCollectionChangedAction.Move when (e.NewItems?.Count > 0):
                 RowPresenter?.MoveCells(e.NewItems.OfType<TableViewColumn>().First(), e.NewStartingIndex);
                 break;
-            case NotifyCollectionChangedAction.Reset when RowPresenter is not null:
+            case NotifyCollectionChangedAction.Reset:
                 // Reset means "re-sync from the current columns": rebuild this row's cells, not just clear them.
+                // The flag is set UNCONDITIONALLY — a row without a presenter (not templated yet, or waiting in the
+                // recycle queue) must still rebuild when it gets one, otherwise it keeps the old column set forever.
                 _ensureCells = true;
                 EnsureCells();
                 break;
@@ -332,15 +356,20 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void RemoveCells(IEnumerable<TableViewColumn> columns)
     {
-        if (RowPresenter is not null)
+        if (RowPresenter is null)
         {
-            foreach (var column in columns)
+            // No presenter to update yet: remember that this row's cells no longer match the column set so it
+            // rebuilds from scratch once it is templated (silently skipping would strand the stale cells).
+            _ensureCells = true;
+            return;
+        }
+
+        foreach (var column in columns)
+        {
+            var cell = RowPresenter.GetCellForColumn(column);
+            if (cell is not null)
             {
-                var cell = RowPresenter.GetCellForColumn(column);
-                if (cell is not null)
-                {
-                    RowPresenter.RemoveCell(cell);
-                }
+                RowPresenter.RemoveCell(cell);
             }
         }
     }
@@ -350,7 +379,13 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void AddCells(IEnumerable<TableViewColumn> columns)
     {
-        if (RowPresenter is not null && TableView is not null)
+        if (RowPresenter is null || TableView is null)
+        {
+            // See RemoveCells: mark for a full rebuild instead of dropping the change on the floor.
+            _ensureCells = true;
+            return;
+        }
+
         {
             foreach (var column in columns)
             {

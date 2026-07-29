@@ -90,7 +90,7 @@ public partial class TableView
     /// <summary>
     /// Identifies the ColumnsSource dependency property.
     /// </summary>
-    public static readonly DependencyProperty ColumnsSourceProperty = DependencyProperty.Register(nameof(ColumnsSource), typeof(IEnumerable<TableViewColumn>), typeof(TableView), new PropertyMetadata(null, OnColumnsSourceChanged));
+    public static readonly DependencyProperty ColumnsSourceProperty = DependencyProperty.Register(nameof(ColumnsSource), typeof(object), typeof(TableView), new PropertyMetadata(null, OnColumnsSourceChanged));
 
     /// <summary>
     /// Identifies the IsReadOnly dependency property.
@@ -585,11 +585,14 @@ public partial class TableView
     /// <see cref="System.Collections.ObjectModel.ObservableCollection{T}"/>), subsequent additions, removals, moves and
     /// resets are mirrored into <see cref="Columns"/> automatically. While a non-<see langword="null"/> source is set it
     /// is authoritative: automatic column generation (<see cref="AutoGenerateColumns"/>) is skipped so generated columns
-    /// are not mixed in.
+    /// are not mixed in. Every assignment also invalidates the cached column layout and rebuilds the realized rows
+    /// (see <see cref="InvalidateColumns"/>), so swapping whole column sets cannot leave rows on the old set.
+    /// Typed <see cref="object"/> like other WinUI source properties so any view-model property binds via
+    /// <c>x:Bind</c> without casts; the value must be a collection of <see cref="TableViewColumn"/> at runtime.
     /// </remarks>
-    public IEnumerable<TableViewColumn>? ColumnsSource
+    public object? ColumnsSource
     {
-        get => (IEnumerable<TableViewColumn>?)GetValue(ColumnsSourceProperty);
+        get => GetValue(ColumnsSourceProperty);
         set => SetValue(ColumnsSourceProperty, value);
     }
 
@@ -1199,7 +1202,12 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
-            tableView.OnColumnsSourceChanged(e.OldValue as IEnumerable<TableViewColumn>, e.NewValue as IEnumerable<TableViewColumn>);
+            // object-typed for binding ergonomics; accept any collection of columns.
+            tableView.OnColumnsSourceChanged(
+                (e.OldValue as System.Collections.IEnumerable)?.OfType<TableViewColumn>(),
+                (e.NewValue as System.Collections.IEnumerable)?.OfType<TableViewColumn>(),
+                e.OldValue as System.Collections.Specialized.INotifyCollectionChanged,
+                e.NewValue as System.Collections.Specialized.INotifyCollectionChanged);
         }
     }
 

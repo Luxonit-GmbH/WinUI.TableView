@@ -114,6 +114,24 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
         CollectionChanged?.Invoke(this, args);
     }
 
+    /// <summary>
+    /// Drops every derived cache (visible column lists, index maps, cumulative offsets) and refreshes frozen state,
+    /// so the next read reflects the current columns. Called by
+    /// <see cref="WinUI.TableView.TableView.InvalidateColumns"/>.
+    /// </summary>
+    internal void InvalidateCaches()
+    {
+        _visibleColumnsCached = null;
+        _visibleColumnsMapCached = null;
+        _visibleFrozenColumnsCached = null;
+        _visibleFrozenColumnsMapCached = null;
+        _visibleScrollableColumnsCached = null;
+        _visibleScrollableColumnsMapCached = null;
+        _visibleScrollableColumnOffsetsCached = null;
+
+        UpdateFrozenColumns();
+    }
+
     internal void UpdateFrozenColumns()
     {
         foreach (var column in this.OfType<TableViewColumn>())
