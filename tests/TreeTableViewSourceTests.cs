@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -156,6 +157,15 @@ public class TreeTableViewSourceTests
         Assert.IsNull(treeTableView.ItemsSource);
 
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public void TreeItemsSource_WrongCollectionType_FailsFast()
+    {
+        var treeTableView = new TreeTableView();
+
+        // object-typed for easy binding, but a non-tree collection must throw, not silently show an empty grid.
+        Assert.ThrowsExactly<ArgumentException>(() => treeTableView.TreeItemsSource = new List<int> { 1, 2, 3 });
     }
 
     [UITestMethod]

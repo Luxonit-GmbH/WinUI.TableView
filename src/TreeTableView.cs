@@ -38,9 +38,14 @@ public partial class TreeTableView : TableView
     /// items source — the one-line way to get a working tree. Bind a prepared <see cref="TreeTableViewSource"/>
     /// to <see cref="TableView.ItemsSource"/> directly instead when you need to own the adapter's lifetime.
     /// </summary>
-    public IEnumerable<ITableViewTreeItem>? TreeItemsSource
+    /// <remarks>
+    /// Typed <see cref="object"/> like other WinUI items-source properties so any view-model property binds without
+    /// casts; the value must implement <see cref="IEnumerable{T}"/> of <see cref="ITableViewTreeItem"/> at runtime
+    /// (an <see cref="ArgumentException"/> is thrown otherwise, rather than silently showing an empty grid).
+    /// </remarks>
+    public object? TreeItemsSource
     {
-        get => (IEnumerable<ITableViewTreeItem>?)GetValue(TreeItemsSourceProperty);
+        get => GetValue(TreeItemsSourceProperty);
         set => SetValue(TreeItemsSourceProperty, value);
     }
 
@@ -61,7 +66,17 @@ public partial class TreeTableView : TableView
     {
         if (d is TreeTableView treeTableView)
         {
-            treeTableView.ApplyTreeItemsSource(e.NewValue as IEnumerable<ITableViewTreeItem>);
+            var roots = e.NewValue switch
+            {
+                null => null,
+                IEnumerable<ITableViewTreeItem> treeItems => treeItems,
+                _ => throw new ArgumentException(
+                    $"TreeItemsSource must implement IEnumerable<{nameof(ITableViewTreeItem)}> (typed collections of " +
+                    $"items implementing the interface work via covariance); got '{e.NewValue.GetType()}'.",
+                    nameof(TreeItemsSource)),
+            };
+
+            treeTableView.ApplyTreeItemsSource(roots);
         }
     }
 
