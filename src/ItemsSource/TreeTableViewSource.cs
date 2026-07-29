@@ -49,11 +49,12 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     public event EventHandler? RangesChanged;
 
     /// <summary>
-    /// Initializes the source over the given root items. Pre-expanded items (with a populated
+    /// Initializes the source over the given root items. Roots may MIX expandable items (implementing
+    /// <see cref="ITableViewTreeItem"/>) with plain leaf rows; pre-expanded items (with a populated
     /// <see cref="ITableViewTreeItem.ChildrenSource"/>) are flattened immediately.
     /// </summary>
     /// <param name="roots">The root items; tracked live when observable (see <see cref="ITableViewTreeItem.ChildrenSource"/>).</param>
-    public TreeTableViewSource(IEnumerable<ITableViewTreeItem> roots)
+    public TreeTableViewSource(IEnumerable roots)
     {
         ArgumentNullException.ThrowIfNull(roots);
 
@@ -149,7 +150,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     private sealed class Branch
     {
         public required object Key { get; init; }
-        public required IEnumerable<ITableViewTreeItem> Source { get; init; }
+        public required IEnumerable Source { get; init; }
         public List<object> Shadow { get; } = [];
         public VectorChangedEventHandler<object>? VectorHandler { get; set; }
         public NotifyCollectionChangedEventHandler? InccHandler { get; set; }
@@ -175,10 +176,10 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
         }
     }
 
-    private Branch Subscribe(object key, IEnumerable<ITableViewTreeItem> source)
+    private Branch Subscribe(object key, IEnumerable source)
     {
         var branch = new Branch { Key = key, Source = source };
-        branch.Shadow.AddRange(source);
+        branch.Shadow.AddRange(source.Cast<object>());
 
         if (source is IObservableVector<object> vector)
         {

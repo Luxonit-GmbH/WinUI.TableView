@@ -917,7 +917,7 @@ public class PerformanceBenchmarks
         public string Name { get; } = name;
         public int Depth { get; } = depth;
         public ObservableCollection<ITableViewTreeItem>? Children { get; init; }
-        public IEnumerable<ITableViewTreeItem>? ChildrenSource => Children;
+        public System.Collections.IEnumerable? ChildrenSource => Children;
         public bool HasChildren => Children is { Count: > 0 };
         public bool IsFinalItem => false;
         public bool IsExpanded { get; set; }

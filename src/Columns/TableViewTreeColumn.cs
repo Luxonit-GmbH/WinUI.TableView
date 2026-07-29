@@ -1,8 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
-using System;
+using System.ComponentModel;
 using WinUI.TableView.Columns;
 
 namespace WinUI.TableView;
@@ -12,13 +11,16 @@ namespace WinUI.TableView;
 /// bound text for items implementing <see cref="ITableViewTreeItem"/>.
 /// </summary>
 /// <remarks>
-/// The generated element is deliberately lightweight (indent spacer + chevron button + TextBlock) and fully
-/// binding-driven, so container recycling and item mutations update it without column code. The chevron slot is
-/// always reserved so leaf rows align with expandable siblings at the same depth. Chevron clicks (and Left/Right
-/// keys, handled by <see cref="TreeTableView"/>) only raise
-/// <see cref="TreeTableView.ExpandRequested"/>/<see cref="TreeTableView.CollapseRequested"/> — the flat items source
-/// performs the actual expansion. For runtime updates, items should raise
-/// <see cref="System.ComponentModel.INotifyPropertyChanged"/> for the <see cref="ITableViewTreeItem"/> properties.
+/// The generated element is deliberately lightweight (indent spacer + chevron button + TextBlock). The tree-state
+/// visuals (indent, chevron, loading ring) are driven DIRECTLY from the <see cref="ITableViewTreeItem"/> interface —
+/// reacting to <see cref="INotifyPropertyChanged"/> — rather than through name-based bindings, so they work for any
+/// item type (including rows that do not implement the interface at all: those render as plain rows with no chevron)
+/// and independently of reflection/AOT concerns; only the text uses the column's
+/// <see cref="TableViewBoundColumn.Binding"/>. The chevron slot is always reserved so leaf rows align with
+/// expandable siblings at the same depth. Chevron clicks (and Left/Right keys, double-click — handled by
+/// <see cref="TreeTableView"/>) only raise
+/// <see cref="TreeTableView.ExpandRequested"/>/<see cref="TreeTableView.CollapseRequested"/> — the items source
+/// performs the actual expansion.
 /// </remarks>
 [StyleTypedProperty(Property = nameof(ElementStyle), StyleTargetType = typeof(TextBlock))]
 [StyleTypedProperty(Property = nameof(EditingElementStyle), StyleTargetType = typeof(TextBox))]
@@ -28,6 +30,8 @@ namespace WinUI.TableView;
 public partial class TableViewTreeColumn : TableViewBoundColumn
 {
     private const double ChevronSlotWidth = 20d;
+    private const string CollapsedGlyph = ""; // ChevronRight
+    private const string ExpandedGlyph = "";  // ChevronDown
 
     /// <summary>
     /// Generates the tree cell: indentation sized from <see cref="ITableViewTreeItem.Depth"/>, a chevron reflecting
@@ -50,27 +54,12 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         };
 
         var indent = new Border();
-        indent.SetBinding(FrameworkElement.WidthProperty, new Binding
-        {
-            Path = new PropertyPath(nameof(ITableViewTreeItem.Depth)),
-            Converter = new DepthToIndentConverter(this),
-        });
 
         var glyph = new FontIcon
         {
             Glyph = CollapsedGlyph,
             FontSize = 12,
         };
-        glyph.SetBinding(FontIcon.GlyphProperty, new Binding
-        {
-            Path = new PropertyPath(nameof(ITableViewTreeItem.IsExpanded)),
-            Converter = new ExpandedToGlyphConverter(),
-        });
-        glyph.SetBinding(UIElement.VisibilityProperty, new Binding
-        {
-            Path = new PropertyPath(nameof(ITableViewTreeItem.HasChildren)),
-            Converter = new BooleanToVisibilityConverter(),
-        });
 
         // Async expansion: while the source loads children (IsLoading), a small ring replaces the chevron glyph.
         // Requests are ignored during the load (TreeTableView.RequestExpandCollapse gates on IsLoading).
@@ -79,21 +68,8 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             Width = 14,
             Height = 14,
             IsActive = false,
+            Visibility = Visibility.Collapsed,
         };
-        loadingRing.SetBinding(ProgressRing.IsActiveProperty, new Binding
-        {
-            Path = new PropertyPath(nameof(ITableViewTreeItem.IsLoading)),
-        });
-        loadingRing.SetBinding(UIElement.VisibilityProperty, new Binding
-        {
-            Path = new PropertyPath(nameof(ITableViewTreeItem.IsLoading)),
-            Converter = new BooleanToVisibilityConverter(),
-        });
-        glyph.SetBinding(UIElement.OpacityProperty, new Binding
-        {
-            Path = new PropertyPath(nameof(ITableViewTreeItem.IsLoading)),
-            Converter = new LoadingToOpacityConverter(),
-        });
 
         var chevronContent = new Grid();
         chevronContent.Children.Add(glyph);
@@ -109,10 +85,6 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             VerticalAlignment = VerticalAlignment.Stretch,
             IsTabStop = false,
         };
-        chevron.SetBinding(UIElement.IsHitTestVisibleProperty, new Binding
-        {
-            Path = new PropertyPath(nameof(ITableViewTreeItem.HasChildren)),
-        });
         chevron.Click += (_, _) =>
         {
             // The cell is stable while its element is recycled across items, so resolve item and index at click time.
@@ -137,7 +109,101 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         root.Children.Add(chevron);
         root.Children.Add(textBlock);
 
+        // Interface-driven state: follows the row item across recycling (DataContextChanged) and its
+        // INotifyPropertyChanged notifications. Items not implementing ITableViewTreeItem render fail-closed
+        // (no indent, no chevron, not clickable).
+        _ = new TreeCellVisuals(this, root, indent, glyph, loadingRing, chevron);
+
         return root;
+    }
+
+    /// <summary>
+    /// Keeps one tree cell's visuals in sync with its current <see cref="ITableViewTreeItem"/> (or plain item).
+    /// Lifetime is tied to the generated element via the DataContextChanged/Unloaded subscriptions.
+    /// </summary>
+    private sealed class TreeCellVisuals
+    {
+        private readonly TableViewTreeColumn _column;
+        private readonly Border _indent;
+        private readonly FontIcon _glyph;
+        private readonly ProgressRing _loadingRing;
+        private readonly Button _chevron;
+        private ITableViewTreeItem? _item;
+
+        public TreeCellVisuals(TableViewTreeColumn column, Grid root, Border indent, FontIcon glyph, ProgressRing loadingRing, Button chevron)
+        {
+            _column = column;
+            _indent = indent;
+            _glyph = glyph;
+            _loadingRing = loadingRing;
+            _chevron = chevron;
+
+            root.DataContextChanged += (_, e) => Attach(e.NewValue);
+
+            // Unloaded/Loaded pairs fire during virtualization churn with the SAME DataContext (so
+            // DataContextChanged won't re-fire): Unloaded must only drop the INPC subscription — never reset the
+            // visuals — and Loaded re-attaches to the current item.
+            root.Unloaded += (_, _) => DetachSubscription();
+            root.Loaded += (root, _) => Attach(((FrameworkElement)root).DataContext);
+            Attach(root.DataContext);
+        }
+
+        private void DetachSubscription()
+        {
+            if (_item is not null)
+            {
+                _item.PropertyChanged -= OnItemPropertyChanged;
+                _item = null;
+            }
+        }
+
+        private void Attach(object? dataContext)
+        {
+            var item = dataContext as ITableViewTreeItem;
+
+            if (ReferenceEquals(_item, item))
+            {
+                if (item is null)
+                {
+                    Apply();
+                }
+
+                return;
+            }
+
+            DetachSubscription();
+            _item = item;
+
+            if (_item is not null)
+            {
+                _item.PropertyChanged += OnItemPropertyChanged;
+            }
+
+            Apply();
+        }
+
+        private void OnItemPropertyChanged(object? sender, PropertyChangedEventArgs e) => Apply();
+
+        private void Apply()
+        {
+            if (_item is null)
+            {
+                _indent.Width = 0d;
+                _glyph.Visibility = Visibility.Collapsed;
+                _loadingRing.IsActive = false;
+                _loadingRing.Visibility = Visibility.Collapsed;
+                _chevron.IsHitTestVisible = false;
+                return;
+            }
+
+            _indent.Width = _item.Depth > 0 ? _item.Depth * _column.IndentWidth : 0d;
+            _glyph.Glyph = _item.IsExpanded ? ExpandedGlyph : CollapsedGlyph;
+            _glyph.Opacity = _item.IsLoading ? 0d : 1d; // opacity, not visibility: layout stays stable under the ring
+            _glyph.Visibility = _item.HasChildren && !_item.IsFinalItem ? Visibility.Visible : Visibility.Collapsed;
+            _loadingRing.IsActive = _item.IsLoading;
+            _loadingRing.Visibility = _item.IsLoading ? Visibility.Visible : Visibility.Collapsed;
+            _chevron.IsHitTestVisible = !_item.IsFinalItem && (_item.HasChildren || _item.IsLoading);
+        }
     }
 
     /// <summary>
@@ -197,8 +263,7 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     public static readonly DependencyProperty IndentWidthProperty = DependencyProperty.Register(nameof(IndentWidth), typeof(double), typeof(TableViewTreeColumn), new PropertyMetadata(16d, OnIndentWidthChanged));
 
     /// <summary>
-    /// Re-applies the indent to this column's realized cells: the cell bindings only evaluate on (re)bind, so a
-    /// live IndentWidth change must push the new width into the existing indent spacers itself.
+    /// Re-applies the indent to this column's realized cells so a live IndentWidth change takes effect immediately.
     /// </summary>
     private static void OnIndentWidthChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
@@ -224,57 +289,5 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
                 }
             }
         }
-    }
-
-    private const string CollapsedGlyph = ""; // ChevronRight
-    private const string ExpandedGlyph = "";  // ChevronDown
-
-    /// <summary>
-    /// Converts an item's depth to the indent spacer width using the owning column's <see cref="IndentWidth"/>.
-    /// </summary>
-    private sealed partial class DepthToIndentConverter(TableViewTreeColumn column) : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, string language)
-            => value is int depth && depth > 0 ? depth * column.IndentWidth : 0d;
-
-        public object ConvertBack(object value, Type targetType, object parameter, string language)
-            => throw new NotSupportedException();
-    }
-
-    /// <summary>
-    /// Converts <see cref="ITableViewTreeItem.IsExpanded"/> to the chevron glyph.
-    /// </summary>
-    private sealed partial class ExpandedToGlyphConverter : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, string language)
-            => value is true ? ExpandedGlyph : CollapsedGlyph;
-
-        public object ConvertBack(object value, Type targetType, object parameter, string language)
-            => throw new NotSupportedException();
-    }
-
-    /// <summary>
-    /// Converts <see cref="ITableViewTreeItem.HasChildren"/> to chevron glyph visibility. The chevron slot itself is
-    /// always reserved so leaves align with expandable siblings.
-    /// </summary>
-    private sealed partial class BooleanToVisibilityConverter : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, string language)
-            => value is true ? Visibility.Visible : Visibility.Collapsed;
-
-        public object ConvertBack(object value, Type targetType, object parameter, string language)
-            => throw new NotSupportedException();
-    }
-
-    /// <summary>
-    /// Hides the chevron glyph (opacity, so layout is stable) while the loading ring is shown.
-    /// </summary>
-    private sealed partial class LoadingToOpacityConverter : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, string language)
-            => value is true ? 0d : 1d;
-
-        public object ConvertBack(object value, Type targetType, object parameter, string language)
-            => throw new NotSupportedException();
     }
 }

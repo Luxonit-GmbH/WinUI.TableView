@@ -159,7 +159,7 @@ public class TreeTableViewChildrenViewTests
         public int Value { get; set; } = value;
         public int Depth { get; init; }
         public TreeTableViewChildrenView? Children { get; init; }
-        public IEnumerable<ITableViewTreeItem>? ChildrenSource => Children;
+        public System.Collections.IEnumerable? ChildrenSource => Children;
         public bool HasChildren => Children is { Count: > 0 };
         public bool IsFinalItem => false;
         public bool IsExpanded { get; set; }

@@ -78,7 +78,7 @@ public sealed partial class TreeItemModel : ITableViewTreeItem
     public int Depth { get; }
 
     public ObservableCollection<ITableViewTreeItem>? Children { get; private set; }
-    public IEnumerable<ITableViewTreeItem>? ChildrenSource => Children;
+    public System.Collections.IEnumerable? ChildrenSource => Children;
 
     public bool ChildrenLoaded => Children is not null;
     public bool HasChildren => ChildCount > 0;

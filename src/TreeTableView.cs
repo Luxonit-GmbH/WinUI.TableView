@@ -1,7 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using System;
-using System.Collections.Generic;
+using System.Collections;
 using Windows.System;
 
 namespace WinUI.TableView;
@@ -40,8 +40,10 @@ public partial class TreeTableView : TableView
     /// </summary>
     /// <remarks>
     /// Typed <see cref="object"/> like other WinUI items-source properties so any view-model property binds without
-    /// casts; the value must implement <see cref="IEnumerable{T}"/> of <see cref="ITableViewTreeItem"/> at runtime
-    /// (an <see cref="ArgumentException"/> is thrown otherwise, rather than silently showing an empty grid).
+    /// casts; the value only has to be enumerable (e.g. an
+    /// <see cref="Windows.Foundation.Collections.IObservableVector{T}"/> of <see cref="object"/>). Items are NOT
+    /// type-checked: rows implementing <see cref="ITableViewTreeItem"/> are expandable, all other rows are plain
+    /// leaves — mixing both in one collection is the intended model.
     /// </remarks>
     public object? TreeItemsSource
     {
@@ -66,13 +68,14 @@ public partial class TreeTableView : TableView
     {
         if (d is TreeTableView treeTableView)
         {
+            // No item-type validation by design: only expandable rows implement ITableViewTreeItem, plain leaf
+            // rows implement nothing. The collection itself just has to be enumerable.
             var roots = e.NewValue switch
             {
                 null => null,
-                IEnumerable<ITableViewTreeItem> treeItems => treeItems,
+                IEnumerable enumerable => enumerable,
                 _ => throw new ArgumentException(
-                    $"TreeItemsSource must implement IEnumerable<{nameof(ITableViewTreeItem)}> (typed collections of " +
-                    $"items implementing the interface work via covariance); got '{e.NewValue.GetType()}'.",
+                    $"TreeItemsSource must be enumerable (e.g. IObservableVector<object>); got '{e.NewValue.GetType()}'.",
                     nameof(TreeItemsSource)),
             };
 
@@ -80,7 +83,7 @@ public partial class TreeTableView : TableView
         }
     }
 
-    private void ApplyTreeItemsSource(IEnumerable<ITableViewTreeItem>? roots)
+    private void ApplyTreeItemsSource(IEnumerable? roots)
     {
         if (_ownsTreeSource && ItemsSource is TreeTableViewSource ownedSource)
         {
