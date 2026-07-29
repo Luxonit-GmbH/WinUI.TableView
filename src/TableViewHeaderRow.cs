@@ -45,6 +45,7 @@ public partial class TableViewHeaderRow : Control
     private DispatcherTimer? _desiredWidthTimer;
     private bool _calculatingHeaderWidths;
     private bool _headerWidthsUpdateQueued;
+    private bool _headersRebuildQueued;
     private int _dropColumnIndex;
     private bool _isValidDropTarget;
     private readonly Dictionary<DependencyProperty, long> _callbackTokens = [];
@@ -163,6 +164,7 @@ public partial class TableViewHeaderRow : Control
     /// </summary>
     private void OnTableViewColumnsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+
         if (e.Action == NotifyCollectionChangedAction.Add && e.NewItems?.OfType<TableViewColumn>() is IEnumerable<TableViewColumn> newItems)
         {
             AddHeaders(newItems.Where(x => x.Visibility == Visibility.Visible));
@@ -291,6 +293,7 @@ public partial class TableViewHeaderRow : Control
     {
         if (TableView is not null && _scrollableHeadersPanel is not null)
         {
+
             foreach (var column in columns)
             {
                 var header = new TableViewColumnHeader { DataContext = column, Column = column };
@@ -304,6 +307,47 @@ public partial class TableViewHeaderRow : Control
 
             InvalidateHeaderWidths();
         }
+    }
+
+    /// <summary>
+    /// Rebuilds every header from the current visible columns, coalescing multiple requests raised within the same
+    /// tick into a single pass (a bulk column replacement raises one event per column).
+    /// </summary>
+    /// <remarks>
+    /// Driven by <see cref="WinUI.TableView.TableView"/> whenever the column collection changes. The header row's
+    /// own CollectionChanged subscription does not fire in every hosting arrangement, which used to leave columns
+    /// added after load without a header — and therefore without a width, which in turn collapsed every cell under
+    /// column virtualization. Rebuilding centrally makes the header always match the columns.
+    /// </remarks>
+    internal void InvalidateHeaders()
+    {
+        if (_headersRebuildQueued)
+        {
+            return;
+        }
+
+        _headersRebuildQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _headersRebuildQueued = false;
+
+            if (TableView is null || _scrollableHeadersPanel is null)
+            {
+                return;
+            }
+
+            var columns = TableView.Columns.VisibleColumns;
+
+            // Nothing to do when the headers already match the columns, so ordinary resizes and property changes
+            // do not churn the header visuals.
+            if (Headers.Select(header => header.Column).SequenceEqual(columns))
+            {
+                return;
+            }
+
+            ClearHeaders();
+            AddHeaders(columns);
+        });
     }
 
     /// <summary>
@@ -330,6 +374,7 @@ public partial class TableViewHeaderRow : Control
     /// </summary>
     internal void CalculateHeaderWidths()
     {
+
         if (TableView?.ActualWidth > 0)
         {
             _calculatingHeaderWidths = true;
@@ -777,6 +822,7 @@ public partial class TableViewHeaderRow : Control
     /// </summary>
     public void ClearHeaders()
     {
+
         foreach (var header in Headers)
         {
             if (header.Column?.HeaderControl == header)

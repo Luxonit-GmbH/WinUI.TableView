@@ -436,6 +436,24 @@ public abstract partial class TableViewColumn : DependencyObject
     }
 
     /// <summary>
+    /// Gets or sets the column's position in the multi-column sort chain: 0 for the primary sort, 1 for the first
+    /// tie-breaker, and so on; -1 when the column is not part of the chain. Maintained by the grid (see
+    /// <see cref="WinUI.TableView.TableView.ApplySort"/>) and useful for showing the sort order in a header.
+    /// </summary>
+    public int SortPriority
+    {
+        get;
+        set
+        {
+            if (field != value)
+            {
+                field = value;
+                OwningCollection?.HandleColumnPropertyChanged(this, nameof(SortPriority));
+            }
+        }
+    } = -1;
+
+    /// <summary>
     /// Gets or sets a value indicating whether the column is filtered.
     /// </summary>
     public bool IsFiltered

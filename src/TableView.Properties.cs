@@ -355,6 +355,53 @@ public partial class TableView
     public IList<SortDescription> SortDescriptions => _collectionView.SortDescriptions;
 
     /// <summary>
+    /// Gets the current multi-column sort chain in priority order (0 = primary sort), derived from the columns'
+    /// <see cref="TableViewColumn.SortDirection"/> and <see cref="TableViewColumn.SortPriority"/>.
+    /// </summary>
+    public IReadOnlyList<TableViewSortDescription> SortChain =>
+    [
+        .. Columns
+            .Where(column => column.SortDirection is not null)
+            .OrderBy(column => column.SortPriority < 0 ? int.MaxValue : column.SortPriority)
+            .Select((column, index) => new TableViewSortDescription(
+                column,
+                column.SortMemberPath ?? (column as TableViewBoundColumn)?.PropertyPath,
+                column.SortDirection!.Value,
+                index))
+    ];
+
+    /// <summary>
+    /// Gets or sets how many columns may take part in the multi-column sort chain (Ctrl+click adds a column).
+    /// When the chain would grow past this, the oldest entry is dropped. Defaults to 5.
+    /// </summary>
+    public int MaxSortColumns
+    {
+        get => (int)GetValue(MaxSortColumnsProperty);
+        set => SetValue(MaxSortColumnsProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the MaxSortColumns dependency property.
+    /// </summary>
+    public static readonly DependencyProperty MaxSortColumnsProperty = DependencyProperty.Register(nameof(MaxSortColumns), typeof(int), typeof(TableView), new PropertyMetadata(5));
+
+    /// <summary>
+    /// Gets or sets whether the column filter flyout offers comparison operators (Equals, Larger than, Contains,
+    /// Between, …) above the value checkbox list. When <see langword="false"/> the flyout shows only the classic
+    /// checkbox list. Defaults to <see langword="true"/>.
+    /// </summary>
+    public bool ShowFilterOperators
+    {
+        get => (bool)GetValue(ShowFilterOperatorsProperty);
+        set => SetValue(ShowFilterOperatorsProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the ShowFilterOperators dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ShowFilterOperatorsProperty = DependencyProperty.Register(nameof(ShowFilterOperators), typeof(bool), typeof(TableView), new PropertyMetadata(true));
+
+    /// <summary>
     /// Gets the collection of filter descriptions applied to the items.
     /// </summary>
     public IList<FilterDescription> FilterDescriptions => _collectionView.FilterDescriptions;

@@ -26,6 +26,17 @@ public interface IColumnFilterHandler
     void ApplyFilter(TableViewColumn column);
 
     /// <summary>
+    /// Applies an operator based filter (Equals, Larger than, Contains, Between, …) to a column.
+    /// </summary>
+    /// <remarks>
+    /// Has a default implementation that ignores the operator and falls back to
+    /// <see cref="ApplyFilter(TableViewColumn)"/>, so existing handlers keep working; override it to support the
+    /// operators offered by the filter flyout.
+    /// </remarks>
+    /// <param name="descriptor">The filter to apply: column, operator and value(s).</param>
+    void ApplyFilter(TableViewFilterDescriptor descriptor) => ApplyFilter(descriptor.Column);
+
+    /// <summary>
     /// Clears the filter from the specified column.
     /// </summary>
     /// <param name="column">The column from which the filter is cleared.</param>

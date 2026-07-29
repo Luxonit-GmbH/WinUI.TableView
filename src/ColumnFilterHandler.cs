@@ -106,9 +106,57 @@ public class ColumnFilterHandler : IColumnFilterHandler
                (value is Guid guid && guid == Guid.Empty);
     }
 
+    /// <summary>
+    /// Per-column operator filters set from the filter flyout. Columns filtered by the classic checkbox list have
+    /// no entry here and are evaluated against <see cref="SelectedValues"/> instead.
+    /// </summary>
+    private readonly Dictionary<TableViewColumn, TableViewFilterDescriptor> _descriptors = [];
+
+    /// <inheritdoc/>
+    public virtual void ApplyFilter(TableViewFilterDescriptor descriptor)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+
+        if (descriptor.Operator is TableViewFilterOperator.SelectedValues)
+        {
+            _descriptors.Remove(descriptor.Column);
+
+            if (descriptor.SelectedValues is not null)
+            {
+                SelectedValues[descriptor.Column] = descriptor.SelectedValues;
+            }
+        }
+        else
+        {
+            // Remember the operator filter so Filter() evaluates it for every item.
+            _descriptors[descriptor.Column] = descriptor;
+        }
+
+        ApplyFilter(descriptor.Column);
+    }
+
     /// <inheritdoc/>
     public virtual void ApplyFilter(TableViewColumn column)
     {
+        // Raise the Filtering event first so an app can take over (symmetric with the Sorting event). The
+        // descriptor describes the checkbox selection the flyout produced; custom operators can be supplied by
+        // calling ApplyFilter(descriptor) directly.
+        if (column?.TableView is { } tableView)
+        {
+            var args = new TableViewFilteringEventArgs(new TableViewFilterDescriptor(
+                column,
+                TableViewFilterOperator.SelectedValues,
+                selectedValues: SelectedValues.TryGetValue(column, out var values) ? values : null));
+
+            tableView.OnFiltering(args);
+
+            if (args.Handled)
+            {
+                column.IsFiltered = true;
+                return;
+            }
+        }
+
         if (column is { TableView.CollectionView: CollectionView { } collectionView })
         {
             using var defer = collectionView.DeferRefresh();
@@ -130,16 +178,44 @@ public class ColumnFilterHandler : IColumnFilterHandler
     /// <inheritdoc/>
     public virtual void ClearFilter(TableViewColumn? column)
     {
+        var clearArgs = new TableViewClearFilterEventArgs(column);
+        _tableView.OnClearFilter(clearArgs);
+
+        if (clearArgs.Handled)
+        {
+            // The app cleared its own filter state; still reflect it on the column(s) so the funnel icon updates.
+            if (column is not null)
+            {
+                column.IsFiltered = false;
+                SelectedValues.RemoveWhere(x => x.Key == column);
+                _descriptors.Remove(column);
+            }
+            else
+            {
+                SelectedValues.Clear();
+                _descriptors.Clear();
+
+                foreach (var col in _tableView.Columns)
+                {
+                    col?.IsFiltered = false;
+                }
+            }
+
+            return;
+        }
+
         if (column is { TableView.CollectionView: CollectionView { } collectionView })
         {
             using var defer = collectionView.DeferRefresh();
             column.IsFiltered = false;
             collectionView.FilterDescriptions.RemoveWhere(x => x is ColumnFilterDescription columnFilter && columnFilter.Column == column);
             SelectedValues.RemoveWhere(x => x.Key == column);
+            _descriptors.Remove(column);
         }
         else
         {
             SelectedValues.Clear();
+            _descriptors.Clear();
             _tableView.FilterDescriptions.Clear();
 
             foreach (var col in _tableView.Columns)
@@ -152,9 +228,15 @@ public class ColumnFilterHandler : IColumnFilterHandler
     /// <inheritdoc/>
     public virtual bool Filter(TableViewColumn column, object? item)
     {
+        // Operator filter (Equals, Larger than, Contains, Between, …) takes precedence when one was applied.
+        if (_descriptors.TryGetValue(column, out var descriptor))
+        {
+            return descriptor.MatchesItem(item);
+        }
+
         var value = column.GetCellContent(item);
         value = IsBlank(value) ? null : value!;
-        return SelectedValues[column].Contains(value);
+        return SelectedValues.TryGetValue(column, out var selected) && selected.Contains(value);
     }
 
     /// <inheritdoc/>

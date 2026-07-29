@@ -109,13 +109,15 @@ public class TableViewColumnSetSwapTests
     }
 
     [UITestMethod]
-    [Ignore("KNOWN FAILING — executable repro for the column-set-swap layout bug. After Clear()+Add() the NEW " +
-            "columns' header controls keep Width = NaN, so TableViewColumnHeader.OnWidthChanged never assigns " +
-            "column.ActualWidth (stays 0). GetVisibleScrollableRange then returns (-1,-1) and the realize pass " +
-            "bails, leaving every cell collapsed — rows render with columns missing. Calling " +
-            "HeaderRow.CalculateHeaderWidths() directly DOES assign widths, but they are NaN again shortly after, " +
-            "so a later header rebuild (suspect: RemoveHeaders/AddHeaders from an IsFrozen/Order property change) " +
-            "replaces the sized headers with fresh unsized ones. Remove [Ignore] when fixing.")]
+    [Ignore("KNOWN FAILING — executable repro. Instrumentation proved TableViewHeaderRow's CollectionChanged " +
+            "handler NEVER FIRES: after a Clear()+Add() swap there is no ClearHeaders, no AddHeaders and no " +
+            "CalculateHeaderWidths, even though TableView._headerRow is present AND the ROWS receive the very same " +
+            "Columns.CollectionChanged event correctly (their cells rebuild). The swapped-in columns therefore " +
+            "never get sized headers, column.ActualWidth stays 0, GetVisibleScrollableRange returns (-1,-1) and " +
+            "every cell stays collapsed — the row renders with columns missing. NEXT STEP: determine why the " +
+            "header row's subscription is inert while the rows' works — prime suspect is that the subscribing " +
+            "header row instance is not the one in the live visual tree (a second instance), so the fix is likely " +
+            "in how TableViewHeaderRow.TableView is assigned. Remove [Ignore] when fixing.")]
     public async Task ColumnSwap_WithColumnVirtualization_NewCellsAreVisibleNotCollapsed()
     {
         // The likely real-world repro: with column virtualization the realized BAND is cached by index range. A
@@ -124,9 +126,8 @@ public class TableViewColumnSetSwapTests
         var tableView = await LoadAsync(columnCount: 4, virtualize: true);
 
         AssertVisibleCellsMatchColumns(tableView, 4);
-
         tableView.Columns.Clear();
-        foreach (var column in CreateColumns(4)) // same COUNT, different column instances
+        foreach (var column in CreateColumns(4, "X")) // same COUNT, different column instances
         {
             tableView.Columns.Add(column);
         }
@@ -154,7 +155,8 @@ public class TableViewColumnSetSwapTests
             var visible = row.Cells.Count(cell => cell.Visibility == Visibility.Visible);
             Assert.AreEqual(expected, visible,
                 $"row {row.Index}: {visible} of {row.Cells.Count} cells visible — collapsed cells render as missing " +
-                $"columns. range={range}, widths=[{widths}], rows={tableView.Rows.Count}");
+                $"columns. range={range}, widths=[{widths}], rows={tableView.Rows.Count}, " +
+                $"headerRow={(tableView.HeaderRow is null ? "NULL" : "present")}");
         }
     }
 
@@ -174,13 +176,13 @@ public class TableViewColumnSetSwapTests
         }
     }
 
-    private static IEnumerable<TableViewColumn> CreateColumns(int count)
+    private static IEnumerable<TableViewColumn> CreateColumns(int count, string prefix = "C")
     {
         for (var i = 0; i < count; i++)
         {
             yield return new TableViewTextColumn
             {
-                Header = $"C{i}",
+                Header = $"{prefix}{i}",
                 Width = new GridLength(100, GridUnitType.Pixel),
                 Binding = new Binding { Path = new PropertyPath(nameof(SwapItem.Name)) },
             };

@@ -98,13 +98,28 @@
                                               HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" />
 
                             <Grid HorizontalAlignment="Right">
-                                <FontIcon x:Name="SortIcon"
-                                          FontSize="10"
-                                          Margin="0,2,0,0"
-                                          Visibility="Collapsed"
-                                          VerticalAlignment="Top"
-                                          HorizontalAlignment="Center"
-                                          Glyph="{ThemeResource SortIconAscending}" />
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="1"
+                                            VerticalAlignment="Top"
+                                            HorizontalAlignment="Center">
+                                    <FontIcon x:Name="SortIcon"
+                                              FontSize="10"
+                                              Margin="0,2,0,0"
+                                              Visibility="Collapsed"
+                                              VerticalAlignment="Top"
+                                              HorizontalAlignment="Center"
+                                              Glyph="{ThemeResource SortIconAscending}" />
+
+                                    <!-- Multi-column sort: shows this column's 1-based position in the sort chain
+                                         next to the arrow. Collapsed unless more than one column is sorted. -->
+                                    <TextBlock x:Name="SortPriorityText"
+                                               FontSize="9"
+                                               Margin="0,1,0,0"
+                                               Visibility="Collapsed"
+                                               VerticalAlignment="Top"
+                                               HorizontalAlignment="Center"
+                                               Foreground="{TemplateBinding Foreground}" />
+                                </StackPanel>
 
                                 <Button x:Name="OptionsButton"
                                         Padding="4"

@@ -74,7 +74,14 @@ public partial class TableView : ListView
         // index range as the old one, and without this the realize pass is skipped and freshly created cells stay
         // collapsed — rows then render with columns missing. The realize itself is debounced, so bulk column
         // rebuilds still cost a single pass.
-        Columns.CollectionChanged += (_, _) => InvalidateColumnBand();
+        Columns.CollectionChanged += (_, _) =>
+        {
+            // Rebuild the headers (they carry the column widths, so a column without a header has ActualWidth 0 and
+            // its cells can never be realized) and drop the cached realized band, since a new column set can span
+            // the same numeric index range as the old one. Both are coalesced onto the dispatcher.
+            _headerRow?.InvalidateHeaders();
+            InvalidateColumnBand();
+        };
         FilterHandler = new ColumnFilterHandler(this);
 
         base.ItemsSource = _collectionView;
@@ -594,7 +601,24 @@ public partial class TableView : ListView
     private void StartBandRealize()
     {
         var wide = GetVisibleScrollableRange(ColumnCacheLength);
-        if (wide.First < 0 || wide == _lastRealizedRange)
+
+        if (wide.First < 0)
+        {
+            // No usable band yet — column widths are still unknown (every ActualWidth is 0), which happens right
+            // after the column set is replaced. Realizing nothing would leave every cell collapsed with no further
+            // trigger, so the row renders with columns missing. Fall back to realizing ALL scrollable columns and
+            // do NOT record the range, so the real (narrower) band still applies once widths settle.
+            var scrollableCount = Columns.VisibleScrollableColumns.Count;
+
+            if (scrollableCount > 0)
+            {
+                RealizeRowChunk((0, scrollableCount - 1), _realizeGeneration, [.. _rows], 0, recordRange: false);
+            }
+
+            return;
+        }
+
+        if (wide == _lastRealizedRange)
         {
             return;
         }
@@ -602,7 +626,7 @@ public partial class TableView : ListView
         RealizeRowChunk(wide, _realizeGeneration, [.. _rows], 0);
     }
 
-    private void RealizeRowChunk((int First, int Last) range, int generation, TableViewRow[] rows, int start)
+    private void RealizeRowChunk((int First, int Last) range, int generation, TableViewRow[] rows, int start, bool recordRange = true)
     {
         if (generation != _realizeGeneration)
         {
@@ -617,9 +641,9 @@ public partial class TableView : ListView
 
         if (end < rows.Length)
         {
-            DispatcherQueue.TryEnqueue(() => RealizeRowChunk(range, generation, rows, end));
+            DispatcherQueue.TryEnqueue(() => RealizeRowChunk(range, generation, rows, end, recordRange));
         }
-        else
+        else if (recordRange)
         {
             _lastRealizedRange = range; // band fully realized
         }
@@ -1410,6 +1434,52 @@ public partial class TableView : ListView
     /// Gets the realized header row, or <see langword="null"/> before the template is applied.
     /// </summary>
     internal TableViewHeaderRow? HeaderRow => _headerRow;
+
+    /// <summary>
+    /// Applies a multi-column sort chain: stamps <see cref="TableViewColumn.SortDirection"/> and
+    /// <see cref="TableViewColumn.SortPriority"/> on the columns (clearing every column not in the chain) and, when
+    /// the built-in <see cref="CollectionView"/> is in use, rebuilds its sort descriptions in the same order.
+    /// </summary>
+    /// <remarks>
+    /// This is the entry point for restoring a saved sort, and for handlers of <see cref="Sorting"/> that let the
+    /// grid keep the visual state while sorting the data themselves. The chain is trimmed to
+    /// <see cref="MaxSortColumns"/>, keeping the entries with the lowest priority.
+    /// </remarks>
+    /// <param name="sortDescriptions">The chain in priority order; empty or <see langword="null"/> clears sorting.</param>
+    public void ApplySort(IEnumerable<TableViewSortDescription>? sortDescriptions)
+    {
+        var chain = (sortDescriptions ?? [])
+            .OrderBy(description => description.Priority)
+            .Take(Math.Max(1, MaxSortColumns))
+            .ToList();
+
+        using var defer = _collectionView.DeferRefresh();
+
+        foreach (var column in Columns)
+        {
+            var index = chain.FindIndex(description => description.Column == column);
+
+            column.SortDirection = index >= 0 ? chain[index].Direction : null;
+            column.SortPriority = index;
+        }
+
+        // The internal CollectionView only sorts in CollectionView mode; in direct mode the app owns ordering and
+        // this call just keeps the column state (arrows, priorities) consistent.
+        _collectionView.SortDescriptions.Clear();
+
+        foreach (var description in chain)
+        {
+            _collectionView.SortDescriptions.Add(
+                new ColumnSortDescription(description.Column, description.PropertyPath, description.Direction));
+        }
+
+        // Refresh every header's priority number: adding a second sorted column must make the first one show "1",
+        // and dropping back to a single sort must hide the numbers again.
+        foreach (var column in Columns)
+        {
+            column.HeaderControl?.UpdateSortPriorityIndicator();
+        }
+    }
 
     /// <summary>
     /// Drops every cached column layout and forces all realized rows and the header to rebuild from the CURRENT
