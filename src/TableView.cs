@@ -204,7 +204,11 @@ public partial class TableView : ListView
             _rows.Add(row);
 
             row.EnsureCellsStyle(null, item);
-            row.ApplyCellsSelectionState(true);
+
+            // Full apply, NOT the "only set the selected state" variant: a recycled container carries the previous
+            // item's selection visuals, so skipping the unselected state leaves phantom selected rows behind after
+            // scrolling (the classic "I selected 4 rows, paged down, and 4 more look selected").
+            row.ApplyCellsSelectionState();
             row.RowPresenter?.ApplyDetailsPaneState(item);
 
             if (CurrentCellSlot.HasValue)
@@ -2448,6 +2452,22 @@ public partial class TableView : ListView
     }
 
     /// <summary>
+    /// Whether the row is hidden behind the sticky header row (or the grid is scrolled past the first row), i.e.
+    /// whether a corrective scroll is actually needed.
+    /// </summary>
+    private bool IsRowObscured(TableViewRow row, int index)
+    {
+        if (_scrollViewer is null)
+        {
+            return false;
+        }
+
+        var position = row.TransformToVisual(_scrollViewer).TransformPoint(new Point(0, 0));
+
+        return (index == 0 && _scrollViewer.VerticalOffset > 0) || (index > 0 && position.Y < HeaderRowHeight);
+    }
+
+    /// <summary>
     /// Scrolls the specified row into view.
     /// </summary>
     /// <param name="index">The index of the row to scroll into view.</param>
@@ -2472,17 +2492,33 @@ public partial class TableView : ListView
 
             if (ContainerFromIndex(index) is TableViewRow row)
             {
-                var transform = row.TransformToVisual(_scrollViewer);
-                var positionInScrollViewer = transform.TransformPoint(new Point(0, 0));
-                if ((index == 0 && _scrollViewer.VerticalOffset > 0) || (index > 0 && positionInScrollViewer.Y < HeaderRowHeight))
+                if (IsRowObscured(row, index))
                 {
-                    var yOffset = index == 0 ? 0d : _scrollViewer.VerticalOffset - row.ActualHeight + positionInScrollViewer.Y + 8;
+                    // Re-check after letting the layout settle: a fling is still moving VerticalOffset, and
+                    // correcting from a stale reading is what makes the view jump when a row is clicked right
+                    // after a fast scroll. If the row is no longer obscured, leave the view alone.
+                    await Task.Yield();
+
+                    if (ContainerFromIndex(index) is not TableViewRow settledRow || !IsRowObscured(settledRow, index))
+                    {
+                        return ContainerFromIndex(index) as TableViewRow ?? row;
+                    }
+
+                    row = settledRow;
+                    var positionInScrollViewer = row.TransformToVisual(_scrollViewer).TransformPoint(new Point(0, 0));
+                    var yOffset = index == 0
+                        ? 0d
+                        : Math.Clamp(
+                            _scrollViewer.VerticalOffset - row.ActualHeight + positionInScrollViewer.Y + 8,
+                            0,
+                            _scrollViewer.ScrollableHeight);
                     var tcs = new TaskCompletionSource<object?>();
 
                     try
                     {
                         _scrollViewer.ViewChanged += ViewChanged;
-                        _scrollViewer.ChangeView(0, yOffset, null, true);
+                        // null horizontal: selecting a row must never reset the horizontal scroll position.
+                        _scrollViewer.ChangeView(null, yOffset, null, true);
                         await tcs.Task;
                     }
                     finally

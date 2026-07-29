@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 using System.ComponentModel;
 using WinUI.TableView.Columns;
@@ -95,19 +96,39 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         };
         Grid.SetColumn(chevron, 1);
 
-        var textBlock = new TextBlock
+        // Content: a template when one is supplied (the item becomes the ContentControl's DataContext, so the
+        // template binds against the row item exactly like a TableViewTemplateColumn), otherwise the bound text.
+        FrameworkElement content;
+
+        if (CellTemplate is not null)
         {
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        if (Binding is not null)
-        {
-            textBlock.SetBinding(TextBlock.TextProperty, Binding);
+            content = new ContentControl
+            {
+                ContentTemplate = CellTemplate,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                IsTabStop = false,
+            };
+            ((ContentControl)content).SetBinding(ContentControl.ContentProperty, new Binding());
         }
-        Grid.SetColumn(textBlock, 2);
+        else
+        {
+            var textBlock = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
+
+            if (Binding is not null)
+            {
+                textBlock.SetBinding(TextBlock.TextProperty, Binding);
+            }
+
+            content = textBlock;
+        }
+
+        Grid.SetColumn(content, 2);
 
         root.Children.Add(indent);
         root.Children.Add(chevron);
-        root.Children.Add(textBlock);
+        root.Children.Add(content);
 
         // Interface-driven state: follows the row item across recycling (DataContextChanged) and its
         // INotifyPropertyChanged notifications. Items not implementing ITableViewTreeItem render fail-closed
@@ -214,6 +235,19 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     /// <returns>A TextBox element.</returns>
     public override FrameworkElement GenerateEditingElement(TableViewCell cell, object? dataItem)
     {
+        if (CellEditingTemplate is not null)
+        {
+            var host = new ContentControl
+            {
+                ContentTemplate = CellEditingTemplate,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Content = dataItem,
+            };
+
+            return host;
+        }
+
         var textBox = new TextBox();
         if (Binding is not null)
         {
@@ -224,6 +258,36 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
 #endif
         return textBox;
     }
+
+    /// <summary>
+    /// Gets or sets the template used to render the tree cell's content, in place of the bound text. The
+    /// indentation and expander chevron are still supplied by the column, so the template only describes the
+    /// item's own presentation; the row item is the template's DataContext.
+    /// </summary>
+    public DataTemplate? CellTemplate
+    {
+        get => (DataTemplate?)GetValue(CellTemplateProperty);
+        set => SetValue(CellTemplateProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the CellTemplate dependency property.
+    /// </summary>
+    public static readonly DependencyProperty CellTemplateProperty = DependencyProperty.Register(nameof(CellTemplate), typeof(DataTemplate), typeof(TableViewTreeColumn), new PropertyMetadata(null));
+
+    /// <summary>
+    /// Gets or sets the template used while the tree cell is being edited, in place of the default TextBox.
+    /// </summary>
+    public DataTemplate? CellEditingTemplate
+    {
+        get => (DataTemplate?)GetValue(CellEditingTemplateProperty);
+        set => SetValue(CellEditingTemplateProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the CellEditingTemplate dependency property.
+    /// </summary>
+    public static readonly DependencyProperty CellEditingTemplateProperty = DependencyProperty.Register(nameof(CellEditingTemplate), typeof(DataTemplate), typeof(TableViewTreeColumn), new PropertyMetadata(null));
 
     /// <inheritdoc/>
     protected internal override object? PrepareCellForEdit(TableViewCell cell, RoutedEventArgs routedEvent)
