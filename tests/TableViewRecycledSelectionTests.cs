@@ -102,6 +102,76 @@ public class TableViewRecycledSelectionTests
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
     }
 
+    [UITestMethod]
+    public async Task TreeChevron_AppearsWhenHasChildrenFlipsLater()
+    {
+        // The app's backend model: a node reports no children until the count query answers, then flips
+        // HasChildren. The chevron must appear at that moment, on the already-realized cell.
+        var node = new FlipNode("Root");
+        var roots = new ObservableCollection<ITableViewTreeItem> { node };
+
+        var treeView = new TreeTableView { AutoGenerateColumns = false, Width = 600, Height = 300 };
+        treeView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(300, GridUnitType.Pixel),
+        });
+        treeView.TreeItemsSource = roots;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeView);
+        treeView.UpdateLayout();
+
+        var row0 = (TableViewRow)treeView.ContainerFromIndex(0)!;
+        var cellRoot0 = (Grid)row0.Cells[0].Content;
+        Assert.AreSame(node, cellRoot0.DataContext,
+            $"cell content DataContext must be the row item, was '{cellRoot0.DataContext?.GetType().Name ?? "null"}' " +
+            $"(cell.DataContext='{row0.Cells[0].DataContext?.GetType().Name ?? "null"}', " +
+            $"row.Content='{row0.Content?.GetType().Name ?? "null"}')");
+
+        var glyph = FindChevronGlyph(treeView, 0);
+        Assert.AreEqual(Visibility.Collapsed, glyph.Visibility, "no chevron before the count arrives");
+        Assert.IsTrue(node.HasSubscribers, "the tree cell must be subscribed to the item's PropertyChanged");
+
+        node.SetHasChildren(true); // the count query answers
+
+        Assert.AreEqual(Visibility.Visible, glyph.Visibility, "chevron must appear when HasChildren flips");
+
+        node.SetHasChildren(false);
+
+        Assert.AreEqual(Visibility.Collapsed, glyph.Visibility, "and disappear again when it flips back");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
+    }
+
+    private static FontIcon FindChevronGlyph(TreeTableView treeView, int rowIndex)
+    {
+        var row = (TableViewRow)treeView.ContainerFromIndex(rowIndex)!;
+        var cellRoot = (Grid)row.Cells[0].Content;
+        var chevron = (Button)cellRoot.Children[1];
+        return (FontIcon)((Grid)chevron.Content).Children[0];
+    }
+
+    private sealed class FlipNode(string name) : ITableViewTreeItem
+    {
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+
+        public string Name { get; } = name;
+        public int Depth => 0;
+        public bool HasChildren { get; private set; }
+        public bool IsFinalItem => false;
+        public bool IsExpanded { get; set; }
+        public bool IsLoading => false;
+        public System.Collections.IEnumerable? ChildrenSource => null;
+
+        public bool HasSubscribers => PropertyChanged is not null;
+
+        public void SetHasChildren(bool value)
+        {
+            HasChildren = value;
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(HasChildren)));
+        }
+    }
+
     private static async Task<TableView> LoadAsync()
     {
         var tableView = new TableView
