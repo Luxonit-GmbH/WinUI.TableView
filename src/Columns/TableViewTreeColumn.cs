@@ -60,6 +60,7 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         {
             Glyph = CollapsedGlyph,
             FontSize = 12,
+            Visibility = Visibility.Collapsed, // fail closed until the item says it has children
         };
 
         // Async expansion: while the source loads children (IsLoading), a small ring replaces the chevron glyph.
@@ -130,10 +131,11 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         root.Children.Add(chevron);
         root.Children.Add(content);
 
-        // Interface-driven state: follows the row item across recycling (DataContextChanged) and its
-        // INotifyPropertyChanged notifications. Items not implementing ITableViewTreeItem render fail-closed
-        // (no indent, no chevron, not clickable).
-        _ = new TreeCellVisuals(this, root, indent, glyph, loadingRing, chevron);
+        // Interface-driven state, kept on the element itself so the recycle hook (RefreshElement) can re-point it.
+        // Items not implementing ITableViewTreeItem render fail-closed (no indent, no chevron, not clickable).
+        var visuals = new TreeCellVisuals(this, root, indent, glyph, loadingRing, chevron);
+        root.Tag = visuals;
+        visuals.Attach(dataItem); // the item is handed to us here; DataContext is not set yet at this point
 
         return root;
     }
@@ -159,41 +161,39 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             _loadingRing = loadingRing;
             _chevron = chevron;
 
+            // DataContextChanged is the ONLY re-point trigger: the subscription follows the item for as long as
+            // this element is bound to it. Deliberately NOT unsubscribing on Unloaded — virtualization raises
+            // Unloaded without a matching Loaded often enough that doing so silently drops the item's property
+            // notifications, which is what made the expander chevron appear only sometimes (the chevron depends on
+            // HasChildren, which an async child-count query flips after the cell is already realized).
             root.DataContextChanged += (_, e) => Attach(e.NewValue);
-
-            // Unloaded/Loaded pairs fire during virtualization churn with the SAME DataContext (so
-            // DataContextChanged won't re-fire): Unloaded must only drop the INPC subscription — never reset the
-            // visuals — and Loaded re-attaches to the current item.
-            root.Unloaded += (_, _) => DetachSubscription();
-            root.Loaded += (root, _) => Attach(((FrameworkElement)root).DataContext);
+            root.Loaded += (sender, _) => Attach(((FrameworkElement)sender).DataContext);
             Attach(root.DataContext);
         }
 
+        /// <summary>
+        /// Drops the property subscription but KEEPS the item, so a later re-attach (Loaded) re-subscribes to the
+        /// same item and refreshes the visuals it may have missed meanwhile.
+        /// </summary>
         private void DetachSubscription()
         {
             if (_item is not null)
             {
                 _item.PropertyChanged -= OnItemPropertyChanged;
-                _item = null;
             }
         }
 
-        private void Attach(object? dataContext)
+        /// <summary>
+        /// Points the visuals at the given data item and refreshes them. Always re-applies, even when the item
+        /// reference is unchanged: the item's HasChildren/IsLoading may have changed while this element was
+        /// pointed elsewhere (an async child count arriving after the cell was realized), and skipping the refresh
+        /// in that window is what made the expander chevron intermittently missing.
+        /// </summary>
+        internal void Attach(object? dataContext)
         {
-            var item = dataContext as ITableViewTreeItem;
+            DetachSubscription(); // idempotent: never leaves a double subscription behind
 
-            if (ReferenceEquals(_item, item))
-            {
-                if (item is null)
-                {
-                    Apply();
-                }
-
-                return;
-            }
-
-            DetachSubscription();
-            _item = item;
+            _item = dataContext as ITableViewTreeItem;
 
             if (_item is not null)
             {
@@ -224,6 +224,20 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             _loadingRing.IsActive = _item.IsLoading;
             _loadingRing.Visibility = _item.IsLoading ? Visibility.Visible : Visibility.Collapsed;
             _chevron.IsHitTestVisible = !_item.IsFinalItem && (_item.HasChildren || _item.IsLoading);
+        }
+    }
+
+    /// <summary>
+    /// Re-points the cell's tree visuals at the recycled row's item. This is the reliable hook: the grid hands us
+    /// the new item, whereas DataContext propagation to a reused element is not guaranteed to raise an event.
+    /// </summary>
+    /// <param name="cell">The recycled cell.</param>
+    /// <param name="dataItem">The item now shown in the cell.</param>
+    public override void RefreshElement(TableViewCell cell, object? dataItem)
+    {
+        if (cell?.Content is Grid { Tag: TreeCellVisuals visuals })
+        {
+            visuals.Attach(dataItem);
         }
     }
 
