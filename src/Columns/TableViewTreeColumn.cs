@@ -97,21 +97,25 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         };
         Grid.SetColumn(chevron, 1);
 
-        // Content: a template when one is supplied (the item becomes the ContentControl's DataContext, so the
-        // template binds against the row item exactly like a TableViewTemplateColumn), otherwise the bound text.
+        // Content: a template (or template selector) when supplied — the row item becomes the ContentControl's
+        // Content, so the template binds against it exactly like a TableViewTemplateColumn — otherwise bound text.
         FrameworkElement content;
+        ContentControl? templatedContent = null;
 
-        if (CellTemplate is not null)
+        if (CellTemplate is not null || CellTemplateSelector is not null)
         {
-            content = new ContentControl
+            // Content is assigned by TreeCellVisuals (on generate AND on every recycle) rather than bound to the
+            // DataContext, so templated cells re-point as reliably as the chevron does.
+            templatedContent = new ContentControl
             {
                 ContentTemplate = CellTemplate,
+                ContentTemplateSelector = CellTemplateSelector,
                 HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 VerticalContentAlignment = VerticalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
                 IsTabStop = false,
             };
-            ((ContentControl)content).SetBinding(ContentControl.ContentProperty, new Binding());
+            content = templatedContent;
         }
         else
         {
@@ -133,7 +137,7 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
 
         // Interface-driven state, kept on the element itself so the recycle hook (RefreshElement) can re-point it.
         // Items not implementing ITableViewTreeItem render fail-closed (no indent, no chevron, not clickable).
-        var visuals = new TreeCellVisuals(this, root, indent, glyph, loadingRing, chevron);
+        var visuals = new TreeCellVisuals(this, root, indent, glyph, loadingRing, chevron, templatedContent);
         root.Tag = visuals;
         visuals.Attach(dataItem); // the item is handed to us here; DataContext is not set yet at this point
 
@@ -151,15 +155,24 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
         private readonly FontIcon _glyph;
         private readonly ProgressRing _loadingRing;
         private readonly Button _chevron;
+        private readonly ContentControl? _templatedContent;
         private ITableViewTreeItem? _item;
 
-        public TreeCellVisuals(TableViewTreeColumn column, Grid root, Border indent, FontIcon glyph, ProgressRing loadingRing, Button chevron)
+        public TreeCellVisuals(
+            TableViewTreeColumn column,
+            Grid root,
+            Border indent,
+            FontIcon glyph,
+            ProgressRing loadingRing,
+            Button chevron,
+            ContentControl? templatedContent)
         {
             _column = column;
             _indent = indent;
             _glyph = glyph;
             _loadingRing = loadingRing;
             _chevron = chevron;
+            _templatedContent = templatedContent;
 
             // DataContextChanged is the ONLY re-point trigger: the subscription follows the item for as long as
             // this element is bound to it. Deliberately NOT unsubscribing on Unloaded — virtualization raises
@@ -198,6 +211,13 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             if (_item is not null)
             {
                 _item.PropertyChanged += OnItemPropertyChanged;
+            }
+
+            // Templated content follows the item explicitly (a plain row item that is not an ITableViewTreeItem
+            // still gets its template — only the tree chrome is interface-gated).
+            if (_templatedContent is not null)
+            {
+                _templatedContent.Content = dataContext;
             }
 
             Apply();
@@ -249,17 +269,16 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     /// <returns>A TextBox element.</returns>
     public override FrameworkElement GenerateEditingElement(TableViewCell cell, object? dataItem)
     {
-        if (CellEditingTemplate is not null)
+        if (CellEditingTemplate is not null || CellEditingTemplateSelector is not null)
         {
-            var host = new ContentControl
+            return new ContentControl
             {
                 ContentTemplate = CellEditingTemplate,
+                ContentTemplateSelector = CellEditingTemplateSelector,
                 HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 VerticalContentAlignment = VerticalAlignment.Center,
                 Content = dataItem,
             };
-
-            return host;
         }
 
         var textBox = new TextBox();
@@ -302,6 +321,36 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
     /// Identifies the CellEditingTemplate dependency property.
     /// </summary>
     public static readonly DependencyProperty CellEditingTemplateProperty = DependencyProperty.Register(nameof(CellEditingTemplate), typeof(DataTemplate), typeof(TableViewTreeColumn), new PropertyMetadata(null));
+
+    /// <summary>
+    /// Gets or sets a selector that chooses the template for the tree cell's content per item, for trees whose
+    /// nodes need different presentations (e.g. group rows vs leaf rows). Takes effect when
+    /// <see cref="CellTemplate"/> is not set, or as the selector the ContentControl consults first.
+    /// </summary>
+    public DataTemplateSelector? CellTemplateSelector
+    {
+        get => (DataTemplateSelector?)GetValue(CellTemplateSelectorProperty);
+        set => SetValue(CellTemplateSelectorProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the CellTemplateSelector dependency property.
+    /// </summary>
+    public static readonly DependencyProperty CellTemplateSelectorProperty = DependencyProperty.Register(nameof(CellTemplateSelector), typeof(DataTemplateSelector), typeof(TableViewTreeColumn), new PropertyMetadata(null));
+
+    /// <summary>
+    /// Gets or sets a selector that chooses the editing template for the tree cell per item.
+    /// </summary>
+    public DataTemplateSelector? CellEditingTemplateSelector
+    {
+        get => (DataTemplateSelector?)GetValue(CellEditingTemplateSelectorProperty);
+        set => SetValue(CellEditingTemplateSelectorProperty, value);
+    }
+
+    /// <summary>
+    /// Identifies the CellEditingTemplateSelector dependency property.
+    /// </summary>
+    public static readonly DependencyProperty CellEditingTemplateSelectorProperty = DependencyProperty.Register(nameof(CellEditingTemplateSelector), typeof(DataTemplateSelector), typeof(TableViewTreeColumn), new PropertyMetadata(null));
 
     /// <inheritdoc/>
     protected internal override object? PrepareCellForEdit(TableViewCell cell, RoutedEventArgs routedEvent)
