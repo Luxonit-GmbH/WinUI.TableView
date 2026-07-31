@@ -143,6 +143,103 @@ public class TableViewRecycledSelectionTests
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
     }
 
+    [UITestMethod]
+    public async Task TreeColumn_CellTemplateSelector_PicksPerItem_AndFollowsRecycling()
+    {
+        var roots = new ObservableCollection<ITableViewTreeItem>(
+            Enumerable.Range(0, 200).Select(i => (ITableViewTreeItem)new FlipNode($"N{i}") { IsGroupRow = i % 2 == 0 }));
+
+        var selector = new KindTemplateSelector
+        {
+            GroupTemplate = LoadTemplate("group"),
+            LeafTemplate = LoadTemplate("leaf"),
+        };
+
+        var treeView = new TreeTableView { AutoGenerateColumns = false, RowHeight = 32, Width = 600, Height = 300 };
+        treeView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(300, GridUnitType.Pixel),
+            CellTemplateSelector = selector,
+        });
+        treeView.TreeItemsSource = roots;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeView);
+        treeView.UpdateLayout();
+
+        // The selector is wired to the content host and picks per item: even rows group, odd rows leaf.
+        Assert.AreSame(selector, GetTemplateHost(treeView, 0).ContentTemplateSelector);
+        Assert.AreSame(selector.GroupTemplate, selector.SelectTemplate(GetTemplateHost(treeView, 0).Content));
+        Assert.AreSame(selector.LeafTemplate, selector.SelectTemplate(GetTemplateHost(treeView, 1).Content));
+
+        // After recycling, the reused cells must show the template for their NEW item, and the content control
+        // must point at that item (this is the path that used to rely on DataContext propagation).
+        _ = await treeView.ScrollRowIntoView(150);
+        treeView.UpdateLayout();
+        await Task.Delay(100);
+        treeView.UpdateLayout();
+
+        foreach (var row in treeView.Rows.Where(r => r.Index >= 0))
+        {
+            var node = (FlipNode)row.Content;
+            var expected = node.IsGroupRow ? selector.GroupTemplate : selector.LeafTemplate;
+            var host = (ContentControl)((Grid)row.Cells[0].Content).Children[2];
+
+            Assert.AreSame(node, host.Content, $"row {row.Index}: templated content points at the wrong item");
+            Assert.AreSame(expected, selector.SelectTemplate(host.Content), $"row {row.Index}: wrong template after recycling");
+        }
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
+    }
+
+    private static DataTemplate LoadTemplate(string text) => (DataTemplate)XamlReader.Load(
+        $"""
+         <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+             <TextBlock Text="{text}" />
+         </DataTemplate>
+         """);
+
+    private static ContentControl GetTemplateHost(TreeTableView treeView, int rowIndex)
+    {
+        var row = (TableViewRow)treeView.ContainerFromIndex(rowIndex)!;
+        return (ContentControl)((Grid)row.Cells[0].Content).Children[2];
+    }
+
+    /// <summary>Depth-first search for the template's TextBlock (the ContentControl wraps it in a presenter).</summary>
+    private static TextBlock? FindTextBlock(DependencyObject root)
+    {
+        var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+
+        for (var i = 0; i < count; i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+
+            if (child is TextBlock textBlock)
+            {
+                return textBlock;
+            }
+
+            if (FindTextBlock(child) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    private sealed class KindTemplateSelector : DataTemplateSelector
+    {
+        public DataTemplate? GroupTemplate { get; init; }
+        public DataTemplate? LeafTemplate { get; init; }
+
+        protected override DataTemplate? SelectTemplateCore(object item)
+            => item is FlipNode { IsGroupRow: true } ? GroupTemplate : LeafTemplate;
+
+        protected override DataTemplate? SelectTemplateCore(object item, DependencyObject container)
+            => SelectTemplateCore(item);
+    }
+
     private static FontIcon FindChevronGlyph(TreeTableView treeView, int rowIndex)
     {
         var row = (TableViewRow)treeView.ContainerFromIndex(rowIndex)!;
@@ -156,6 +253,7 @@ public class TableViewRecycledSelectionTests
         public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
 
         public string Name { get; } = name;
+        public bool IsGroupRow { get; init; }
         public int Depth => 0;
         public bool HasChildren { get; private set; }
         public bool IsFinalItem => false;
