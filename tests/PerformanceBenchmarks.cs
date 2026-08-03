@@ -970,6 +970,200 @@ public class PerformanceBenchmarks
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
     }
 
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_50Groups_Expand100k_PerRowEvents()
+        => await BigTreeAsync(int.MaxValue, expand: true, "Tree_50Groups_Expand100k_PerRowEvents");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_50Groups_Expand100k_Coalesced()
+        => await BigTreeAsync(32, expand: true, "Tree_50Groups_Expand100k_Coalesced");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_50Groups_Collapse100k_PerRowEvents()
+        => await BigTreeAsync(int.MaxValue, expand: false, "Tree_50Groups_Collapse100k_PerRowEvents");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_50Groups_Collapse100k_Coalesced()
+        => await BigTreeAsync(32, expand: false, "Tree_50Groups_Collapse100k_Coalesced");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_AppRemovesChildrenItself_100k_NoBulkScope()
+        => await AppDrivenRemovalAsync(useBulkScope: false, "Tree_AppRemovesChildren_100k_NoBulkScope");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_AppRemovesChildrenItself_100k_WithBulkScope()
+        => await AppDrivenRemovalAsync(useBulkScope: true, "Tree_AppRemovesChildren_100k_WithBulkScope");
+
+    /// <summary>
+    /// The app's ACTUAL collapse pattern: instead of calling Collapse on the adapter, the view model empties its
+    /// own children collection. Without a bulk scope every removal is forwarded to the host individually — this is
+    /// the case the Expand/Collapse coalescing does not cover.
+    /// </summary>
+    private async Task AppDrivenRemovalAsync(bool useBulkScope, string benchmarkName)
+    {
+        var children = new ObservableCollection<ITableViewTreeItem>(
+            Enumerable.Range(0, 100_000).Select(i => (ITableViewTreeItem)new BenchTreeNode($"C{i}", 1)));
+        var snapshot = children.ToList();
+        var group = new BenchTreeNode("G", 0) { Children = children };
+
+        var treeView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            RowHeight = 32,
+            Width = 1000,
+            Height = 600,
+        };
+        treeView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(300, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(BenchTreeNode.Name)) },
+        });
+        treeView.TreeItemsSource = new ObservableCollection<ITableViewTreeItem> { group };
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeView);
+        treeView.UpdateLayout();
+
+        var source = treeView.TreeSource!;
+        source.Expand(group);
+        treeView.UpdateLayout();
+
+        Report(Measure(
+            () =>
+            {
+                // ObservableCollection has no range API, so the app empties it item by item — exactly what a
+                // view model doing its own teardown produces.
+                if (useBulkScope)
+                {
+                    using (source.BeginBulkUpdate())
+                    {
+                        while (children.Count > 0)
+                        {
+                            children.RemoveAt(children.Count - 1);
+                        }
+                    }
+                }
+                else
+                {
+                    while (children.Count > 0)
+                    {
+                        children.RemoveAt(children.Count - 1);
+                    }
+                }
+
+                treeView.UpdateLayout();
+            },
+            warmup: 0,
+            iterations: 3,
+            reset: () =>
+            {
+                // The action always empties from the end, so what is left is a prefix of the snapshot. Top it back
+                // up rather than re-adding blindly (reset also runs before the first iteration).
+                using (source.BeginBulkUpdate())
+                {
+                    for (var i = children.Count; i < snapshot.Count; i++)
+                    {
+                        children.Add(snapshot[i]);
+                    }
+                }
+
+                treeView.UpdateLayout();
+            }),
+            benchmarkName);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
+    }
+
+    /// <summary>
+    /// The app's shape: 50 top-level groups, one of them holding 100 000 children, bound to a live grid. Measures
+    /// either the expand or the collapse of that group, with per-row notifications or coalesced ones.
+    /// </summary>
+    private async Task BigTreeAsync(int bulkThreshold, bool expand, string benchmarkName)
+    {
+        var roots = new ObservableCollection<ITableViewTreeItem>();
+        BenchTreeNode? bigGroup = null;
+
+        for (var g = 0; g < 50; g++)
+        {
+            // Only the measured group is populated: 50 x 100k nodes would be 5M objects of pure setup cost.
+            var children = new ObservableCollection<ITableViewTreeItem>(
+                g == 0
+                    ? Enumerable.Range(0, 100_000).Select(i => (ITableViewTreeItem)new BenchTreeNode($"G0C{i}", 1))
+                    : []);
+
+            var group = new BenchTreeNode($"G{g}", 0) { Children = children };
+            roots.Add(group);
+            bigGroup ??= group;
+        }
+
+        var treeView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            RowHeight = 32,
+            Width = 1000,
+            Height = 600,
+        };
+        treeView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(300, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(BenchTreeNode.Name)) },
+        });
+        treeView.TreeItemsSource = roots;
+        treeView.TreeSource!.BulkChangeThreshold = bulkThreshold;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeView);
+        treeView.UpdateLayout();
+
+        var source = treeView.TreeSource!;
+        var target = bigGroup!;
+
+        if (!expand)
+        {
+            source.Expand(target); // collapse benchmark starts from the expanded state
+            treeView.UpdateLayout();
+        }
+
+        Report(Measure(
+            () =>
+            {
+                if (expand)
+                {
+                    source.Expand(target);
+                }
+                else
+                {
+                    source.Collapse(target);
+                }
+
+                treeView.UpdateLayout(); // make the host process the change inside the measurement
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                if (expand)
+                {
+                    source.Collapse(target);
+                }
+                else
+                {
+                    source.Expand(target);
+                }
+
+                treeView.UpdateLayout();
+            }),
+            benchmarkName);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
+    }
+
     private sealed class BenchTreeNode(string name, int depth) : ITableViewTreeItem
     {
         public event PropertyChangedEventHandler? PropertyChanged;

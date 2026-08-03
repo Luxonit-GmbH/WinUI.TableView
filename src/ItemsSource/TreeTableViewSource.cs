@@ -58,6 +58,40 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     public int BulkChangeThreshold { get; set; } = 32;
 
     /// <summary>
+    /// Suspends per-row notifications until the returned scope is disposed, then raises a single reset if anything
+    /// changed. Wrap bulk mutations of YOUR OWN children collections in this — removing or adding thousands of
+    /// children one call at a time otherwise makes the host run a virtualization and measure pass per row.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// using (source.BeginBulkUpdate())
+    /// {
+    ///     myChildren.RemoveRange(removedItems); // one notification reaches the grid, not thousands
+    /// }
+    /// </code>
+    /// </example>
+    /// <returns>A scope that flushes the coalesced notification when disposed.</returns>
+    public IDisposable BeginBulkUpdate()
+    {
+        BeginBulk();
+        return new BulkScope(this);
+    }
+
+    private sealed class BulkScope(TreeTableViewSource source) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                _disposed = true;
+                source.EndBulk();
+            }
+        }
+    }
+
+    /// <summary>
     /// Suppresses per-row notifications for the duration of a bulk operation; the matching
     /// <see cref="EndBulk"/> raises one reset if anything actually changed.
     /// </summary>
@@ -462,6 +496,31 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
 
     private void OnBranchCollectionChanged(Branch branch, NotifyCollectionChangedEventArgs e)
     {
+        // A single INotifyCollectionChanged event can carry many items (RemoveRange/AddRange style); coalesce
+        // those too, so one app-level call produces one grid notification.
+        var affected = Math.Max(e.NewItems?.Count ?? 0, e.OldItems?.Count ?? 0);
+
+        if (affected > BulkChangeThreshold)
+        {
+            BeginBulk();
+
+            try
+            {
+                OnBranchCollectionChangedCore(branch, e);
+            }
+            finally
+            {
+                EndBulk();
+            }
+
+            return;
+        }
+
+        OnBranchCollectionChangedCore(branch, e);
+    }
+
+    private void OnBranchCollectionChangedCore(Branch branch, NotifyCollectionChangedEventArgs e)
+    {
         switch (e.Action)
         {
             case NotifyCollectionChangedAction.Add when e.NewItems is not null:
@@ -526,6 +585,30 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// to rebuilding the window, which is unavoidable when the source does not say what changed.
     /// </summary>
     private void RebuildBranch(Branch branch)
+    {
+        // A reset on a tracked children collection can move a very large window of rows; coalesce it so the host
+        // sees one change instead of one per row.
+        var bulk = branch.Shadow.Count > BulkChangeThreshold;
+
+        if (bulk)
+        {
+            BeginBulk();
+        }
+
+        try
+        {
+            RebuildBranchCore(branch);
+        }
+        finally
+        {
+            if (bulk)
+            {
+                EndBulk();
+            }
+        }
+    }
+
+    private void RebuildBranchCore(Branch branch)
     {
         var oldChildren = branch.Shadow;
         var newChildren = branch.Source.Cast<object>().ToList();

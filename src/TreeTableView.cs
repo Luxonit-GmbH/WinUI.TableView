@@ -64,6 +64,30 @@ public partial class TreeTableView : TableView
     /// </summary>
     public TreeTableViewSource? TreeSource => ItemsSource as TreeTableViewSource;
 
+    /// <summary>
+    /// Suspends per-row notifications until the returned scope is disposed, then raises a single change. Wrap bulk
+    /// mutations of your own children collections in this: adding or removing thousands of children one call at a
+    /// time otherwise makes the host run a virtualization and measure pass per row, which freezes the UI thread.
+    /// Expanding and collapsing through this control is already coalesced and needs no scope.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// using (treeTableView.BeginBulkUpdate())
+    /// {
+    ///     myItem.Children.Clear(); // one notification reaches the grid, not thousands
+    /// }
+    /// </code>
+    /// </example>
+    /// <returns>A scope that flushes the coalesced notification when disposed; a no-op scope when no tree source is set.</returns>
+    public IDisposable BeginBulkUpdate() => TreeSource?.BeginBulkUpdate() ?? NoOpScope.Instance;
+
+    private sealed class NoOpScope : IDisposable
+    {
+        public static readonly NoOpScope Instance = new();
+
+        public void Dispose() { }
+    }
+
     private static void OnTreeItemsSourceChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is TreeTableView treeTableView)

@@ -704,6 +704,113 @@ public partial class TreeTableViewSourceTests
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Bulk coalescing
+    // ---------------------------------------------------------------------------------------------------------
+
+    [TestMethod]
+    public void BulkUpdateScope_CoalescesAppDrivenRemovals_IntoOneReset()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+
+        for (var i = 0; i < 40; i++)
+        {
+            children.Add(new Node($"AX{i}", 1));
+        }
+
+        var events = Record(source);
+
+        using (source.BeginBulkUpdate())
+        {
+            while (children.Count > 0)
+            {
+                children.RemoveAt(children.Count - 1);
+            }
+        }
+
+        CollectionAssert.AreEqual(
+            new[] { (CollectionChange.Reset, 0u) },
+            events,
+            "removing children one call at a time inside a bulk scope must reach the grid as a single change");
+
+        AssertFlat(source, "A", "B");
+    }
+
+    [TestMethod]
+    public void BulkUpdateScope_IsReentrant_AndFlushesOnlyOnce()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var events = Record(source);
+
+        using (source.BeginBulkUpdate())
+        {
+            children.Add(new Node("AX", 1));
+
+            using (source.BeginBulkUpdate())
+            {
+                children.Add(new Node("AY", 1));
+            }
+
+            children.Add(new Node("AZ", 1));
+        }
+
+        Assert.AreEqual(1, events.Count, "the inner scope must not flush; only the outermost one does");
+        Assert.AreEqual(CollectionChange.Reset, events[0].Item1);
+        AssertFlat(source, "A", "A1", "A2", "A2a", "AX", "AY", "AZ", "B");
+    }
+
+    [TestMethod]
+    public void BulkUpdateScope_WithNoChanges_RaisesNothing()
+    {
+        var (source, _, _) = CreateTree();
+        var events = Record(source);
+
+        using (source.BeginBulkUpdate())
+        {
+        }
+
+        Assert.AreEqual(0, events.Count);
+    }
+
+    [TestMethod]
+    public void BranchReset_AboveThreshold_CoalescesIntoOneReset()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+
+        for (var i = 0; i < 40; i++)
+        {
+            children.Add(new Node($"AX{i}", 1));
+        }
+
+        var events = Record(source);
+
+        children.Clear(); // ObservableCollection raises a single Reset
+
+        Assert.AreEqual(1, events.Count, "a large branch reset must not be replayed as one event per removed row");
+        Assert.AreEqual(CollectionChange.Reset, events[0].Item1);
+        AssertFlat(source, "A", "B");
+    }
+
+    [TestMethod]
+    public void BranchReset_BelowThreshold_StaysGranular()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var events = Record(source);
+
+        children.Clear(); // only 2 children — below BulkChangeThreshold
+
+        // Small resets stay granular on purpose: a Reset makes the host drop every realized container and
+        // reset the scroll position, which is far more expensive than a handful of removals.
+        Assert.IsFalse(
+            events.Any(e => e.Item1 == CollectionChange.Reset),
+            "small branch resets must stay granular so the host keeps its containers and scroll position");
+        AssertFlat(source, "A", "B");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------------------------------------
 
