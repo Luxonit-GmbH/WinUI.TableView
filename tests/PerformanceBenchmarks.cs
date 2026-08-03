@@ -970,10 +970,10 @@ public class PerformanceBenchmarks
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
     }
 
-    [UITestMethod]
-    [TestCategory("Benchmark")]
-    public async Task Tree_50Groups_Expand100k_PerRowEvents()
-        => await BigTreeAsync(int.MaxValue, expand: true, "Tree_50Groups_Expand100k_PerRowEvents");
+    // Only the COALESCED variants run. The per-row-event counterparts measured the pre-fix behaviour by replaying
+    // one notification per row into a live 100k grid — seconds per iteration, minutes per run, and nothing to guard
+    // against (a regression shows up as the coalesced number exploding). Recorded baselines, 2026-08-03 Release:
+    // expand 3004ms, collapse 4140ms, app-driven removal 1462ms.
 
     [UITestMethod]
     [TestCategory("Benchmark")]
@@ -982,18 +982,8 @@ public class PerformanceBenchmarks
 
     [UITestMethod]
     [TestCategory("Benchmark")]
-    public async Task Tree_50Groups_Collapse100k_PerRowEvents()
-        => await BigTreeAsync(int.MaxValue, expand: false, "Tree_50Groups_Collapse100k_PerRowEvents");
-
-    [UITestMethod]
-    [TestCategory("Benchmark")]
     public async Task Tree_50Groups_Collapse100k_Coalesced()
         => await BigTreeAsync(32, expand: false, "Tree_50Groups_Collapse100k_Coalesced");
-
-    [UITestMethod]
-    [TestCategory("Benchmark")]
-    public async Task Tree_AppRemovesChildrenItself_100k_NoBulkScope()
-        => await AppDrivenRemovalAsync(useBulkScope: false, "Tree_AppRemovesChildren_100k_NoBulkScope");
 
     [UITestMethod]
     [TestCategory("Benchmark")]
@@ -1002,8 +992,9 @@ public class PerformanceBenchmarks
 
     /// <summary>
     /// The app's ACTUAL collapse pattern: instead of calling Collapse on the adapter, the view model empties its
-    /// own children collection. Without a bulk scope every removal is forwarded to the host individually — this is
-    /// the case the Expand/Collapse coalescing does not cover.
+    /// own children collection. Expand/Collapse coalescing does not cover this — only a bulk scope does. Drop the
+    /// scope to reproduce the unguarded cost (~1.5s at this size); it is not run automatically because replaying
+    /// 100k individual notifications into a live grid costs seconds per iteration.
     /// </summary>
     private async Task AppDrivenRemovalAsync(bool useBulkScope, string benchmarkName)
     {
