@@ -704,6 +704,339 @@ public partial class TreeTableViewSourceTests
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Bulk coalescing
+    // ---------------------------------------------------------------------------------------------------------
+
+    [TestMethod]
+    public void BulkUpdateScope_CoalescesAppDrivenRemovals_IntoOneReset()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+
+        for (var i = 0; i < 40; i++)
+        {
+            children.Add(new Node($"AX{i}", 1));
+        }
+
+        var events = Record(source);
+
+        using (source.BeginBulkUpdate())
+        {
+            while (children.Count > 0)
+            {
+                children.RemoveAt(children.Count - 1);
+            }
+        }
+
+        CollectionAssert.AreEqual(
+            new[] { (CollectionChange.Reset, 0u) },
+            events,
+            "removing children one call at a time inside a bulk scope must reach the grid as a single change");
+
+        AssertFlat(source, "A", "B");
+    }
+
+    [TestMethod]
+    public void BulkUpdateScope_IsReentrant_AndFlushesOnlyOnce()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var events = Record(source);
+
+        using (source.BeginBulkUpdate())
+        {
+            children.Add(new Node("AX", 1));
+
+            using (source.BeginBulkUpdate())
+            {
+                children.Add(new Node("AY", 1));
+            }
+
+            children.Add(new Node("AZ", 1));
+        }
+
+        Assert.AreEqual(1, events.Count, "the inner scope must not flush; only the outermost one does");
+        Assert.AreEqual(CollectionChange.Reset, events[0].Item1);
+        AssertFlat(source, "A", "A1", "A2", "A2a", "AX", "AY", "AZ", "B");
+    }
+
+    [TestMethod]
+    public void BulkUpdateScope_WithNoChanges_RaisesNothing()
+    {
+        var (source, _, _) = CreateTree();
+        var events = Record(source);
+
+        using (source.BeginBulkUpdate())
+        {
+        }
+
+        Assert.AreEqual(0, events.Count);
+    }
+
+    [TestMethod]
+    public void BranchReset_AboveThreshold_CoalescesIntoOneReset()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+
+        for (var i = 0; i < 40; i++)
+        {
+            children.Add(new Node($"AX{i}", 1));
+        }
+
+        var events = Record(source);
+
+        children.Clear(); // ObservableCollection raises a single Reset
+
+        Assert.AreEqual(1, events.Count, "a large branch reset must not be replayed as one event per removed row");
+        Assert.AreEqual(CollectionChange.Reset, events[0].Item1);
+        AssertFlat(source, "A", "B");
+    }
+
+    [TestMethod]
+    public void BranchReset_BelowThreshold_StaysGranular()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var events = Record(source);
+
+        children.Clear(); // only 2 children — below BulkChangeThreshold
+
+        // Small resets stay granular on purpose: a Reset makes the host drop every realized container and
+        // reset the scroll position, which is far more expensive than a handful of removals.
+        Assert.IsFalse(
+            events.Any(e => e.Item1 == CollectionChange.Reset),
+            "small branch resets must stay granular so the host keeps its containers and scroll position");
+        AssertFlat(source, "A", "B");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Item uniqueness — rows are identified by reference, so a repeated instance is reported where it is
+    // introduced instead of crashing later on an unrelated removal.
+    // ---------------------------------------------------------------------------------------------------------
+
+    [TestMethod]
+    public void DuplicateChild_InTheSameCollection_ThrowsNamingTheItem()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var a1 = (Node)children[0];
+
+        var error = Assert.ThrowsExactly<InvalidOperationException>(() => children.Add(a1));
+
+        StringAssert.Contains(error.Message, "A1", "the message must name the offending item");
+        StringAssert.Contains(error.Message, nameof(TreeTableViewSource));
+    }
+
+    [TestMethod]
+    public void DuplicateChild_UnderADifferentParent_Throws()
+    {
+        var (source, a, roots) = CreateTree();
+        var a1 = (Node)((ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!)[0];
+
+        var b = (Node)roots[1];
+        var bChildren = new ObservableCollection<ITableViewTreeItem>();
+        b.SetChildren(bChildren);
+        source.Expand(b);
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => bChildren.Add(a1));
+    }
+
+    [TestMethod]
+    public void DuplicateRoot_InTheConstructorInput_Throws()
+    {
+        var shared = new Node("Shared", 0);
+        var roots = new ObservableCollection<ITableViewTreeItem> { shared, new Node("B", 0), shared };
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => new TreeTableViewSource(roots));
+    }
+
+    [TestMethod]
+    public void DuplicateNestedInAPreExpandedSubtree_ThrowsOnExpand()
+    {
+        var (source, a, roots) = CreateTree();
+        var a2a = (Node)((ObservableCollection<ITableViewTreeItem>)
+            ((Node)((ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!)[1]).ChildrenSource!)[0];
+
+        // B's child is itself pre-expanded and holds an item that is already visible under A.
+        var bChild = new Node("BChild", 1) { IsExpanded = true };
+        bChild.SetChildren(new ObservableCollection<ITableViewTreeItem> { a2a });
+
+        var b = (Node)roots[1];
+        b.SetChildren(new ObservableCollection<ITableViewTreeItem> { bChild });
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => source.Expand(b));
+    }
+
+    [TestMethod]
+    public void RejectedDuplicate_AddsNoRow_AndKeepsTheFirstOccurrence()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var a1 = (Node)children[0];
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => children.Add(a1));
+
+        // No phantom row, and the instance still resolves to its original position.
+        AssertFlat(source, "A", "A1", "A2", "A2a", "B");
+        Assert.AreEqual(1, source.IndexOf(a1));
+    }
+
+    [TestMethod]
+    public void RejectedDuplicate_ResyncsTheBranch_OnTheNextChange()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var a1 = (Node)children[0];
+
+        // ObservableCollection commits the add before it notifies, so after the rejection the source holds an item
+        // the adapter refused — every later positional event from it would be off by one.
+        Assert.ThrowsExactly<InvalidOperationException>(() => children.Add(a1));
+
+        children.RemoveAt(children.Count - 1); // the app drops the duplicate it should never have added
+
+        AssertFlat(source, "A", "A1", "A2", "A2a", "B");
+
+        // ...and the branch is fully live again.
+        var ax = new Node("AX", 1);
+        children.Add(ax);
+        AssertFlat(source, "A", "A1", "A2", "A2a", "AX", "B");
+
+        children.Remove(ax);
+        AssertFlat(source, "A", "A1", "A2", "A2a", "B");
+
+        source.Collapse(a);
+        source.Expand(a);
+        AssertFlat(source, "A", "A1", "A2", "A2a", "B");
+    }
+
+    [TestMethod]
+    public void RejectedDuplicate_StillPresent_ThrowsAgainOnResync_NeverRemovesTheWrongRow()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var a1 = (Node)children[0];
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => children.Add(a1));
+
+        // The app ignores the error and keeps streaming. The resync re-derives from the source, which still holds
+        // the duplicate, so it fails the same way instead of silently removing an unrelated row.
+        Assert.ThrowsExactly<InvalidOperationException>(() => children.Add(new Node("AX", 1)));
+
+        Assert.AreEqual(1, source.IndexOf(a1), "the original occupant must keep its row");
+    }
+
+    [TestMethod]
+    public void DuplicateTwiceInOnePreExpandedCollection_ReportsTheDuplicate_NotANullReference()
+    {
+        // Both occupants are registered by the SAME insert walk, so the first one has no row yet when the second is
+        // rejected — asking for its row index would throw and mask the diagnostic.
+        var repeated = new Node("Twice", 1);
+        var parent = new Node("P", 0) { IsExpanded = true };
+        parent.SetChildren(new ObservableCollection<ITableViewTreeItem> { repeated, repeated });
+
+        var error = Assert.ThrowsExactly<InvalidOperationException>(
+            () => new TreeTableViewSource(new ObservableCollection<ITableViewTreeItem> { parent }));
+
+        StringAssert.Contains(error.Message, "Twice");
+    }
+
+    [TestMethod]
+    public void FailedExpand_LeavesNoHalfSplicedBranch()
+    {
+        var (source, a, roots) = CreateTree();
+        var a1 = (Node)((ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!)[0];
+
+        var b = (Node)roots[1];
+        // Good children first, the offender last: a per-child check would splice the good ones in and then fail.
+        b.SetChildren(new ObservableCollection<ITableViewTreeItem> { new Node("B1", 1), new Node("B2", 1), a1 });
+
+        Assert.ThrowsExactly<InvalidOperationException>(() => source.Expand(b));
+
+        AssertFlat(source, "A", "A1", "A2", "A2a", "B");
+        Assert.IsFalse(b.IsExpanded, "a rejected expand must not leave the item claiming to be expanded");
+
+        // The real regression this guards: collapsing after a failed expand used to hit the missing bookkeeping.
+        source.Collapse(b);
+        AssertFlat(source, "A", "A1", "A2", "A2a", "B");
+    }
+
+    [TestMethod]
+    public void FailedResync_KeepsTheTail_RatherThanAmputatingIt()
+    {
+        var shared = new Node("Shared", 0);
+        var parent = new Node("P", 0) { IsExpanded = true };
+        var children = new ObservableCollection<ITableViewTreeItem>
+        {
+            new Node("C0", 1), new Node("C1", 1), new Node("C2", 1), new Node("C3", 1),
+        };
+        parent.SetChildren(children);
+
+        var source = new TreeTableViewSource(
+            new ObservableCollection<ITableViewTreeItem> { parent, shared });
+
+        // A duplicate lands MID-list, so the resync's changed window spans the rest of the branch.
+        Assert.ThrowsExactly<InvalidOperationException>(() => children.Insert(2, shared));
+
+        // The app keeps streaming; the resync re-derives, finds the duplicate still there, and must refuse WITHOUT
+        // having already deleted the window it was going to rebuild.
+        Assert.ThrowsExactly<InvalidOperationException>(() => children.Add(new Node("C4", 1)));
+
+        AssertFlat(source, "P", "C0", "C1", "C2", "C3", "Shared");
+    }
+
+    [TestMethod]
+    public void DistinctButEqualItems_AreNotDuplicates()
+    {
+        // Value-equality view models (records are the common case) must still get one row each: the tree is keyed
+        // by reference, not by Equals.
+        var first = new ValueEqualNode("same");
+        var second = new ValueEqualNode("same");
+        Assert.AreEqual(first, second, "the fixture must actually compare equal for this test to mean anything");
+
+        var roots = new ObservableCollection<ITableViewTreeItem> { first, second };
+        var source = new TreeTableViewSource(roots);
+
+        Assert.AreEqual(2, source.Count);
+        Assert.AreEqual(0, source.IndexOf(first));
+        Assert.AreEqual(1, source.IndexOf(second));
+
+        roots.Add(new ValueEqualNode("same"));
+        Assert.AreEqual(3, source.Count);
+    }
+
+    [TestMethod]
+    public void SameInstance_RemovedThenReinserted_IsNotADuplicate()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var a1 = (Node)children[0];
+
+        // The app's resort/refilter shape: remove + insert the SAME instance. The removal drops its entry first,
+        // so this must never trip the uniqueness guard.
+        children.RemoveAt(0);
+        children.Add(a1);
+
+        AssertFlat(source, "A", "A2", "A2a", "A1", "B");
+    }
+
+    [TestMethod]
+    public void ResetThatReordersTheSameInstances_IsNotADuplicate()
+    {
+        var (source, a, _) = CreateTree();
+        var children = (ObservableCollection<ITableViewTreeItem>)a.ChildrenSource!;
+        var a1 = children[0];
+        var a2 = children[1];
+
+        // Clear + refill raises Reset events; RebuildBranch must remove the changed window before re-inserting it.
+        children.Clear();
+        children.Add(a2);
+        children.Add(a1);
+
+        AssertFlat(source, "A", "A2", "A2a", "A1", "B");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------------------------------------
 
@@ -772,6 +1105,30 @@ public partial class TreeTableViewSourceTests
             ChildrenSource = children;
             Children = children as IList;
         }
+
+        // Diagnostics quote the item; a view model that says something useful here gets a useful message.
+        public override string ToString() => Name;
+    }
+
+    /// <summary>
+    /// A leaf whose Equals/GetHashCode are value-based, like a record. Distinct instances of it must still get
+    /// distinct rows.
+    /// </summary>
+    private sealed class ValueEqualNode(string name) : ITableViewTreeItem
+    {
+        public event PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
+
+        public string Name { get; } = name;
+        public int Depth => 0;
+        public IEnumerable? ChildrenSource => null;
+        public bool HasChildren => false;
+        public bool IsFinalItem => true;
+        public bool IsExpanded { get => false; set { } }
+        public bool IsLoading => false;
+
+        public override bool Equals(object? obj) => obj is ValueEqualNode other && other.Name == Name;
+        public override int GetHashCode() => Name.GetHashCode();
+        public override string ToString() => Name;
     }
 
     /// <summary>

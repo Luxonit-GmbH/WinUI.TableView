@@ -28,19 +28,101 @@ namespace WinUI.TableView;
 /// keeps descendants' own expansion state, so re-expanding restores the previous shape. Items with
 /// <see cref="ITableViewTreeItem.IsFinalItem"/> are never expanded.</para>
 /// <para>Item instances must be unique within the visible tree (flat positions are resolved by reference), and all
-/// mutations must happen on the UI thread.</para>
+/// mutations must happen on the UI thread. Introducing an instance that is already in the tree throws an
+/// <see cref="InvalidOperationException"/> at that insertion, rather than corrupting the flat view — see
+/// <see cref="Expand"/> and the tracked children collections.</para>
 /// </remarks>
 public partial class TreeTableViewSource : IObservableVector<object>, ISelectionInfo, IItemsRangeInfo, IDisposable
 {
     private static readonly object RootsKey = new();
 
     private readonly IndexedRows _rows = new();
-    private readonly Dictionary<object, NodeEntry> _nodes = [];
+
+    // Reference identity, explicitly: the default comparer would call Equals, so two DISTINCT items that compare
+    // equal (records, or any value-equality view model) would share one entry and fight over the same row.
+    private readonly Dictionary<object, NodeEntry> _nodes = new(ReferenceEqualityComparer.Instance);
     private readonly List<(int First, int Last)> _selection = []; // sorted, disjoint, inclusive flat-index intervals
     private Branch? _rootsBranch;
 
     /// <inheritdoc/>
     public event VectorChangedEventHandler<object>? VectorChanged;
+
+    private int _bulkDepth;
+    private bool _bulkChanged;
+
+    /// <summary>
+    /// Gets or sets how many row changes a single structural operation (expanding or collapsing a branch) may
+    /// report individually before they are coalesced into ONE reset notification. Defaults to 32.
+    /// </summary>
+    /// <remarks>
+    /// Every per-row notification makes the host ListView run a virtualization and measure pass, so collapsing a
+    /// branch with thousands of visible descendants one row at a time freezes the UI for seconds. Above this
+    /// threshold the adapter raises a single reset instead: the ListView then regenerates only the containers in
+    /// view. Set to <see cref="int.MaxValue"/> to always report row by row.
+    /// </remarks>
+    public int BulkChangeThreshold { get; set; } = 32;
+
+    /// <summary>
+    /// Suspends per-row notifications until the returned scope is disposed, then raises a single reset if anything
+    /// changed. Wrap bulk mutations of YOUR OWN children collections in this — removing or adding thousands of
+    /// children one call at a time otherwise makes the host run a virtualization and measure pass per row.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// using (source.BeginBulkUpdate())
+    /// {
+    ///     myChildren.RemoveRange(removedItems); // one notification reaches the grid, not thousands
+    /// }
+    /// </code>
+    /// </example>
+    /// <returns>A scope that flushes the coalesced notification when disposed.</returns>
+    public IDisposable BeginBulkUpdate()
+    {
+        BeginBulk();
+        return new BulkScope(this);
+    }
+
+    private sealed class BulkScope(TreeTableViewSource source) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                _disposed = true;
+                source.EndBulk();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Suppresses per-row notifications for the duration of a bulk operation; the matching
+    /// <see cref="EndBulk"/> raises one reset if anything actually changed.
+    /// </summary>
+    private void BeginBulk() => _bulkDepth++;
+
+    private void EndBulk()
+    {
+        if (--_bulkDepth > 0 || !_bulkChanged)
+        {
+            return;
+        }
+
+        _bulkChanged = false;
+        VectorChanged?.Invoke(this, new VectorChangedArgs(CollectionChange.Reset, 0));
+    }
+
+    private void RaiseVectorChanged(CollectionChange change, int index)
+    {
+        if (_bulkDepth > 0)
+        {
+            _bulkChanged = true;
+            return;
+        }
+
+        VectorChanged?.Invoke(this, new VectorChangedArgs(change, (uint)index));
+    }
 
     /// <summary>
     /// Occurs when the platform reports new visible/tracked row ranges (see <see cref="VisibleRange"/> and
@@ -54,11 +136,23 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// <see cref="ITableViewTreeItem.ChildrenSource"/>) are flattened immediately.
     /// </summary>
     /// <param name="roots">The root items; tracked live when observable (see <see cref="ITableViewTreeItem.ChildrenSource"/>).</param>
+    /// <exception cref="InvalidOperationException">An item instance appears more than once in the initial tree.</exception>
     public TreeTableViewSource(IEnumerable roots)
     {
         ArgumentNullException.ThrowIfNull(roots);
 
         var branch = Subscribe(RootsKey, roots);
+
+        try
+        {
+            ValidateBranch(branch);
+        }
+        catch
+        {
+            Unsubscribe(branch); // never leave a handler on the app's collection behind a failed construction
+            throw;
+        }
+
         var flatIndex = 0;
 
         foreach (var root in branch.Shadow)
@@ -75,6 +169,9 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// <see cref="ITableViewTreeItem.IsFinalItem"/> items.
     /// </summary>
     /// <param name="item">The item to expand.</param>
+    /// <exception cref="InvalidOperationException">
+    /// A child instance is already elsewhere in the visible tree (rows are identified by reference).
+    /// </exception>
     public void Expand(ITableViewTreeItem item)
     {
         ArgumentNullException.ThrowIfNull(item);
@@ -92,11 +189,44 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
         }
 
         var branch = Subscribe(item, children);
+
+        try
+        {
+            // All children up front: a per-child check would let the first few in and then fail, leaving the item
+            // expanded over a half-spliced subtree that the next collapse could not unwind.
+            ValidateBranch(branch);
+        }
+        catch
+        {
+            Unsubscribe(branch);
+            item.IsExpanded = false;
+            throw;
+        }
+
         var flatIndex = _rows.IndexOf(entry.Handle) + 1;
 
-        foreach (var child in branch.Shadow)
+        // Coalesce when the branch is big: one reset costs the host a single viewport regeneration, whereas one
+        // notification per row makes it run a full virtualization + measure pass per row.
+        var bulk = branch.Shadow.Count > BulkChangeThreshold;
+
+        if (bulk)
         {
-            flatIndex += InsertSubtree(flatIndex, child, item);
+            BeginBulk();
+        }
+
+        try
+        {
+            foreach (var child in branch.Shadow)
+            {
+                flatIndex += InsertSubtree(flatIndex, child, item);
+            }
+        }
+        finally
+        {
+            if (bulk)
+            {
+                EndBulk();
+            }
         }
     }
 
@@ -116,9 +246,30 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
 
         if (GetBranch(item) is { } branch)
         {
-            foreach (var child in branch.Shadow.ToList())
+            // The whole visible subtree disappears at once; report it as a single change when it is large (see
+            // BulkChangeThreshold) — collapsing thousands of rows one notification at a time is what made the UI
+            // freeze, with the host re-running virtualization and measure for every removed row.
+            var removing = _nodes.TryGetValue(item, out var entry) ? entry.SubtreeSize - 1 : 0;
+            var bulk = removing > BulkChangeThreshold;
+
+            if (bulk)
             {
-                RemoveSubtree(child);
+                BeginBulk();
+            }
+
+            try
+            {
+                foreach (var child in branch.Shadow.ToList())
+                {
+                    RemoveSubtree(child);
+                }
+            }
+            finally
+            {
+                if (bulk)
+                {
+                    EndBulk();
+                }
             }
 
             Unsubscribe(branch);
@@ -154,6 +305,13 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
         public List<object> Shadow { get; } = [];
         public VectorChangedEventHandler<object>? VectorHandler { get; set; }
         public NotifyCollectionChangedEventHandler? InccHandler { get; set; }
+
+        /// <summary>
+        /// Set when a change had to be refused (see <see cref="DuplicateItemError"/>). The source committed that
+        /// change to itself before notifying, so the shadow no longer mirrors it and its positional events can no
+        /// longer be trusted; the next change re-derives the branch from the source instead of applying an index.
+        /// </summary>
+        public bool NeedsResync { get; set; }
     }
 
     private Branch? GetBranch(object key)
@@ -216,8 +374,14 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// </summary>
     private int BuildSubtree(object node, object parentKey, List<object> buffer)
     {
+        // Callers validate before mutating anything, so this is the invariant backstop rather than the guard the
+        // app is expected to hit. TryAdd checks it at no extra cost: one probe either way.
+        if (!_nodes.TryAdd(node, new NodeEntry { ParentKey = parentKey }))
+        {
+            throw DuplicateItemError(node);
+        }
+
         buffer.Add(node);
-        _nodes[node] = new NodeEntry { ParentKey = parentKey };
         var size = 1;
 
         if (node is ITableViewTreeItem { IsFinalItem: false, IsExpanded: true, ChildrenSource: { } children } item
@@ -250,7 +414,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             ref var entry = ref CollectionsMarshal.GetValueRefOrNullRef(_nodes, buffer[i]);
             entry.Handle = _rows.InsertAt(flatIndex + i, buffer[i]);
             ShiftSelectionForInsert(flatIndex + i);
-            VectorChanged?.Invoke(this, new VectorChangedArgs(CollectionChange.ItemInserted, (uint)(flatIndex + i)));
+            RaiseVectorChanged(CollectionChange.ItemInserted, flatIndex + i);
         }
 
         GrowAncestors(parentKey, size);
@@ -279,7 +443,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             _nodes.Remove(handle.Value);
             ShiftSelectionForRemove(flatIndex);
 
-            VectorChanged?.Invoke(this, new VectorChangedArgs(CollectionChange.ItemRemoved, (uint)flatIndex));
+            RaiseVectorChanged(CollectionChange.ItemRemoved, flatIndex);
         }
 
         GrowAncestors(parentKey, -size);
@@ -312,7 +476,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             return null;
         }
 
-        var index = branch.Shadow.IndexOf(item);
+        var index = branch.Shadow.FindIndex(sibling => ReferenceEquals(sibling, item)); // by reference, like _nodes
         return index < 0 ? null : (index + 1, branch.Shadow.Count);
     }
 
@@ -351,6 +515,11 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
 
     private void OnBranchVectorChanged(Branch branch, IObservableVector<object> sender, IVectorChangedEventArgs args)
     {
+        if (TryResync(branch))
+        {
+            return;
+        }
+
         var index = (int)args.Index;
 
         switch (args.CollectionChange)
@@ -378,6 +547,36 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     }
 
     private void OnBranchCollectionChanged(Branch branch, NotifyCollectionChangedEventArgs e)
+    {
+        if (TryResync(branch))
+        {
+            return;
+        }
+
+        // A single INotifyCollectionChanged event can carry many items (RemoveRange/AddRange style); coalesce
+        // those too, so one app-level call produces one grid notification.
+        var affected = Math.Max(e.NewItems?.Count ?? 0, e.OldItems?.Count ?? 0);
+
+        if (affected > BulkChangeThreshold)
+        {
+            BeginBulk();
+
+            try
+            {
+                OnBranchCollectionChangedCore(branch, e);
+            }
+            finally
+            {
+                EndBulk();
+            }
+
+            return;
+        }
+
+        OnBranchCollectionChangedCore(branch, e);
+    }
+
+    private void OnBranchCollectionChangedCore(Branch branch, NotifyCollectionChangedEventArgs e)
     {
         switch (e.Action)
         {
@@ -422,9 +621,142 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
 
     private void InsertChild(Branch branch, int childIndex, object child)
     {
+        // Checked BEFORE the shadow is touched. The shadow is what resolves positional remove events, so a shadow
+        // slot with no matching node entry would turn this failure into a confusing crash on a LATER, unrelated
+        // removal from the same branch — precisely the symptom this guard exists to replace.
+        try
+        {
+            ValidateInsertable(child);
+        }
+        catch
+        {
+            // The source already committed this insert to itself, so refusing it leaves the shadow one behind:
+            // re-derive the branch on its next change rather than trusting an index against a stale mirror.
+            branch.NeedsResync = true;
+            throw;
+        }
+
         var flatIndex = ChildFlatIndex(branch, childIndex);
         branch.Shadow.Insert(childIndex, child);
         InsertSubtree(flatIndex, child, branch.Key);
+    }
+
+    /// <summary>
+    /// Re-derives the branch from its source when a previous change had to be refused, and reports whether it did.
+    /// </summary>
+    private bool TryResync(Branch branch)
+    {
+        if (!branch.NeedsResync)
+        {
+            return false;
+        }
+
+        // Rebuilding throws again while the offending item is still in the source, so the flag is cleared only by a
+        // clean pass — otherwise the next notification would apply an index against a mirror we know is stale.
+        RebuildBranch(branch);
+        branch.NeedsResync = false;
+        return true;
+    }
+
+    /// <summary>
+    /// A flat range this operation is about to free. Items currently living inside it are moving, not repeating.
+    /// </summary>
+    private static readonly (int Start, int End) NothingVacating = (0, 0);
+
+    /// <summary>
+    /// Verifies that an item — and any pre-expanded descendants it would bring with it — can be inserted, WITHOUT
+    /// mutating anything. Validation happens up front so an insert either fully applies or never starts: a
+    /// half-applied insert leaves bookkeeping entries with no rows, and the next collapse of that branch then fails
+    /// somewhere unrelated, which is the very failure mode this guard exists to remove.
+    /// </summary>
+    /// <remarks>Allocation-free for a leaf — the streaming hot path settles in a single probe.</remarks>
+    private void ValidateInsertable(object node)
+    {
+        if (_nodes.ContainsKey(node))
+        {
+            throw DuplicateItemError(node);
+        }
+
+        if (TrackableChildrenOf(node) is { } children)
+        {
+            ValidateInsertable(children, new HashSet<object>(ReferenceEqualityComparer.Instance) { node }, NothingVacating);
+        }
+    }
+
+    /// <summary>
+    /// Validates every child a branch is about to contribute, before the first one is inserted.
+    /// </summary>
+    private void ValidateBranch(Branch branch)
+        => ValidateInsertable(
+            branch.Shadow,
+            new HashSet<object>(branch.Shadow.Count, ReferenceEqualityComparer.Instance), // sized: branches get big
+            NothingVacating);
+
+    /// <summary>
+    /// Validates a whole set of siblings against each other and against the tree, before any of them is inserted.
+    /// </summary>
+    private void ValidateInsertable(IEnumerable items, HashSet<object> seen, (int Start, int End) vacating)
+    {
+        foreach (var item in items)
+        {
+            if (!seen.Add(item) || IsPlacedOutside(item, vacating))
+            {
+                throw DuplicateItemError(item);
+            }
+
+            if (TrackableChildrenOf(item) is { } children)
+            {
+                ValidateInsertable(children, seen, vacating);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the item already holds a row that this operation is NOT about to free.
+    /// </summary>
+    private bool IsPlacedOutside(object node, (int Start, int End) vacating)
+    {
+        if (!_nodes.TryGetValue(node, out var entry))
+        {
+            return false;
+        }
+
+        if (entry.Handle is not { } handle)
+        {
+            return true; // registered but not yet placed — only reachable mid-insert, so it is a repeat
+        }
+
+        var at = _rows.IndexOf(handle);
+        return at < vacating.Start || at >= vacating.End;
+    }
+
+    /// <summary>
+    /// The children an item would contribute to the flat view right now, or <see langword="null"/> for anything
+    /// that flattens to a single row. Mirrors the condition <see cref="BuildSubtree"/> recurses on.
+    /// </summary>
+    private static IEnumerable? TrackableChildrenOf(object node)
+        => node is ITableViewTreeItem { IsFinalItem: false, IsExpanded: true, ChildrenSource: { } children }
+            ? children
+            : null;
+
+    /// <summary>
+    /// Builds the error for an item that is already part of the visible tree. Rows are identified by reference, so
+    /// one instance can occupy exactly one row: a second occupant would overwrite the first one's bookkeeping and
+    /// desynchronize every flat index after it. Reported at the insertion that introduces the duplicate, while the
+    /// offending collection is still on the stack, instead of surfacing later as an unrelated failure.
+    /// </summary>
+    private InvalidOperationException DuplicateItemError(object node)
+    {
+        // Handle is null for an entry that is registered but not yet placed; asking the row index for it would
+        // throw and mask this diagnostic with a NullReferenceException.
+        var at = _nodes.TryGetValue(node, out var entry) && entry.Handle is { } handle ? _rows.IndexOf(handle) : -1;
+        var where = at >= 0 ? $" It already occupies row {at}." : string.Empty;
+
+        return new InvalidOperationException(
+            $"'{node}' ({node.GetType().FullName}) is already in the tree.{where} {nameof(TreeTableViewSource)} " +
+            "identifies rows by reference, so an item instance may appear only once in the visible tree. Check for " +
+            "the same instance being added twice to one children collection, or added to more than one collection " +
+            "(the roots included). Use separate instances, or remove the item from its previous parent first.");
     }
 
     private void RemoveChild(Branch branch, int childIndex)
@@ -444,6 +776,30 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// </summary>
     private void RebuildBranch(Branch branch)
     {
+        // A reset on a tracked children collection can move a very large window of rows; coalesce it so the host
+        // sees one change instead of one per row.
+        var bulk = branch.Shadow.Count > BulkChangeThreshold;
+
+        if (bulk)
+        {
+            BeginBulk();
+        }
+
+        try
+        {
+            RebuildBranchCore(branch);
+        }
+        finally
+        {
+            if (bulk)
+            {
+                EndBulk();
+            }
+        }
+    }
+
+    private void RebuildBranchCore(Branch branch)
+    {
         var oldChildren = branch.Shadow;
         var newChildren = branch.Source.Cast<object>().ToList();
 
@@ -462,6 +818,17 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             oldEnd--;
             newEnd--;
         }
+
+        // Validate the incoming window BEFORE removing the old one. Removing first and failing on a later insert
+        // would delete rows and then abandon the rebuild, losing the tail outright.
+        var vacating = prefix < oldEnd
+            ? (ChildFlatIndex(branch, prefix), ChildFlatIndex(branch, oldEnd))
+            : NothingVacating;
+
+        ValidateInsertable(
+            newChildren.Take(newEnd).Skip(prefix),
+            new HashSet<object>(newEnd - prefix, ReferenceEqualityComparer.Instance),
+            vacating);
 
         for (var i = oldEnd - 1; i >= prefix; i--)
         {
@@ -654,7 +1021,8 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     }
 
     /// <inheritdoc/>
-    public int IndexOf(object item) => _nodes.TryGetValue(item, out var entry) ? _rows.IndexOf(entry.Handle) : -1;
+    public int IndexOf(object item)
+        => _nodes.TryGetValue(item, out var entry) && entry.Handle is { } handle ? _rows.IndexOf(handle) : -1;
 
     /// <inheritdoc/>
     public IEnumerator<object> GetEnumerator() => _rows.GetEnumerator();
