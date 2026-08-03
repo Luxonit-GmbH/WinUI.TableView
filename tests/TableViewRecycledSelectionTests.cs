@@ -176,7 +176,7 @@ public class TableViewRecycledSelectionTests
         // must point at that item (this is the path that used to rely on DataContext propagation).
         _ = await treeView.ScrollRowIntoView(150);
         treeView.UpdateLayout();
-        await Task.Delay(100);
+        await Task.Delay(400); // container recycling settles asynchronously; generous under full-suite load
         treeView.UpdateLayout();
 
         foreach (var row in treeView.Rows.Where(r => r.Index >= 0))
@@ -188,6 +188,56 @@ public class TableViewRecycledSelectionTests
             Assert.AreSame(node, host.Content, $"row {row.Index}: templated content points at the wrong item");
             Assert.AreSame(expected, selector.SelectTemplate(host.Content), $"row {row.Index}: wrong template after recycling");
         }
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
+    }
+
+    [UITestMethod]
+    public async Task TreeChevron_IsStillShown_WhenCellTemplateSelectorIsSet()
+    {
+        // Repro: with a CellTemplateSelector set, the expander arrows must still render for nodes with children.
+        var node = new FlipNode("Root") { IsGroupRow = true };
+        node.SetHasChildren(true);
+        var roots = new ObservableCollection<ITableViewTreeItem> { node };
+
+        // Column virtualization ON: content is generated lazily, which is how the app runs.
+        var treeView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            IsColumnVirtualizationEnabled = true,
+            RowHeight = 32,
+            Width = 600,
+            Height = 300,
+        };
+        treeView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(300, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(FlipNode.Name)) },
+            CellTemplateSelector = new KindTemplateSelector
+            {
+                GroupTemplate = LoadTemplate("group"),
+                LeafTemplate = LoadTemplate("leaf"),
+            },
+        });
+        treeView.TreeItemsSource = roots;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeView);
+        treeView.UpdateLayout();
+
+        // Column virtualization defers content generation behind the ~50 ms realize settle timer.
+        await Task.Delay(400);
+        treeView.UpdateLayout();
+
+        var cellContent = ((TableViewRow)treeView.ContainerFromIndex(0)!).Cells[0].Content;
+        Assert.IsNotNull(cellContent, "cell content was never generated under column virtualization");
+
+        var glyph = FindChevronGlyph(treeView, 0);
+        Assert.AreEqual(Visibility.Visible, glyph.Visibility,
+            "the expander chevron must render even when the cell content is templated");
+
+        var chevronButton = (Button)((Grid)((TableViewRow)treeView.ContainerFromIndex(0)!).Cells[0].Content).Children[1];
+        Assert.IsTrue(chevronButton.IsHitTestVisible, "and it must remain clickable");
 
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
     }

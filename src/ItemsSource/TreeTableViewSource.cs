@@ -42,6 +42,49 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// <inheritdoc/>
     public event VectorChangedEventHandler<object>? VectorChanged;
 
+    private int _bulkDepth;
+    private bool _bulkChanged;
+
+    /// <summary>
+    /// Gets or sets how many row changes a single structural operation (expanding or collapsing a branch) may
+    /// report individually before they are coalesced into ONE reset notification. Defaults to 32.
+    /// </summary>
+    /// <remarks>
+    /// Every per-row notification makes the host ListView run a virtualization and measure pass, so collapsing a
+    /// branch with thousands of visible descendants one row at a time freezes the UI for seconds. Above this
+    /// threshold the adapter raises a single reset instead: the ListView then regenerates only the containers in
+    /// view. Set to <see cref="int.MaxValue"/> to always report row by row.
+    /// </remarks>
+    public int BulkChangeThreshold { get; set; } = 32;
+
+    /// <summary>
+    /// Suppresses per-row notifications for the duration of a bulk operation; the matching
+    /// <see cref="EndBulk"/> raises one reset if anything actually changed.
+    /// </summary>
+    private void BeginBulk() => _bulkDepth++;
+
+    private void EndBulk()
+    {
+        if (--_bulkDepth > 0 || !_bulkChanged)
+        {
+            return;
+        }
+
+        _bulkChanged = false;
+        VectorChanged?.Invoke(this, new VectorChangedArgs(CollectionChange.Reset, 0));
+    }
+
+    private void RaiseVectorChanged(CollectionChange change, int index)
+    {
+        if (_bulkDepth > 0)
+        {
+            _bulkChanged = true;
+            return;
+        }
+
+        VectorChanged?.Invoke(this, new VectorChangedArgs(change, (uint)index));
+    }
+
     /// <summary>
     /// Occurs when the platform reports new visible/tracked row ranges (see <see cref="VisibleRange"/> and
     /// <see cref="TrackedRanges"/>) — the authoritative feed for limiting updates to on-screen rows.
@@ -94,9 +137,28 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
         var branch = Subscribe(item, children);
         var flatIndex = _rows.IndexOf(entry.Handle) + 1;
 
-        foreach (var child in branch.Shadow)
+        // Coalesce when the branch is big: one reset costs the host a single viewport regeneration, whereas one
+        // notification per row makes it run a full virtualization + measure pass per row.
+        var bulk = branch.Shadow.Count > BulkChangeThreshold;
+
+        if (bulk)
         {
-            flatIndex += InsertSubtree(flatIndex, child, item);
+            BeginBulk();
+        }
+
+        try
+        {
+            foreach (var child in branch.Shadow)
+            {
+                flatIndex += InsertSubtree(flatIndex, child, item);
+            }
+        }
+        finally
+        {
+            if (bulk)
+            {
+                EndBulk();
+            }
         }
     }
 
@@ -116,9 +178,30 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
 
         if (GetBranch(item) is { } branch)
         {
-            foreach (var child in branch.Shadow.ToList())
+            // The whole visible subtree disappears at once; report it as a single change when it is large (see
+            // BulkChangeThreshold) — collapsing thousands of rows one notification at a time is what made the UI
+            // freeze, with the host re-running virtualization and measure for every removed row.
+            var removing = _nodes.TryGetValue(item, out var entry) ? entry.SubtreeSize - 1 : 0;
+            var bulk = removing > BulkChangeThreshold;
+
+            if (bulk)
             {
-                RemoveSubtree(child);
+                BeginBulk();
+            }
+
+            try
+            {
+                foreach (var child in branch.Shadow.ToList())
+                {
+                    RemoveSubtree(child);
+                }
+            }
+            finally
+            {
+                if (bulk)
+                {
+                    EndBulk();
+                }
             }
 
             Unsubscribe(branch);
@@ -250,7 +333,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             ref var entry = ref CollectionsMarshal.GetValueRefOrNullRef(_nodes, buffer[i]);
             entry.Handle = _rows.InsertAt(flatIndex + i, buffer[i]);
             ShiftSelectionForInsert(flatIndex + i);
-            VectorChanged?.Invoke(this, new VectorChangedArgs(CollectionChange.ItemInserted, (uint)(flatIndex + i)));
+            RaiseVectorChanged(CollectionChange.ItemInserted, flatIndex + i);
         }
 
         GrowAncestors(parentKey, size);
@@ -279,7 +362,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
             _nodes.Remove(handle.Value);
             ShiftSelectionForRemove(flatIndex);
 
-            VectorChanged?.Invoke(this, new VectorChangedArgs(CollectionChange.ItemRemoved, (uint)flatIndex));
+            RaiseVectorChanged(CollectionChange.ItemRemoved, flatIndex);
         }
 
         GrowAncestors(parentKey, -size);

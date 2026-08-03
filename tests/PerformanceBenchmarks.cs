@@ -910,6 +910,66 @@ public class PerformanceBenchmarks
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
     }
 
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_CollapseBoundGrid_5kChildren_PerRowEvents()
+        => await CollapseBoundGridAsync(bulkThreshold: int.MaxValue, "Tree_CollapseBoundGrid_5k_PerRowEvents");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_CollapseBoundGrid_5kChildren_Coalesced()
+        => await CollapseBoundGridAsync(bulkThreshold: 32, "Tree_CollapseBoundGrid_5k_Coalesced");
+
+    /// <summary>
+    /// Collapses a large branch while BOUND TO A LIVE GRID — the cost the user actually feels, since every row
+    /// notification makes the host run a virtualization + measure pass. The threshold selects per-row vs coalesced.
+    /// </summary>
+    private async Task CollapseBoundGridAsync(int bulkThreshold, string benchmarkName)
+    {
+        var children = new ObservableCollection<ITableViewTreeItem>(
+            Enumerable.Range(0, 5_000).Select(i => (ITableViewTreeItem)new BenchTreeNode($"C{i}", 1)));
+        var rootNode = new BenchTreeNode("R", 0) { Children = children, IsExpanded = true };
+        var roots = new ObservableCollection<ITableViewTreeItem> { rootNode };
+
+        var treeView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            RowHeight = 32,
+            Width = 1000,
+            Height = 600,
+        };
+        treeView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(300, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(BenchTreeNode.Name)) },
+        });
+        treeView.TreeItemsSource = roots;
+        treeView.TreeSource!.BulkChangeThreshold = bulkThreshold;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeView);
+        treeView.UpdateLayout();
+
+        var source = treeView.TreeSource!;
+
+        Report(Measure(
+            () =>
+            {
+                source.Collapse(rootNode);
+                treeView.UpdateLayout(); // force the host to process the change synchronously
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                source.Expand(rootNode);
+                treeView.UpdateLayout();
+            }),
+            benchmarkName);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
+    }
+
     private sealed class BenchTreeNode(string name, int depth) : ITableViewTreeItem
     {
         public event PropertyChangedEventHandler? PropertyChanged;

@@ -1007,6 +1007,20 @@ public partial class TableView : ListView
     private void OnDirectSourceVectorChanged(IObservableVector<object> sender, IVectorChangedEventArgs args)
     {
         InvalidateRowIndices();
+
+        // A reset makes the host drop every container and snap back to the top. Sources coalesce bulk changes
+        // (e.g. collapsing a large tree branch) into a reset for speed, so restore the scroll position afterwards,
+        // clamped to the new, possibly much shorter, extent.
+        if (args.CollectionChange is CollectionChange.Reset && _scrollViewer is { } scrollViewer)
+        {
+            var offset = scrollViewer.VerticalOffset;
+
+            if (offset > 0)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                    scrollViewer.ChangeView(null, Math.Min(offset, scrollViewer.ScrollableHeight), null, true));
+            }
+        }
     }
 
     /// <summary>
