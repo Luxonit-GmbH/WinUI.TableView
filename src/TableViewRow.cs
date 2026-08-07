@@ -169,44 +169,6 @@ public partial class TableViewRow : ListViewItem
     }
 
     /// <inheritdoc/>
-    protected override void OnPointerPressed(PointerRoutedEventArgs e)
-    {
-        if (TableView is { IsEditing: false })
-        {
-            base.OnPointerPressed(e);
-        }
-
-        if (!KeyboardHelper.IsShiftKeyDown() && TableView is not null)
-        {
-            TableView.SelectionStartRowIndex = Index;
-        }
-    }
-
-    /// <inheritdoc/>
-    protected override void OnPointerReleased(PointerRoutedEventArgs e)
-    {
-        base.OnPointerReleased(e);
-
-        if (!KeyboardHelper.IsShiftKeyDown() && TableView is not null)
-        {
-            TableView.SelectionStartCellSlot = null;
-            TableView.SelectionStartRowIndex = Index;
-        }
-    }
-
-    /// <inheritdoc/>
-    protected override void OnTapped(TappedRoutedEventArgs e)
-    {
-        base.OnTapped(e);
-
-        if (TableView?.SelectionUnit is TableViewSelectionUnit.Row or TableViewSelectionUnit.CellOrRow or TableViewSelectionUnit.CellWithRow)
-        {
-            TableView.CurrentRowIndex = Index;
-            TableView.LastSelectionUnit = TableViewSelectionUnit.Row;
-        }
-    }
-
-    /// <inheritdoc/>
     protected override void OnDoubleTapped(DoubleTappedRoutedEventArgs e)
     {
         var eventArgs = new TableViewRowDoubleTappedEventArgs(Index, this, Content);
@@ -225,9 +187,33 @@ public partial class TableViewRow : ListViewItem
         var left = Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
 
         _itemPresenter?.Arrange(new Rect(-left, 0, _itemPresenter.ActualWidth + left, _itemPresenter.ActualHeight));
+                
+        UpdatePosition();
 
         return finalSize;
     }
+
+    /// <summary>
+    /// Updates the position of the row relative to the TableView.
+    /// </summary>
+    internal void UpdatePosition()
+    {
+        if (TableView is null) return;
+
+        try
+        {
+            Position = TransformToVisual(TableView.DragRectangleCanvas).TransformPoint(default);
+        }
+        catch (Exception ex)
+        {
+            TableViewTrace.Write($"UpdatePosition failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Gets or sets the position of the row relative to the TableView.
+    /// </summary>
+    internal Point Position { get; set; }
 
     /// <summary>
     /// Marks the row's cells as stale and rebuilds them immediately when the row is already templated. Used by

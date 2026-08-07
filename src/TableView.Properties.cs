@@ -488,7 +488,7 @@ public partial class TableView
     /// <summary>
     /// Gets the selected cell ranges.
     /// </summary>
-    internal HashSet<HashSet<TableViewCellSlot>> SelectedCellRanges { get; } = [];
+    internal HashSet<TableViewCellSlotRange> SelectedCellRanges { get; } = [];
 
     /// <summary>
     /// Gets the slots (row and visible-column indexes) of the currently selected cells. Empty when the current
@@ -1135,7 +1135,7 @@ public partial class TableView
 
                 if (tableView.SelectionMode is ListViewSelectionMode.Single && tableView.CurrentCellSlot.HasValue)
                 {
-                    tableView.SelectedCellRanges.Add([tableView.CurrentCellSlot.Value]);
+                    tableView.SelectedCellRanges.Add(TableViewCellSlotRange.FromSlots(tableView.CurrentCellSlot.Value));
                 }
 
                 tableView.OnCellSelectionChanged();
