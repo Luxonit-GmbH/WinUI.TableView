@@ -1020,6 +1020,23 @@ public partial class TreeTableViewSourceTests
     }
 
     [TestMethod]
+    public void CircularChildren_ThrowCleanly_RatherThanRecursingForever()
+    {
+        // P -> C -> P. The up-front validation walk carries a `seen` set, so the cycle is caught the second time
+        // it reaches P — before anything is mutated, and without unbounded recursion.
+        var parent = new Node("P", 0) { IsExpanded = true };
+        var child = new Node("C", 1) { IsExpanded = true };
+
+        parent.SetChildren(new ObservableCollection<ITableViewTreeItem> { child });
+        child.SetChildren(new ObservableCollection<ITableViewTreeItem> { parent });
+
+        var error = Assert.ThrowsExactly<InvalidOperationException>(
+            () => new TreeTableViewSource(new ObservableCollection<ITableViewTreeItem> { parent }));
+
+        StringAssert.Contains(error.Message, "P");
+    }
+
+    [TestMethod]
     public void DuplicateRoot_InTheConstructorInput_Throws()
     {
         var shared = new Node("Shared", 0);

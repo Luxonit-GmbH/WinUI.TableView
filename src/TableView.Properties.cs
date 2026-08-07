@@ -299,6 +299,11 @@ public partial class TableView
 
 
     /// <summary>
+    /// Identifies the <see cref="UseListViewHotkeys"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty UseListViewHotkeysProperty = DependencyProperty.Register(nameof(UseListViewHotkeys), typeof(bool), typeof(TableView), new PropertyMetadata(false));
+
+    /// <summary>
     /// Identifies the <see cref="ForceRowOrCellSelectionOnContextRequested"/> dependency property.
     /// </summary>
     public static readonly DependencyProperty ForceRowOrCellSelectionOnContextRequestedProperty = DependencyProperty.Register(nameof(ForceRowOrCellSelectionOnContextRequested), typeof(bool), typeof(TableView), new PropertyMetadata(true));
@@ -456,6 +461,30 @@ public partial class TableView
     {
         get => (bool)GetValue(ShowDragRectangleProperty);
         set => SetValue(ShowDragRectangleProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets whether row keyboarding follows ListView conventions rather than the grid's. Defaults to
+    /// <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>Applies only to row interaction (<see cref="SelectionUnit"/> is Row, or the last interaction was
+    /// row-based) in <see cref="ListViewSelectionMode.Multiple"/>/<see cref="ListViewSelectionMode.Extended"/>,
+    /// and never while editing. It changes three keys:</para>
+    /// <list type="bullet">
+    /// <item>Up/Down move the current row WITHOUT changing the selection, so you can travel to a row and then
+    /// decide.</item>
+    /// <item>Enter toggles the current row's selection.</item>
+    /// <item>Shift+Up/Down extend from the anchor, and shrink again when the direction reverses, leaving
+    /// selections made elsewhere alone.</item>
+    /// </list>
+    /// <para>Everything else keeps the grid's behaviour on purpose — in particular Home/End stay COLUMN
+    /// navigation, which a wide grid depends on, and Ctrl+Up/Down still jump to the first/last row.</para>
+    /// </remarks>
+    public bool UseListViewHotkeys
+    {
+        get => (bool)GetValue(UseListViewHotkeysProperty);
+        set => SetValue(UseListViewHotkeysProperty, value);
     }
 
     /// <summary>

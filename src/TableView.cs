@@ -34,6 +34,7 @@ public partial class TableView : ListView
     private RowDefinition? _headerRowDefinition;
     private bool _shouldThrowSelectionModeChangedException;
     private bool _contextSelectionClaimed;
+    private ItemIndexRange? _listViewShiftRange; // the span the current Shift+Up/Down extension owns
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
     private bool _settingBaseItemsSource; // allows TableView to assign the inherited ItemsSource (otherwise guarded)
@@ -700,6 +701,12 @@ public partial class TableView : ListView
     /// </summary>
     private void HandleNavigations(KeyRoutedEventArgs e, bool shiftKey, bool ctrlKey)
     {
+        if (TryHandleListViewHotkey(e, shiftKey, ctrlKey))
+        {
+            e.Handled = true;
+            return;
+        }
+
         var currentCell = CurrentCellSlot.HasValue ? GetCellFromSlot(CurrentCellSlot.Value) : default;
 
         if (e.Key is VirtualKey.F2 && currentCell is { IsReadOnly: false } && !IsEditing)
@@ -810,6 +817,129 @@ public partial class TableView : ListView
             MakeSelection(newSlot, shiftKey);
             e.Handled = true;
         }
+    }
+
+    /// <summary>
+    /// Whether row keyboarding is the active mode: either the grid selects rows outright, or the last thing the
+    /// user did was row-based. Covers CellOrRow and CellWithRow once they have settled into row interaction.
+    /// </summary>
+    private bool IsRowKeyboardContext
+        => SelectionUnit is TableViewSelectionUnit.Row || LastSelectionUnit is TableViewSelectionUnit.Row;
+
+    /// <summary>
+    /// Applies the ListView row-keyboarding conventions when <see cref="UseListViewHotkeys"/> is set, and reports
+    /// whether the key was consumed.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately narrow: it claims only Up, Down and Enter, and only for unmodified or Shift-modified row
+    /// interaction outside editing. Everything else — Home/End as column navigation, Ctrl+Up/Down jumping to the
+    /// first/last row, Tab, Left/Right (which a <see cref="TreeTableView"/> uses to expand and collapse) — falls
+    /// through to the grid's own handling untouched. All selection changes go through this control's
+    /// range primitives, so an <see cref="ISelectionInfo"/> source keeps owning its own bookkeeping.
+    /// </remarks>
+    private bool TryHandleListViewHotkey(KeyRoutedEventArgs e, bool shiftKey, bool ctrlKey)
+        => TryHandleListViewHotkey(e.Key, shiftKey, ctrlKey);
+
+    /// <summary>
+    /// The key and modifiers are passed in rather than read from a routed event and the keyboard, so the
+    /// behaviour is testable.
+    /// </summary>
+    internal bool TryHandleListViewHotkey(VirtualKey key, bool shiftKey, bool ctrlKey)
+    {
+        if (!UseListViewHotkeys
+            || IsEditing
+            || !IsRowKeyboardContext
+            || SelectionMode is not (ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended))
+        {
+            return false;
+        }
+
+        var current = CurrentRowIndex ?? CurrentCellSlot?.Row ?? -1;
+
+        if (key is VirtualKey.Enter)
+        {
+            ToggleRowSelection(current);
+            return true;
+        }
+
+        // Ctrl+Up/Down keeps meaning "jump to the first/last row"; only the plain and Shift forms are ours.
+        if (key is not (VirtualKey.Up or VirtualKey.Down) || ctrlKey || Items.Count == 0)
+        {
+            return false;
+        }
+
+        var target = current < 0
+            ? 0
+            : Math.Clamp(current + (key is VirtualKey.Up ? -1 : 1), 0, Items.Count - 1);
+
+        if (shiftKey)
+        {
+            SelectionStartRowIndex ??= current < 0 ? target : current;
+
+            var anchor = SelectionStartRowIndex.Value;
+            var next = new ItemIndexRange(
+                Math.Min(anchor, target),
+                (uint)(Math.Abs(target - anchor) + 1));
+
+            // Give back whatever the previous extension covered and this one does not, so reversing direction
+            // shrinks the range instead of leaving a trail — without disturbing selections made elsewhere.
+            if (_listViewShiftRange is { } previous)
+            {
+                if (previous.FirstIndex < next.FirstIndex)
+                {
+                    DeselectRange(new ItemIndexRange(previous.FirstIndex, (uint)(next.FirstIndex - previous.FirstIndex)));
+                }
+
+                if (previous.LastIndex > next.LastIndex)
+                {
+                    DeselectRange(new ItemIndexRange(next.LastIndex + 1, (uint)(previous.LastIndex - next.LastIndex)));
+                }
+            }
+
+            SelectRange(next);
+            _listViewShiftRange = next;
+        }
+        else
+        {
+            // A plain move re-anchors and leaves the selection exactly as it was: travel first, decide after.
+            SelectionStartRowIndex = target;
+            _listViewShiftRange = null;
+        }
+
+        SetCurrentCell(new TableViewCellSlot(target, CurrentCellSlot?.Column ?? -1));
+
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            var row = await ScrollRowIntoView(target);
+            row?.Focus(FocusState.Programmatic);
+        });
+
+        return true;
+    }
+
+    /// <summary>
+    /// Flips one row's selection, reading and writing through the range API so a delegated
+    /// (<see cref="ISelectionInfo"/>) source stays authoritative — SelectedItems is null there.
+    /// </summary>
+    private void ToggleRowSelection(int row)
+    {
+        if (row < 0 || row >= Items.Count)
+        {
+            return;
+        }
+
+        var range = new ItemIndexRange(row, 1);
+
+        if (SelectedRanges.Any(selected => selected.IsInRange(row)))
+        {
+            DeselectRange(range);
+        }
+        else
+        {
+            SelectRange(range);
+        }
+
+        _listViewShiftRange = null; // an explicit toggle ends the current Shift extension
     }
 
     /// <summary>
