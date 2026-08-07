@@ -33,6 +33,7 @@ public partial class TableView : ListView
     private ScrollViewer? _scrollViewer;
     private RowDefinition? _headerRowDefinition;
     private bool _shouldThrowSelectionModeChangedException;
+    private bool _contextSelectionClaimed;
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
     private bool _settingBaseItemsSource; // allows TableView to assign the inherited ItemsSource (otherwise guarded)
@@ -2271,6 +2272,56 @@ public partial class TableView : ListView
         SelectedCellRanges.Clear();
         OnCellSelectionChanged();
         CurrentCellSlot = null;
+    }
+
+    /// <summary>
+    /// Brings the right-clicked row or cell into the selection before its context flyout opens, following the
+    /// modifier keys the way a left click would.
+    /// </summary>
+    /// <remarks>
+    /// Right-clicking INSIDE an existing selection leaves it alone, so the flyout acts on everything selected —
+    /// the behaviour of every shell and grid. Ctrl or Shift means the user is amending the selection instead, so
+    /// the click is routed through <see cref="MakeSelection"/> exactly like a left click: Ctrl toggles this one,
+    /// Shift extends from the anchor, and Multiple mode is handled there too.
+    /// </remarks>
+    /// <param name="slot">The right-clicked slot; column -1 for a row-level click.</param>
+    /// <param name="isAlreadySelected">Whether the clicked element reports itself as selected.</param>
+    internal void ApplyContextRequestSelection(TableViewCellSlot slot, bool isAlreadySelected)
+        => ApplyContextRequestSelection(
+            slot,
+            isAlreadySelected,
+            KeyboardHelper.IsCtrlKeyDown(),
+            KeyboardHelper.IsShiftKeyDown());
+
+    /// <summary>
+    /// The modifier state is passed in rather than read from the keyboard, so the behaviour is testable.
+    /// </summary>
+    internal void ApplyContextRequestSelection(TableViewCellSlot slot, bool isAlreadySelected, bool ctrlKey, bool shiftKey)
+    {
+        if (!ForceRowOrCellSelectionOnContextRequested
+            || SelectionMode is ListViewSelectionMode.None
+            || !slot.IsValidRow(this))
+        {
+            return;
+        }
+
+        // ContextRequested bubbles from the cell to its row, so ONE right-click reaches both handlers whenever the
+        // cell has no flyout of its own to mark the event handled. Let the innermost element claim it: applying the
+        // same modifier twice would toggle a Ctrl+right-click straight back off.
+        if (_contextSelectionClaimed)
+        {
+            return;
+        }
+
+        _contextSelectionClaimed = true;
+        DispatcherQueue.TryEnqueue(() => _contextSelectionClaimed = false);
+
+        if (isAlreadySelected && !ctrlKey && !shiftKey)
+        {
+            return;
+        }
+
+        MakeSelection(slot, shiftKey, ctrlKey);
     }
 
     /// <summary>

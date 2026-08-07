@@ -301,7 +301,7 @@ public partial class TableView
     /// <summary>
     /// Identifies the <see cref="ForceRowOrCellSelectionOnContextRequested"/> dependency property.
     /// </summary>
-    public static readonly DependencyProperty ForceRowOrCellSelectionOnContextRequestedProperty = DependencyProperty.Register(nameof(ForceRowOrCellSelectionOnContextRequested), typeof(bool), typeof(TableView), new PropertyMetadata(false));
+    public static readonly DependencyProperty ForceRowOrCellSelectionOnContextRequestedProperty = DependencyProperty.Register(nameof(ForceRowOrCellSelectionOnContextRequested), typeof(bool), typeof(TableView), new PropertyMetadata(true));
 
     /// <summary>
     /// Identifies the <see cref="CanCopy"/> dependency property.
@@ -458,8 +458,15 @@ public partial class TableView
     }
 
     /// <summary>
-    /// Gets or sets a value that indicates whether the TableView should force select the Row or Cell depending on the SelectionUnit
+    /// Gets or sets whether right-clicking selects the row or cell under the pointer (per <see cref="SelectionUnit"/>)
+    /// before its context flyout opens. Defaults to <see langword="true"/>.
     /// </summary>
+    /// <remarks>
+    /// The click follows the modifier keys exactly as a left click does: no modifier selects just the clicked
+    /// row/cell, Ctrl adds or toggles it, Shift extends from the anchor, and right-clicking inside an existing
+    /// selection preserves that selection so the flyout can act on all of it. Set to <see langword="false"/> to
+    /// leave the selection untouched on right click.
+    /// </remarks>
     public bool ForceRowOrCellSelectionOnContextRequested
     {
         get => (bool)GetValue(ForceRowOrCellSelectionOnContextRequestedProperty);

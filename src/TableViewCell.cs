@@ -72,11 +72,8 @@ public partial class TableViewCell : ContentControl
         if (!e.TryGetPosition(sender, out var position)) return;
 #endif
 
-        // Select the cell before showing the Context Menu
-        if (TableView is not null && TableView.ForceRowOrCellSelectionOnContextRequested && !IsSelected)
-        {
-            TableView.MakeSelection(Slot, false);
-        }
+        // Select the cell before showing the Context Menu, honouring Ctrl/Shift like a left click would.
+        TableView?.ApplyContextRequestSelection(Slot, IsSelected);
 
         e.Handled = TableView?.ShowCellContext(this, position) is true;
     }

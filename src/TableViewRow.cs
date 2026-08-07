@@ -75,11 +75,9 @@ public partial class TableViewRow : ListViewItem
         if (!e.TryGetPosition(sender, out var position)) return;
 #endif
 
-        // Select the row before showing the Context Menu
-        if (TableView is not null && TableView.ForceRowOrCellSelectionOnContextRequested && !IsSelected)
-        {
-            TableView.MakeSelection(new TableViewCellSlot(Index, -1), false);
-        }
+        // Select the row before showing the Context Menu, honouring Ctrl/Shift like a left click would. A cell
+        // inside this row claims the click first when there is one, so this is the row-header/empty-space path.
+        TableView?.ApplyContextRequestSelection(new TableViewCellSlot(Index, -1), IsSelected);
 
         e.Handled = TableView?.ShowRowContext(this, position) is true;
     }
