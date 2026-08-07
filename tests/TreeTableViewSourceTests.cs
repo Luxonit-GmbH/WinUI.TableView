@@ -810,6 +810,74 @@ public partial class TreeTableViewSourceTests
         AssertFlat(source, "A", "B");
     }
 
+    [UITestMethod]
+    public async Task LoadingBranch_DoesNotBlockExpandingOtherBranches()
+    {
+        var slow = new LoadingNode("Slow");
+        var other = new LoadingNode("Other");
+        other.SetChildren(new ObservableCollection<ITableViewTreeItem> { new Node("OtherChild", 1) });
+
+        var source = new TreeTableViewSource(new ObservableCollection<ITableViewTreeItem> { slow, other });
+
+        var treeTableView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            UseCollectionView = false,
+            Width = 600,
+            Height = 400,
+        };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(LoadingNode.Name)) },
+        });
+
+        // The async pattern: the handler starts a fetch, flips IsLoading, and cancels so the rows are spliced only
+        // once the children arrive.
+        var expandRequests = new List<string>();
+        treeTableView.ExpandRequested += (_, e) =>
+        {
+            var node = (LoadingNode)e.Item;
+            expandRequests.Add(node.Name);
+
+            if (node.LoadsSlowly)
+            {
+                node.IsLoading = true;
+                e.Cancel = true;
+            }
+        };
+
+        treeTableView.ItemsSource = source;
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        treeTableView.RequestExpandCollapse(slow, 0, expand: true);
+        await Task.Yield();
+
+        Assert.IsTrue(slow.IsLoading, "the fetch for the first branch is still in flight");
+        Assert.AreEqual(2, treeTableView.Items.Count, "a pending fetch must not splice rows yet");
+
+        // A SECOND branch, expanded while the first one is still loading.
+        treeTableView.RequestExpandCollapse(other, 1, expand: true);
+        await Task.Yield();
+        treeTableView.UpdateLayout();
+
+        CollectionAssert.AreEqual(new[] { "Slow", "Other" }, expandRequests,
+            "a branch loading elsewhere must not suppress the request for another branch");
+        Assert.AreEqual(3, treeTableView.Items.Count, "the second branch must expand while the first is loading");
+        Assert.IsTrue(other.IsExpanded);
+
+        // ...and the gate that DOES apply is the loading item's own: clicking it again is still a no-op.
+        expandRequests.Clear();
+        treeTableView.RequestExpandCollapse(slow, 0, expand: true);
+        await Task.Yield();
+
+        Assert.AreEqual(0, expandRequests.Count, "the loading item itself stays gated");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Item uniqueness — rows are identified by reference, so a repeated instance is reported where it is
     // introduced instead of crashing later on an unrelated removal.
@@ -1107,6 +1175,52 @@ public partial class TreeTableViewSourceTests
         }
 
         // Diagnostics quote the item; a view model that says something useful here gets a useful message.
+        public override string ToString() => Name;
+    }
+
+    /// <summary>
+    /// A node with a settable IsLoading, for the async-expansion flow. "Slow" nodes model a fetch still in flight.
+    /// </summary>
+    [WinRT.GeneratedBindableCustomProperty]
+    public sealed partial class LoadingNode(string name) : ITableViewTreeItem
+    {
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public string Name { get; } = name;
+        public int Depth => 0;
+        public IEnumerable? ChildrenSource { get; private set; }
+        public bool HasChildren => true; // a backend child COUNT is known before the children themselves
+        public bool IsFinalItem => false;
+        public bool LoadsSlowly => ChildrenSource is null;
+
+        public bool IsExpanded
+        {
+            get;
+            set
+            {
+                if (field != value)
+                {
+                    field = value;
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsExpanded)));
+                }
+            }
+        }
+
+        public bool IsLoading
+        {
+            get;
+            set
+            {
+                if (field != value)
+                {
+                    field = value;
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLoading)));
+                }
+            }
+        }
+
+        public void SetChildren(IEnumerable children) => ChildrenSource = children;
+
         public override string ToString() => Name;
     }
 

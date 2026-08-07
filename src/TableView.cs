@@ -1465,13 +1465,28 @@ public partial class TableView : ListView
     /// </remarks>
     /// <param name="sortDescriptions">The chain in priority order; empty or <see langword="null"/> clears sorting.</param>
     public void ApplySort(IEnumerable<TableViewSortDescription>? sortDescriptions)
+        => ApplySort(sortDescriptions, sortData: true);
+
+    /// <summary>
+    /// Applies a sort chain, optionally recording only the column state.
+    /// </summary>
+    /// <param name="sortDescriptions">The chain in priority order; empty or <see langword="null"/> clears sorting.</param>
+    /// <param name="sortData">
+    /// <see langword="false"/> records the chain on the columns without touching the internal
+    /// <see cref="CollectionView"/>. That is what a header gesture needs BEFORE raising <see cref="Sorting"/>: the
+    /// grid must remember the sort it is about to ask for, whether or not the handler takes the data over, or the
+    /// next click recomputes its direction from stale state.
+    /// </param>
+    internal void ApplySort(IEnumerable<TableViewSortDescription>? sortDescriptions, bool sortData)
     {
         var chain = (sortDescriptions ?? [])
             .OrderBy(description => description.Priority)
             .Take(Math.Max(1, MaxSortColumns))
             .ToList();
 
-        using var defer = _collectionView.DeferRefresh();
+        // Only the data pass mutates the view, so only it needs a deferral — taking one for a state-only pass
+        // would cost an extra full refresh on every sort.
+        using var defer = sortData ? _collectionView.DeferRefresh() : null;
 
         foreach (var column in Columns)
         {
@@ -1481,14 +1496,17 @@ public partial class TableView : ListView
             column.SortPriority = index;
         }
 
-        // The internal CollectionView only sorts in CollectionView mode; in direct mode the app owns ordering and
-        // this call just keeps the column state (arrows, priorities) consistent.
-        _collectionView.SortDescriptions.Clear();
-
-        foreach (var description in chain)
+        if (sortData)
         {
-            _collectionView.SortDescriptions.Add(
-                new ColumnSortDescription(description.Column, description.PropertyPath, description.Direction));
+            // The internal CollectionView only sorts in CollectionView mode; in direct mode the app owns ordering
+            // and this call just keeps the column state (arrows, priorities) consistent.
+            _collectionView.SortDescriptions.Clear();
+
+            foreach (var description in chain)
+            {
+                _collectionView.SortDescriptions.Add(
+                    new ColumnSortDescription(description.Column, description.PropertyPath, description.Direction));
+            }
         }
 
         // Refresh every header's priority number: adding a second sorted column must make the first one show "1",

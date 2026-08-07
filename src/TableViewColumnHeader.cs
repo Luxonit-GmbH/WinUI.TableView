@@ -125,6 +125,12 @@ public partial class TableViewColumnHeader : ContentControl
             chain[i] = chain[i].WithPriority(i);
         }
 
+        // Record the chain BEFORE raising the event. Handled means "I will order the data", not "forget what was
+        // asked for": the grid still owns the arrows and priority numbers, the handler reads Column.SortDirection
+        // and TableView.SortChain as the NEW state, and — the reason this matters most — the next click cycles
+        // from the direction just requested instead of recomputing from a column that never moved.
+        _tableView.ApplySort(chain, sortData: false);
+
         var eventArgs = new TableViewSortingEventArgs(Column, direction, !singleSorting, chain);
         _tableView.OnSorting(eventArgs);
 
@@ -138,6 +144,15 @@ public partial class TableViewColumnHeader : ContentControl
     /// </summary>
     private void ClearSortingWithEvent()
     {
+        // Same rule as DoSort: drop this column from the chain first, so a handler that clears the data itself
+        // still leaves the grid agreeing about what is sorted.
+        if (CanSort && _tableView is not null && Column is not null)
+        {
+            _tableView.ApplySort(
+                _tableView.SortChain.Where(description => description.Column != Column),
+                sortData: false);
+        }
+
         var eventArgs = new TableViewClearSortingEventArgs();
         _tableView?.OnClearSorting(eventArgs);
 
@@ -150,7 +165,6 @@ public partial class TableViewColumnHeader : ContentControl
         {
             using var defer = collectionView.DeferRefresh();
             _tableView.DeselectAll();
-            Column.SortDirection = null;
             collectionView.SortDescriptions.RemoveWhere(x => x is ColumnSortDescription columnSort && columnSort.Column == Column);
         }
     }
