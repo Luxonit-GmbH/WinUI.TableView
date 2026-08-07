@@ -837,14 +837,17 @@ public partial class TreeTableViewSourceTests
 
         var addedWasNull = false;
         var removedWasNull = false;
+        SelectionChangedEventArgs? captured = null;
         treeTableView.SelectionChanged += (_, e) =>
         {
             addedWasNull |= e.AddedItems is null;
             removedWasNull |= e.RemovedItems is null;
+            captured ??= e;
         };
 
         // An ISelectionInfo source makes the platform hand out args with NULL collections, the same way it leaves
-        // SelectedItems null. Anything in the control that touches them must cope.
+        // SelectedItems null. Anything in the control that touches them must cope — reaching this line at all
+        // means the control's own handler already survived them.
         treeTableView.SelectAll();
         await Task.Yield();
         treeTableView.DeselectAll();
@@ -853,6 +856,11 @@ public partial class TreeTableViewSourceTests
         Assert.IsTrue(addedWasNull || removedWasNull,
             "expected the platform to hand out null selection collections for an ISelectionInfo source; "
             + "if this ever stops being true the null guards in TableView_SelectionChanged can go");
+
+        // Spell out the hazard on the REAL args: this is the expression the control used to run unguarded, and it
+        // is what a consumer's own SelectionChanged handler will hit if it does the obvious thing.
+        Assert.IsNotNull(captured);
+        Assert.ThrowsExactly<NullReferenceException>(() => _ = captured!.AddedItems.Count);
 
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
     }

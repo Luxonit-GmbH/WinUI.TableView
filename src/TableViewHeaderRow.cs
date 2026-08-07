@@ -397,11 +397,13 @@ public partial class TableViewHeaderRow : Control
             }
 
             // Effective minimum width: the configured MinWidth, plus (when AutoSizeMinWidth is on) the header's
-            // natural width and the accumulated first-render content width, so neither is clipped.
+            // natural width and the accumulated first-render content width, so neither is clipped. Once the user
+            // has resized the column by hand that auto floor is retired — otherwise it is a minimum they can never
+            // drag below, which looks like "columns can be widened but not narrowed".
             double MinWidthFor(TableViewColumn column, TableViewColumnHeader header)
             {
                 var min = column.MinWidth ?? TableView.MinColumnWidth;
-                return column.AutoSizeMinWidth
+                return column.AutoSizeMinWidth && !column.IsUserResized
                     ? Math.Max(min, Math.Max(header.DesiredSize.Width, column.AutoMinWidth))
                     : min;
             }

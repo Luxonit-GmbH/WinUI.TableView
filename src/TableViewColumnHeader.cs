@@ -499,6 +499,10 @@ public partial class TableViewColumnHeader : ContentControl
             width = width < minWidth ? minWidth : width;
             width = width > maxWidth ? maxWidth : width;
 
+            // The width assigned here is clamped by MinWidth only, while the header-width pass clamps again with
+            // its own effective minimum. Retire the AutoSizeMinWidth floor so the two agree — otherwise layout
+            // springs the column straight back and it can only ever be widened.
+            Column.NotifyUserResized();
             Column.Width = new GridLength(width, GridUnitType.Pixel);
         }
         else if (_resizePreviousStarted && _headerRow?.GetPreviousHeader(this) is { Column: { } } header)
@@ -510,6 +514,7 @@ public partial class TableViewColumnHeader : ContentControl
             width = width < minWidth ? minWidth : width;
             width = width > maxWidth ? maxWidth : width;
 
+            header.Column.NotifyUserResized();
             header.Column.Width = new GridLength(width, GridUnitType.Pixel);
         }
         else if (_reorderStarted && _dragVisuals is not null)
