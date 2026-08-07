@@ -13,6 +13,7 @@ using Windows.UI.Core;
 using WinUI.TableView.Collections;
 using WinUI.TableView.Controls;
 using WinUI.TableView.Extensions;
+using WinUI.TableView.Helpers;
 using SD = WinUI.TableView.SortDirection;
 
 namespace WinUI.TableView;
@@ -103,7 +104,7 @@ public partial class TableViewColumnHeader : ContentControl
 
         if (!singleSorting)
         {
-            // Ctrl+click: keep the existing chain, minus this column (it is re-added below at the end).
+            // Ctrl/Shift+click: keep the existing chain, minus this column (it is re-added below at the end).
             chain.AddRange(_tableView.SortChain.Where(description => description.Column != Column));
         }
 
@@ -125,6 +126,12 @@ public partial class TableViewColumnHeader : ContentControl
             chain[i] = chain[i].WithPriority(i);
         }
 
+        // Record the chain BEFORE raising the event. Handled means "I will order the data", not "forget what was
+        // asked for": the grid still owns the arrows and priority numbers, the handler reads Column.SortDirection
+        // and TableView.SortChain as the NEW state, and — the reason this matters most — the next click cycles
+        // from the direction just requested instead of recomputing from a column that never moved.
+        _tableView.ApplySort(chain, sortData: false);
+
         var eventArgs = new TableViewSortingEventArgs(Column, direction, !singleSorting, chain);
         _tableView.OnSorting(eventArgs);
 
@@ -138,6 +145,15 @@ public partial class TableViewColumnHeader : ContentControl
     /// </summary>
     private void ClearSortingWithEvent()
     {
+        // Same rule as DoSort: drop this column from the chain first, so a handler that clears the data itself
+        // still leaves the grid agreeing about what is sorted.
+        if (CanSort && _tableView is not null && Column is not null)
+        {
+            _tableView.ApplySort(
+                _tableView.SortChain.Where(description => description.Column != Column),
+                sortData: false);
+        }
+
         var eventArgs = new TableViewClearSortingEventArgs();
         _tableView?.OnClearSorting(eventArgs);
 
@@ -150,7 +166,6 @@ public partial class TableViewColumnHeader : ContentControl
         {
             using var defer = collectionView.DeferRefresh();
             _tableView.DeselectAll();
-            Column.SortDirection = null;
             collectionView.SortDescriptions.RemoveWhere(x => x is ColumnSortDescription columnSort && columnSort.Column == Column);
         }
     }
@@ -224,10 +239,12 @@ public partial class TableViewColumnHeader : ContentControl
     {
         if (CanSort && Column is not null && _tableView is not null && !IsSizingCursor && !_reorderStarted)
         {
-            var isCtrlButtonDown = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) is
-                CoreVirtualKeyStates.Down or (CoreVirtualKeyStates.Down | CoreVirtualKeyStates.Locked);
+            // Ctrl OR Shift adds this column to the existing sort chain; a plain click replaces it. Both modifiers
+            // mean the same thing here — sorting has no notion of a contiguous range for Shift to extend, and
+            // accepting either saves the user guessing which one this grid chose.
+            var multiSort = KeyboardHelper.IsCtrlKeyDown() || KeyboardHelper.IsShiftKeyDown();
 
-            DoSort(GetNextSortDirection(), !isCtrlButtonDown);
+            DoSort(GetNextSortDirection(), !multiSort);
         }
 
         base.OnTapped(e);
@@ -482,6 +499,10 @@ public partial class TableViewColumnHeader : ContentControl
             width = width < minWidth ? minWidth : width;
             width = width > maxWidth ? maxWidth : width;
 
+            // The width assigned here is clamped by MinWidth only, while the header-width pass clamps again with
+            // its own effective minimum. Retire the AutoSizeMinWidth floor so the two agree — otherwise layout
+            // springs the column straight back and it can only ever be widened.
+            Column.NotifyUserResized();
             Column.Width = new GridLength(width, GridUnitType.Pixel);
         }
         else if (_resizePreviousStarted && _headerRow?.GetPreviousHeader(this) is { Column: { } } header)
@@ -493,6 +514,7 @@ public partial class TableViewColumnHeader : ContentControl
             width = width < minWidth ? minWidth : width;
             width = width > maxWidth ? maxWidth : width;
 
+            header.Column.NotifyUserResized();
             header.Column.Width = new GridLength(width, GridUnitType.Pixel);
         }
         else if (_reorderStarted && _dragVisuals is not null)
@@ -618,7 +640,7 @@ public partial class TableViewColumnHeader : ContentControl
     /// Cycles through sort directions (ascending → descending → unsorted) for automation support.
     /// </summary>
     /// <param name="multiSort">
-    /// Whether to add the column to the existing sort chain (the Ctrl+click behavior) instead of replacing it.
+    /// Whether to add the column to the existing sort chain (the Ctrl/Shift+click behavior) instead of replacing it.
     /// </param>
     internal void InvokeSortCycle(bool multiSort = false)
     {

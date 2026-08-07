@@ -810,6 +810,183 @@ public partial class TreeTableViewSourceTests
         AssertFlat(source, "A", "B");
     }
 
+    [UITestMethod]
+    public async Task TreeSelection_SelectionChangedArgs_CollectionsAreNotDereferencedBlindly()
+    {
+        var (source, a, _) = CreateTree();
+        source.Collapse(a);
+
+        var treeTableView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            UseCollectionView = false,
+            SelectionMode = ListViewSelectionMode.Extended,
+            Width = 600,
+            Height = 400,
+        };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+
+        treeTableView.ItemsSource = source;
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        var addedWasNull = false;
+        var removedWasNull = false;
+        SelectionChangedEventArgs? captured = null;
+        treeTableView.SelectionChanged += (_, e) =>
+        {
+            addedWasNull |= e.AddedItems is null;
+            removedWasNull |= e.RemovedItems is null;
+            captured ??= e;
+        };
+
+        // An ISelectionInfo source makes the platform hand out args with NULL collections, the same way it leaves
+        // SelectedItems null. Anything in the control that touches them must cope — reaching this line at all
+        // means the control's own handler already survived them.
+        treeTableView.SelectAll();
+        await Task.Yield();
+        treeTableView.DeselectAll();
+        await Task.Yield();
+
+        Assert.IsTrue(addedWasNull || removedWasNull,
+            "expected the platform to hand out null selection collections for an ISelectionInfo source; "
+            + "if this ever stops being true the null guards in TableView_SelectionChanged can go");
+
+        // Spell out the hazard on the REAL args: this is the expression the control used to run unguarded, and it
+        // is what a consumer's own SelectionChanged handler will hit if it does the obvious thing.
+        Assert.IsNotNull(captured);
+        Assert.ThrowsExactly<NullReferenceException>(() => _ = captured!.AddedItems.Count);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public async Task TreeSelection_SelectedItems_IsPopulated_NotNull()
+    {
+        var (source, a, _) = CreateTree();
+        source.Collapse(a); // start with: A, B
+
+        var treeTableView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            UseCollectionView = false,
+            SelectionMode = ListViewSelectionMode.Extended,
+            Width = 600,
+            Height = 400,
+        };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+
+        treeTableView.ItemsSource = source;
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        treeTableView.SelectAll();
+        await Task.Yield();
+
+        // The platform leaves ITS collection null when the source implements ISelectionInfo, so consumer code that
+        // works on a flat grid used to throw a NullReferenceException here.
+        Assert.IsNotNull(treeTableView.SelectedItems);
+        CollectionAssert.AreEqual(
+            new[] { "A", "B" },
+            treeTableView.SelectedItems.Cast<Node>().Select(n => n.Name).ToArray());
+
+        // Expanding inserts unselected children; the snapshot must reflect the selection, not the row count.
+        treeTableView.RequestExpandCollapse(a, 0, expand: true);
+        await Task.Yield();
+
+        Assert.AreEqual(5, treeTableView.Items.Count);
+        CollectionAssert.AreEqual(
+            new[] { "A", "B" },
+            treeTableView.SelectedItems.Cast<Node>().Select(n => n.Name).ToArray());
+
+        // Read-only by design: the selection lives in the source, so mutating a copy could not select anything.
+        Assert.ThrowsExactly<NotSupportedException>(() => treeTableView.SelectedItems.Add(new Node("Z", 0)));
+
+        treeTableView.DeselectAll();
+        await Task.Yield();
+        Assert.AreEqual(0, treeTableView.SelectedItems.Count);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public async Task LoadingBranch_DoesNotBlockExpandingOtherBranches()
+    {
+        var slow = new LoadingNode("Slow");
+        var other = new LoadingNode("Other");
+        other.SetChildren(new ObservableCollection<ITableViewTreeItem> { new Node("OtherChild", 1) });
+
+        var source = new TreeTableViewSource(new ObservableCollection<ITableViewTreeItem> { slow, other });
+
+        var treeTableView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            UseCollectionView = false,
+            Width = 600,
+            Height = 400,
+        };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(LoadingNode.Name)) },
+        });
+
+        // The async pattern: the handler starts a fetch, flips IsLoading, and cancels so the rows are spliced only
+        // once the children arrive.
+        var expandRequests = new List<string>();
+        treeTableView.ExpandRequested += (_, e) =>
+        {
+            var node = (LoadingNode)e.Item;
+            expandRequests.Add(node.Name);
+
+            if (node.LoadsSlowly)
+            {
+                node.IsLoading = true;
+                e.Cancel = true;
+            }
+        };
+
+        treeTableView.ItemsSource = source;
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        treeTableView.RequestExpandCollapse(slow, 0, expand: true);
+        await Task.Yield();
+
+        Assert.IsTrue(slow.IsLoading, "the fetch for the first branch is still in flight");
+        Assert.AreEqual(2, treeTableView.Items.Count, "a pending fetch must not splice rows yet");
+
+        // A SECOND branch, expanded while the first one is still loading.
+        treeTableView.RequestExpandCollapse(other, 1, expand: true);
+        await Task.Yield();
+        treeTableView.UpdateLayout();
+
+        CollectionAssert.AreEqual(new[] { "Slow", "Other" }, expandRequests,
+            "a branch loading elsewhere must not suppress the request for another branch");
+        Assert.AreEqual(3, treeTableView.Items.Count, "the second branch must expand while the first is loading");
+        Assert.IsTrue(other.IsExpanded);
+
+        // ...and the gate that DOES apply is the loading item's own: clicking it again is still a no-op.
+        expandRequests.Clear();
+        treeTableView.RequestExpandCollapse(slow, 0, expand: true);
+        await Task.Yield();
+
+        Assert.AreEqual(0, expandRequests.Count, "the loading item itself stays gated");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Item uniqueness — rows are identified by reference, so a repeated instance is reported where it is
     // introduced instead of crashing later on an unrelated removal.
@@ -1107,6 +1284,52 @@ public partial class TreeTableViewSourceTests
         }
 
         // Diagnostics quote the item; a view model that says something useful here gets a useful message.
+        public override string ToString() => Name;
+    }
+
+    /// <summary>
+    /// A node with a settable IsLoading, for the async-expansion flow. "Slow" nodes model a fetch still in flight.
+    /// </summary>
+    [WinRT.GeneratedBindableCustomProperty]
+    public sealed partial class LoadingNode(string name) : ITableViewTreeItem
+    {
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public string Name { get; } = name;
+        public int Depth => 0;
+        public IEnumerable? ChildrenSource { get; private set; }
+        public bool HasChildren => true; // a backend child COUNT is known before the children themselves
+        public bool IsFinalItem => false;
+        public bool LoadsSlowly => ChildrenSource is null;
+
+        public bool IsExpanded
+        {
+            get;
+            set
+            {
+                if (field != value)
+                {
+                    field = value;
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsExpanded)));
+                }
+            }
+        }
+
+        public bool IsLoading
+        {
+            get;
+            set
+            {
+                if (field != value)
+                {
+                    field = value;
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLoading)));
+                }
+            }
+        }
+
+        public void SetChildren(IEnumerable children) => ChildrenSource = children;
+
         public override string ToString() => Name;
     }
 

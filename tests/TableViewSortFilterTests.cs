@@ -117,8 +117,85 @@ public class TableViewSortFilterTests
             new[] { 0, 1, 2 },
             captured.SortDescriptions.Select(d => d.Priority).ToArray());
 
-        // Handled: the grid must not have applied it.
-        Assert.AreEqual(2, tableView.SortChain.Count);
+        // Handled means the app orders the DATA; the grid still records the chain, so the arrows, the priority
+        // numbers and the next click's direction all stay in step with what the handler was asked to do.
+        CollectionAssert.AreEqual(
+            new[] { columns[2], columns[4], columns[6] },
+            tableView.SortChain.Select(d => d.Column).ToArray());
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task SortingEvent_WhenHandled_CyclesDirectionAcrossClicks()
+    {
+        var tableView = await LoadAsync(columnCount: 4);
+        var column = tableView.Columns[0];
+
+        var directions = new List<SortDirection?>();
+        tableView.Sorting += (_, e) =>
+        {
+            directions.Add(e.Direction);
+            e.Handled = true; // the app sorts its own data, as in a backend-driven grid
+        };
+
+        column.HeaderControl!.InvokeSortCycle();
+        column.HeaderControl!.InvokeSortCycle();
+        column.HeaderControl!.InvokeSortCycle();
+
+        // Every click must report where the column is GOING. Without the grid recording the direction it just
+        // asked for, the next click recomputes from stale state and asks for ascending forever.
+        CollectionAssert.AreEqual(
+            new SortDirection?[] { SortDirection.Ascending, SortDirection.Descending, null },
+            directions);
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task SortingEvent_HandlerSeesTheNewColumnState()
+    {
+        var tableView = await LoadAsync(columnCount: 4);
+        var column = tableView.Columns[0];
+
+        SortDirection? seenOnColumn = null;
+        SortDirection[]? seenChain = null;
+        tableView.Sorting += (_, e) =>
+        {
+            seenOnColumn = e.Column.SortDirection;
+            seenChain = [.. tableView.SortChain.Select(d => d.Direction)];
+            e.Handled = true;
+        };
+
+        column.HeaderControl!.InvokeSortCycle();
+
+        Assert.AreEqual(SortDirection.Ascending, seenOnColumn,
+            "Column.SortDirection must already read as the requested direction inside the handler");
+        CollectionAssert.AreEqual(new[] { SortDirection.Ascending }, seenChain);
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task SortingEvent_WhenHandled_MultiSortChainStillAccumulates()
+    {
+        var tableView = await LoadAsync(columnCount: 6);
+        var columns = tableView.Columns.ToList();
+
+        var lastChain = new List<TableViewSortDescription>();
+        tableView.Sorting += (_, e) =>
+        {
+            lastChain = [.. e.SortDescriptions];
+            e.Handled = true;
+        };
+
+        columns[1].HeaderControl!.InvokeSortCycle(multiSort: true);
+        columns[3].HeaderControl!.InvokeSortCycle(multiSort: true);
+
+        CollectionAssert.AreEqual(
+            new[] { columns[1], columns[3] },
+            lastChain.Select(d => d.Column).ToArray(),
+            "a handled sort must still be remembered, or Ctrl+click can never build a chain");
 
         await UnloadAsync(tableView);
     }

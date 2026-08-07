@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
@@ -300,7 +301,7 @@ public partial class TableView
     /// <summary>
     /// Identifies the <see cref="ForceRowOrCellSelectionOnContextRequested"/> dependency property.
     /// </summary>
-    public static readonly DependencyProperty ForceRowOrCellSelectionOnContextRequestedProperty = DependencyProperty.Register(nameof(ForceRowOrCellSelectionOnContextRequested), typeof(bool), typeof(TableView), new PropertyMetadata(false));
+    public static readonly DependencyProperty ForceRowOrCellSelectionOnContextRequestedProperty = DependencyProperty.Register(nameof(ForceRowOrCellSelectionOnContextRequested), typeof(bool), typeof(TableView), new PropertyMetadata(true));
 
     /// <summary>
     /// Identifies the <see cref="CanCopy"/> dependency property.
@@ -371,7 +372,8 @@ public partial class TableView
     ];
 
     /// <summary>
-    /// Gets or sets how many columns may take part in the multi-column sort chain (Ctrl+click adds a column).
+    /// Gets or sets how many columns may take part in the multi-column sort chain (Ctrl+click or Shift+click on a
+    /// header adds a column).
     /// When the chain would grow past this, the oldest entry is dropped. Defaults to 5.
     /// </summary>
     public int MaxSortColumns
@@ -457,8 +459,15 @@ public partial class TableView
     }
 
     /// <summary>
-    /// Gets or sets a value that indicates whether the TableView should force select the Row or Cell depending on the SelectionUnit
+    /// Gets or sets whether right-clicking selects the row or cell under the pointer (per <see cref="SelectionUnit"/>)
+    /// before its context flyout opens. Defaults to <see langword="true"/>.
     /// </summary>
+    /// <remarks>
+    /// The click follows the modifier keys exactly as a left click does: no modifier selects just the clicked
+    /// row/cell, Ctrl adds or toggles it, Shift extends from the anchor, and right-clicking inside an existing
+    /// selection preserves that selection so the flyout can act on all of it. Set to <see langword="false"/> to
+    /// leave the selection untouched on right click.
+    /// </remarks>
     public bool ForceRowOrCellSelectionOnContextRequested
     {
         get => (bool)GetValue(ForceRowOrCellSelectionOnContextRequestedProperty);
@@ -488,7 +497,7 @@ public partial class TableView
     /// <summary>
     /// Gets the selected cell ranges.
     /// </summary>
-    internal HashSet<HashSet<TableViewCellSlot>> SelectedCellRanges { get; } = [];
+    internal HashSet<TableViewCellSlotRange> SelectedCellRanges { get; } = [];
 
     /// <summary>
     /// Gets the slots (row and visible-column indexes) of the currently selected cells. Empty when the current
@@ -498,10 +507,50 @@ public partial class TableView
     public IReadOnlyCollection<TableViewCellSlot> SelectedCellSlots => SelectedCells;
 
     /// <summary>
+    /// Gets the items of the selected rows.
+    /// </summary>
+    /// <remarks>
+    /// <para>Normally this is the platform's own collection. When the items source takes selection bookkeeping over
+    /// by implementing <see cref="ISelectionInfo"/> — which <see cref="TreeTableViewSource"/> does, to keep
+    /// select-all O(ranges) instead of O(items) — the platform leaves that collection <see langword="null"/>, so
+    /// consumers would hit a <see cref="NullReferenceException"/> on a tree while the same code works on a flat
+    /// grid. This shadow fills the gap with a snapshot rebuilt from <see cref="SelectedRanges"/>.</para>
+    /// <para>That snapshot is READ-ONLY and does not track later selection changes: with a delegated source the
+    /// selection lives in the source, so adding to a copy could not select anything. Select through
+    /// <see cref="Selector.SelectedIndex"/>, SelectRange/DeselectRange or SelectAll instead. Building it costs
+    /// O(selected rows) — prefer <see cref="SelectedValues"/>, which streams lazily, when you only enumerate.</para>
+    /// </remarks>
+    public new IList<object> SelectedItems
+    {
+        get
+        {
+            if (base.SelectedItems is { } items)
+            {
+                return items;
+            }
+
+            List<object> selected = [];
+
+            foreach (var range in SelectedRanges.OrderBy(range => range.FirstIndex))
+            {
+                for (var index = Math.Max(0, range.FirstIndex); index <= range.LastIndex && index < Items.Count; index++)
+                {
+                    if (Items[index] is { } item)
+                    {
+                        selected.Add(item);
+                    }
+                }
+            }
+
+            return new ReadOnlyCollection<object>(selected);
+        }
+    }
+
+    /// <summary>
     /// Gets the distinct data items behind the current selection, whatever the selection unit: items of selected
     /// rows and items of rows that own selected cells, in row order. This is the unified "what data is selected"
-    /// view — with row selection it matches <see cref="Selector.SelectedItem"/>/SelectedItems, with cell selection
-    /// it yields each affected row's item once.
+    /// view — with row selection it matches <see cref="Selector.SelectedItem"/>/<see cref="SelectedItems"/>, with
+    /// cell selection it yields each affected row's item once.
     /// </summary>
     /// <remarks>
     /// Evaluated lazily: enumerating after a select-all walks every selected index, so with very large sources
@@ -1135,7 +1184,7 @@ public partial class TableView
 
                 if (tableView.SelectionMode is ListViewSelectionMode.Single && tableView.CurrentCellSlot.HasValue)
                 {
-                    tableView.SelectedCellRanges.Add([tableView.CurrentCellSlot.Value]);
+                    tableView.SelectedCellRanges.Add(TableViewCellSlotRange.FromSlots(tableView.CurrentCellSlot.Value));
                 }
 
                 tableView.OnCellSelectionChanged();

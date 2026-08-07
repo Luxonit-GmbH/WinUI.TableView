@@ -75,11 +75,9 @@ public partial class TableViewRow : ListViewItem
         if (!e.TryGetPosition(sender, out var position)) return;
 #endif
 
-        // Select the row before showing the Context Menu
-        if (TableView is not null && TableView.ForceRowOrCellSelectionOnContextRequested && !IsSelected)
-        {
-            TableView.MakeSelection(new TableViewCellSlot(Index, -1), false);
-        }
+        // Select the row before showing the Context Menu, honouring Ctrl/Shift like a left click would. A cell
+        // inside this row claims the click first when there is one, so this is the row-header/empty-space path.
+        TableView?.ApplyContextRequestSelection(new TableViewCellSlot(Index, -1), IsSelected);
 
         e.Handled = TableView?.ShowRowContext(this, position) is true;
     }
@@ -169,44 +167,6 @@ public partial class TableViewRow : ListViewItem
     }
 
     /// <inheritdoc/>
-    protected override void OnPointerPressed(PointerRoutedEventArgs e)
-    {
-        if (TableView is { IsEditing: false })
-        {
-            base.OnPointerPressed(e);
-        }
-
-        if (!KeyboardHelper.IsShiftKeyDown() && TableView is not null)
-        {
-            TableView.SelectionStartRowIndex = Index;
-        }
-    }
-
-    /// <inheritdoc/>
-    protected override void OnPointerReleased(PointerRoutedEventArgs e)
-    {
-        base.OnPointerReleased(e);
-
-        if (!KeyboardHelper.IsShiftKeyDown() && TableView is not null)
-        {
-            TableView.SelectionStartCellSlot = null;
-            TableView.SelectionStartRowIndex = Index;
-        }
-    }
-
-    /// <inheritdoc/>
-    protected override void OnTapped(TappedRoutedEventArgs e)
-    {
-        base.OnTapped(e);
-
-        if (TableView?.SelectionUnit is TableViewSelectionUnit.Row or TableViewSelectionUnit.CellOrRow or TableViewSelectionUnit.CellWithRow)
-        {
-            TableView.CurrentRowIndex = Index;
-            TableView.LastSelectionUnit = TableViewSelectionUnit.Row;
-        }
-    }
-
-    /// <inheritdoc/>
     protected override void OnDoubleTapped(DoubleTappedRoutedEventArgs e)
     {
         var eventArgs = new TableViewRowDoubleTappedEventArgs(Index, this, Content);
@@ -225,9 +185,33 @@ public partial class TableViewRow : ListViewItem
         var left = Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
 
         _itemPresenter?.Arrange(new Rect(-left, 0, _itemPresenter.ActualWidth + left, _itemPresenter.ActualHeight));
+                
+        UpdatePosition();
 
         return finalSize;
     }
+
+    /// <summary>
+    /// Updates the position of the row relative to the TableView.
+    /// </summary>
+    internal void UpdatePosition()
+    {
+        if (TableView is null) return;
+
+        try
+        {
+            Position = TransformToVisual(TableView.DragRectangleCanvas).TransformPoint(default);
+        }
+        catch (Exception ex)
+        {
+            TableViewTrace.Write($"UpdatePosition failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Gets or sets the position of the row relative to the TableView.
+    /// </summary>
+    internal Point Position { get; set; }
 
     /// <summary>
     /// Marks the row's cells as stale and rebuilds them immediately when the row is already templated. Used by

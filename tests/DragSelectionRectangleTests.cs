@@ -95,6 +95,67 @@ public class DragSelectionRectangleTests
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
     }
 
+    private static Border? DragRectangle(TableView tv)
+        => tv.DragRectangleCanvas?.Children.OfType<Border>().FirstOrDefault();
+
+    [UITestMethod]
+    public async Task DragRectangle_StaysHidden_OnPress()
+    {
+        var tv = await CreateAndLoadTableView();
+
+        tv.StartDragSelection(new Point(50, 50));
+
+        // Pressing is not yet dragging: showing the marquee here is what made an ordinary click flash a blue box.
+        Assert.AreEqual(Visibility.Collapsed, DragRectangle(tv)?.Visibility);
+
+        tv.EndDragSelection();
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
+    [UITestMethod]
+    public async Task DragRectangle_StaysHidden_WhenThePointerOnlyJitters()
+    {
+        var tv = await CreateAndLoadTableView();
+        tv.StartDragSelection(new Point(50, 50));
+
+        tv.UpdateDragRectangleVisual(new Point(52, 51)); // a click with a shaky hand, inside the threshold
+
+        Assert.AreEqual(Visibility.Collapsed, DragRectangle(tv)?.Visibility);
+
+        tv.EndDragSelection();
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
+    [UITestMethod]
+    public async Task DragRectangle_Appears_OncePastTheThreshold()
+    {
+        var tv = await CreateAndLoadTableView();
+        tv.StartDragSelection(new Point(50, 50));
+
+        tv.UpdateDragRectangleVisual(new Point(90, 120)); // a real drag
+
+        Assert.AreEqual(Visibility.Visible, DragRectangle(tv)?.Visibility);
+
+        tv.EndDragSelection();
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
+    [UITestMethod]
+    public async Task DragRectangle_NeverAppears_WhenShowDragRectangleIsFalse()
+    {
+        var tv = await CreateAndLoadTableView();
+        tv.ShowDragRectangle = false;
+        tv.StartDragSelection(new Point(50, 50));
+
+        tv.UpdateDragRectangleVisual(new Point(90, 120)); // well past the threshold
+
+        Assert.AreEqual(Visibility.Collapsed, DragRectangle(tv)?.Visibility);
+        Assert.IsTrue(tv.IsDragSelecting, "hiding the visual must not stop drag selection itself");
+
+        tv.EndDragSelection();
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
     [UITestMethod]
     public async Task StartDragSelection_Starts_InMultipleMode()
     {
@@ -191,5 +252,41 @@ public class DragSelectionRectangleTests
         tv.UpdateDragRectangleVisual(new Point(50, 50));
 
         Assert.IsFalse(tv.IsDragSelecting);
+    }
+
+    [UITestMethod]
+    public async Task SelectCellRange_SelectsTheProvidedRangeAndRaisesOneSelectionChangedEvent()
+    {
+        var tv = await CreateAndLoadTableView();
+        var eventCount = 0;
+        tv.CellSelectionChanged += (_, _) => eventCount++;
+
+        tv.SelectCellRange(TableViewCellSlotRange.FromCoordinates(0, 0, 1, 1));
+
+        Assert.AreEqual(4, tv.SelectedCells.Count);
+        Assert.IsTrue(tv.SelectedCells.Contains(new TableViewCellSlot(0, 0)));
+        Assert.IsTrue(tv.SelectedCells.Contains(new TableViewCellSlot(0, 1)));
+        Assert.IsTrue(tv.SelectedCells.Contains(new TableViewCellSlot(1, 0)));
+        Assert.IsTrue(tv.SelectedCells.Contains(new TableViewCellSlot(1, 1)));
+        Assert.AreEqual(1, eventCount);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
+    [UITestMethod]
+    public async Task DeselectCellRange_DeselectsTheProvidedRangeAndRaisesOneSelectionChangedEvent()
+    {
+        var tv = await CreateAndLoadTableView();
+        tv.SelectCellRange(TableViewCellSlotRange.FromCoordinates(0, 0, 1, 1));
+
+        var eventCount = 0;
+        tv.CellSelectionChanged += (_, _) => eventCount++;
+
+        tv.DeselectCellRange(TableViewCellSlotRange.FromCoordinates(0, 0, 1, 1));
+
+        Assert.AreEqual(0, tv.SelectedCells.Count);
+        Assert.AreEqual(1, eventCount);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
     }
 }

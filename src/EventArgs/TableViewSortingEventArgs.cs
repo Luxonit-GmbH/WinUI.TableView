@@ -52,7 +52,8 @@ public partial class TableViewSortingEventArgs : HandledEventArgs
     public SortDirection? Direction { get; }
 
     /// <summary>
-    /// Gets whether the column is being added to the existing sort chain (Ctrl+click) rather than replacing it.
+    /// Gets whether the column is being added to the existing sort chain (Ctrl+click or Shift+click) rather than
+    /// replacing it.
     /// </summary>
     public bool IsMultiSort { get; }
 

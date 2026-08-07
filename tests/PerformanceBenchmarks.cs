@@ -991,6 +991,67 @@ public class PerformanceBenchmarks
         => await AppDrivenRemovalAsync(useBulkScope: true, "Tree_AppRemovesChildren_100k_WithBulkScope");
 
     /// <summary>
+    /// Clearing a branch by raising ONE reset from the children collection — no bulk scope. Both the
+    /// <see cref="IObservableVector{T}"/> and the INotifyCollectionChanged reset land in the same RebuildBranch,
+    /// which coalesces above BulkChangeThreshold on its own; this measures that the caller needs nothing extra.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Tree_ClearBranchViaReset_100k_NoBulkScope()
+    {
+        var children = new ObservableCollection<ITableViewTreeItem>(
+            Enumerable.Range(0, 100_000).Select(i => (ITableViewTreeItem)new BenchTreeNode($"C{i}", 1)));
+        var snapshot = children.ToList();
+        var group = new BenchTreeNode("G", 0) { Children = children };
+
+        var treeView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            RowHeight = 32,
+            Width = 1000,
+            Height = 600,
+        };
+        treeView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(300, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(BenchTreeNode.Name)) },
+        });
+        treeView.TreeItemsSource = new ObservableCollection<ITableViewTreeItem> { group };
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeView);
+        treeView.UpdateLayout();
+
+        var source = treeView.TreeSource!;
+        source.Expand(group);
+        treeView.UpdateLayout();
+
+        Report(Measure(
+            () =>
+            {
+                children.Clear(); // one reset, no scope
+                treeView.UpdateLayout();
+            },
+            warmup: 0,
+            iterations: 3,
+            reset: () =>
+            {
+                using (source.BeginBulkUpdate())
+                {
+                    for (var i = children.Count; i < snapshot.Count; i++)
+                    {
+                        children.Add(snapshot[i]);
+                    }
+                }
+
+                treeView.UpdateLayout();
+            }),
+            "Tree_ClearBranchViaReset_100k_NoBulkScope");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeView);
+    }
+
+    /// <summary>
     /// The app's ACTUAL collapse pattern: instead of calling Collapse on the adapter, the view model empties its
     /// own children collection. Expand/Collapse coalescing does not cover this — only a bulk scope does. Drop the
     /// scope to reproduce the unguarded cost (~1.5s at this size); it is not run automatically because replaying

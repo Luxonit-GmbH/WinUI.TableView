@@ -767,13 +767,18 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     }
 
     /// <summary>
-    /// Handles a Reset ("everything may have changed") from a tracked collection. A Reset is deliberately NEVER
-    /// forwarded to the flat view — that would make the ListView drop every realized container and reset the scroll
-    /// position. Instead the new contents are diffed against the shadow by reference: the common prefix and suffix
-    /// are left completely untouched (no events, subtrees and subscriptions kept) and only the changed middle window
-    /// is removed/re-inserted. Batch appends/removes therefore cost only their own rows; a full reorder degenerates
-    /// to rebuilding the window, which is unavoidable when the source does not say what changed.
+    /// Handles a Reset ("everything may have changed") from a tracked collection. The new contents are diffed
+    /// against the shadow by reference: the common prefix and suffix are left completely untouched (no events,
+    /// subtrees and subscriptions kept) and only the changed middle window is removed/re-inserted. Batch
+    /// appends/removes therefore cost only their own rows; a full reorder degenerates to rebuilding the window,
+    /// which is unavoidable when the source does not say what changed.
     /// </summary>
+    /// <remarks>
+    /// A SMALL window is reported row by row rather than as a flat-view Reset, which would make the ListView drop
+    /// every realized container and reset the scroll position. Past <see cref="BulkChangeThreshold"/> that trade
+    /// inverts — regenerating one viewport beats a virtualization and measure pass per row — so a large window is
+    /// coalesced into a single Reset. Callers therefore need no bulk scope for a clear or a wholesale replace.
+    /// </remarks>
     private void RebuildBranch(Branch branch)
     {
         // A reset on a tracked children collection can move a very large window of rows; coalesce it so the host
