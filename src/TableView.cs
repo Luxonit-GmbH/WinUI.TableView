@@ -2649,7 +2649,10 @@ public partial class TableView : ListView
             _dragRectangle.Width = 0;
             _dragRectangle.Height = 0;
 
-            _dragRectangle.Visibility = ShowDragRectangle ? Visibility.Visible : Visibility.Collapsed;
+            // Stay hidden until the pointer actually travels (see DragRectangleThreshold). Showing it from the
+            // press means an ordinary click flashes a small accent-coloured box whenever the hand moves a pixel or
+            // two, which reads as "selection sometimes draws a blue rectangle".
+            _dragRectangle.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -2703,6 +2706,15 @@ public partial class TableView : ListView
     {
         if (_dragStartPoint is null || DragRectangleCanvas is null || _dragRectangle is null) return;
 
+        // A click is not a drag. Reveal the marquee only once the pointer has travelled past the threshold, so
+        // ordinary clicking never flashes it; selection itself is unaffected either way.
+        if (_dragRectangle.Visibility is Visibility.Collapsed
+            && ShowDragRectangle
+            && HasPassedDragThreshold(currentPoint))
+        {
+            _dragRectangle.Visibility = Visibility.Visible;
+        }
+
         // Adjust the start point by how much the view has scrolled since drag began.
         // This makes the rectangle extend naturally as content scrolls.
         var verticalScrollDelta = (_scrollViewer?.VerticalOffset ?? 0) - _dragStartVerticalOffset;
@@ -2723,6 +2735,20 @@ public partial class TableView : ListView
         _dragRectangle.Width = Math.Max(0, right - left);
         _dragRectangle.Height = Math.Max(0, bottom - top);
     }
+
+    /// <summary>
+    /// How far the pointer must travel from the press before the drag rectangle is drawn. Matches the system drag
+    /// threshold (SM_CXDRAG/SM_CYDRAG are 4px), which is the distance a click is allowed to wander.
+    /// </summary>
+    private const double DragRectangleThreshold = 4d;
+
+    /// <summary>
+    /// Whether the pointer has moved far enough from the drag origin to count as a drag rather than a click.
+    /// </summary>
+    private bool HasPassedDragThreshold(Point currentPoint)
+        => _dragStartPoint is { } start
+            && (Math.Abs(currentPoint.X - start.X) > DragRectangleThreshold
+                || Math.Abs(currentPoint.Y - start.Y) > DragRectangleThreshold);
 
     /// <summary>
     /// Manages auto-scroll behavior when the pointer is near the top or bottom edge during drag selection.

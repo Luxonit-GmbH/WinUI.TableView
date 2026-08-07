@@ -95,6 +95,67 @@ public class DragSelectionRectangleTests
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
     }
 
+    private static Border? DragRectangle(TableView tv)
+        => tv.DragRectangleCanvas?.Children.OfType<Border>().FirstOrDefault();
+
+    [UITestMethod]
+    public async Task DragRectangle_StaysHidden_OnPress()
+    {
+        var tv = await CreateAndLoadTableView();
+
+        tv.StartDragSelection(new Point(50, 50));
+
+        // Pressing is not yet dragging: showing the marquee here is what made an ordinary click flash a blue box.
+        Assert.AreEqual(Visibility.Collapsed, DragRectangle(tv)?.Visibility);
+
+        tv.EndDragSelection();
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
+    [UITestMethod]
+    public async Task DragRectangle_StaysHidden_WhenThePointerOnlyJitters()
+    {
+        var tv = await CreateAndLoadTableView();
+        tv.StartDragSelection(new Point(50, 50));
+
+        tv.UpdateDragRectangleVisual(new Point(52, 51)); // a click with a shaky hand, inside the threshold
+
+        Assert.AreEqual(Visibility.Collapsed, DragRectangle(tv)?.Visibility);
+
+        tv.EndDragSelection();
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
+    [UITestMethod]
+    public async Task DragRectangle_Appears_OncePastTheThreshold()
+    {
+        var tv = await CreateAndLoadTableView();
+        tv.StartDragSelection(new Point(50, 50));
+
+        tv.UpdateDragRectangleVisual(new Point(90, 120)); // a real drag
+
+        Assert.AreEqual(Visibility.Visible, DragRectangle(tv)?.Visibility);
+
+        tv.EndDragSelection();
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
+    [UITestMethod]
+    public async Task DragRectangle_NeverAppears_WhenShowDragRectangleIsFalse()
+    {
+        var tv = await CreateAndLoadTableView();
+        tv.ShowDragRectangle = false;
+        tv.StartDragSelection(new Point(50, 50));
+
+        tv.UpdateDragRectangleVisual(new Point(90, 120)); // well past the threshold
+
+        Assert.AreEqual(Visibility.Collapsed, DragRectangle(tv)?.Visibility);
+        Assert.IsTrue(tv.IsDragSelecting, "hiding the visual must not stop drag selection itself");
+
+        tv.EndDragSelection();
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tv);
+    }
+
     [UITestMethod]
     public async Task StartDragSelection_Starts_InMultipleMode()
     {
