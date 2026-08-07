@@ -372,7 +372,8 @@ public partial class TableView
     ];
 
     /// <summary>
-    /// Gets or sets how many columns may take part in the multi-column sort chain (Ctrl+click adds a column).
+    /// Gets or sets how many columns may take part in the multi-column sort chain (Ctrl+click or Shift+click on a
+    /// header adds a column).
     /// When the chain would grow past this, the oldest entry is dropped. Defaults to 5.
     /// </summary>
     public int MaxSortColumns

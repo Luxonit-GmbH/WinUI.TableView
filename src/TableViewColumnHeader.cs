@@ -13,6 +13,7 @@ using Windows.UI.Core;
 using WinUI.TableView.Collections;
 using WinUI.TableView.Controls;
 using WinUI.TableView.Extensions;
+using WinUI.TableView.Helpers;
 using SD = WinUI.TableView.SortDirection;
 
 namespace WinUI.TableView;
@@ -103,7 +104,7 @@ public partial class TableViewColumnHeader : ContentControl
 
         if (!singleSorting)
         {
-            // Ctrl+click: keep the existing chain, minus this column (it is re-added below at the end).
+            // Ctrl/Shift+click: keep the existing chain, minus this column (it is re-added below at the end).
             chain.AddRange(_tableView.SortChain.Where(description => description.Column != Column));
         }
 
@@ -238,10 +239,12 @@ public partial class TableViewColumnHeader : ContentControl
     {
         if (CanSort && Column is not null && _tableView is not null && !IsSizingCursor && !_reorderStarted)
         {
-            var isCtrlButtonDown = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) is
-                CoreVirtualKeyStates.Down or (CoreVirtualKeyStates.Down | CoreVirtualKeyStates.Locked);
+            // Ctrl OR Shift adds this column to the existing sort chain; a plain click replaces it. Both modifiers
+            // mean the same thing here — sorting has no notion of a contiguous range for Shift to extend, and
+            // accepting either saves the user guessing which one this grid chose.
+            var multiSort = KeyboardHelper.IsCtrlKeyDown() || KeyboardHelper.IsShiftKeyDown();
 
-            DoSort(GetNextSortDirection(), !isCtrlButtonDown);
+            DoSort(GetNextSortDirection(), !multiSort);
         }
 
         base.OnTapped(e);
@@ -632,7 +635,7 @@ public partial class TableViewColumnHeader : ContentControl
     /// Cycles through sort directions (ascending → descending → unsorted) for automation support.
     /// </summary>
     /// <param name="multiSort">
-    /// Whether to add the column to the existing sort chain (the Ctrl+click behavior) instead of replacing it.
+    /// Whether to add the column to the existing sort chain (the Ctrl/Shift+click behavior) instead of replacing it.
     /// </param>
     internal void InvokeSortCycle(bool multiSort = false)
     {
