@@ -45,11 +45,13 @@ partial class TableView
 
             for (var index = itemIndexRange.FirstIndex; index <= itemIndexRange.LastIndex; index++)
             {
+                // base.SelectedItems throughout this file: TableView shadows SelectedItems to shield callers from
+                // the platform's null in ISelectionInfo mode, and that shadow is a read-only snapshot.
                 var item = Items[index];
-                if (SelectedItems.Contains(item))
+                if (base.SelectedItems.Contains(item))
                 {
                     removedItems.Add(item);
-                    SelectedItems.Remove(item);
+                    base.SelectedItems.Remove(item);
                 }
             }
 
@@ -64,9 +66,9 @@ partial class TableView
     {
         SelectedRanges.Clear();
 
-        if (SelectedItems.Count == 0) return;
+        if (base.SelectedItems.Count == 0) return;
 
-        var selectedIndexes = SelectedItems.Select(Items.IndexOf).Order();
+        var selectedIndexes = base.SelectedItems.Select(Items.IndexOf).Order();
         var start = selectedIndexes.First();
         var prev = start;
 
@@ -99,10 +101,10 @@ partial class TableView
             for (var index = itemIndexRange.FirstIndex; index <= itemIndexRange.LastIndex; index++)
             {
                 var item = Items[index];
-                if (!SelectedItems.Contains(item))
+                if (!base.SelectedItems.Contains(item))
                 {
                     addedItems.Add(item);
-                    SelectedItems.Add(item);
+                    base.SelectedItems.Add(item);
                 }
             }
 

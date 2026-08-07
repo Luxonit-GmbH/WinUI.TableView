@@ -811,6 +811,60 @@ public partial class TreeTableViewSourceTests
     }
 
     [UITestMethod]
+    public async Task TreeSelection_SelectedItems_IsPopulated_NotNull()
+    {
+        var (source, a, _) = CreateTree();
+        source.Collapse(a); // start with: A, B
+
+        var treeTableView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            UseCollectionView = false,
+            SelectionMode = ListViewSelectionMode.Extended,
+            Width = 600,
+            Height = 400,
+        };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+
+        treeTableView.ItemsSource = source;
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        treeTableView.SelectAll();
+        await Task.Yield();
+
+        // The platform leaves ITS collection null when the source implements ISelectionInfo, so consumer code that
+        // works on a flat grid used to throw a NullReferenceException here.
+        Assert.IsNotNull(treeTableView.SelectedItems);
+        CollectionAssert.AreEqual(
+            new[] { "A", "B" },
+            treeTableView.SelectedItems.Cast<Node>().Select(n => n.Name).ToArray());
+
+        // Expanding inserts unselected children; the snapshot must reflect the selection, not the row count.
+        treeTableView.RequestExpandCollapse(a, 0, expand: true);
+        await Task.Yield();
+
+        Assert.AreEqual(5, treeTableView.Items.Count);
+        CollectionAssert.AreEqual(
+            new[] { "A", "B" },
+            treeTableView.SelectedItems.Cast<Node>().Select(n => n.Name).ToArray());
+
+        // Read-only by design: the selection lives in the source, so mutating a copy could not select anything.
+        Assert.ThrowsExactly<NotSupportedException>(() => treeTableView.SelectedItems.Add(new Node("Z", 0)));
+
+        treeTableView.DeselectAll();
+        await Task.Yield();
+        Assert.AreEqual(0, treeTableView.SelectedItems.Count);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
     public async Task LoadingBranch_DoesNotBlockExpandingOtherBranches()
     {
         var slow = new LoadingNode("Slow");
