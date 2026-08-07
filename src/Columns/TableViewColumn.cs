@@ -15,9 +15,51 @@ namespace WinUI.TableView;
 [StyleTypedProperty(Property = nameof(CellStyle), StyleTargetType = typeof(TableViewCell))]
 public abstract partial class TableViewColumn : DependencyObject
 {
-    private Func<object, object?>? _compliedValueGetter;
-    private Func<object, object?>? _compliedClipboardValueGetter;
+    // A compiled getter is built against a SPECIFIC runtime type — the expression tree casts to it — so one
+    // cached delegate per column throws InvalidCastException the moment the source holds more than one type.
+    // Heterogeneous sources are a supported shape (mixed tree items, and group rows alongside data rows), so the
+    // cache is keyed by type, with the last-used pair kept in fields for the homogeneous case: one reference
+    // compare on the hot path, a dictionary probe only when the type actually alternates.
+    private readonly GetterCache _valueGetters = new();
+    private readonly GetterCache _clipboardGetters = new();
+    private readonly Dictionary<Type, Action<object, object?>?> _clipboardSetters = [];
     private Action<object, object?>? _compliedClipboardValueSetter;
+
+    private sealed class GetterCache
+    {
+        public Dictionary<Type, Func<object, object?>?> ByType { get; } = [];
+        public Type? LastType { get; set; }
+        public Func<object, object?>? LastGetter { get; set; }
+    }
+
+    /// <summary>
+    /// Returns the value getter for this item's runtime type, compiling and caching it on first sight.
+    /// </summary>
+    private static Func<object, object?>? ResolveGetter(GetterCache cache, object dataItem, string? bindingPath)
+    {
+        if (string.IsNullOrWhiteSpace(bindingPath))
+        {
+            return null;
+        }
+
+        var type = dataItem.GetType();
+
+        if (ReferenceEquals(type, cache.LastType))
+        {
+            return cache.LastGetter;
+        }
+
+        if (!cache.ByType.TryGetValue(type, out var getter))
+        {
+            // Cache misses too: a type that simply lacks the property must not recompile on every cell.
+            getter = dataItem.GetCompiledValueGetter(bindingPath!);
+            cache.ByType[type] = getter;
+        }
+
+        cache.LastType = type;
+        cache.LastGetter = getter;
+        return getter;
+    }
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TableViewColumn"/> class with default conditional cell styles.
@@ -108,11 +150,8 @@ public abstract partial class TableViewColumn : DependencyObject
         if (dataItem is null)
             return null;
 
-        if (_compliedValueGetter is null && !string.IsNullOrWhiteSpace(OperationContentBindingPropertyPath))
-            _compliedValueGetter = dataItem.GetCompiledValueGetter(OperationContentBindingPropertyPath!);
-
-        if (_compliedValueGetter is not null)
-            dataItem = _compliedValueGetter(dataItem);
+        if (ResolveGetter(_valueGetters, dataItem, OperationContentBindingPropertyPath) is { } getter)
+            dataItem = getter(dataItem);
 
         if (OperationContentBinding?.Converter is not null)
         {
@@ -136,11 +175,8 @@ public abstract partial class TableViewColumn : DependencyObject
         if (dataItem is null)
             return null;
 
-        if (_compliedClipboardValueGetter is null && !string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath))
-            _compliedClipboardValueGetter = dataItem.GetCompiledValueGetter(ClipboardContentBindingPropertyPath!);
-
-        if (_compliedClipboardValueGetter is not null)
-            dataItem = _compliedClipboardValueGetter(dataItem);
+        if (ResolveGetter(_clipboardGetters, dataItem, ClipboardContentBindingPropertyPath) is { } getter)
+            dataItem = getter(dataItem);
 
         if (ClipboardContentBinding?.Converter is not null)
         {
@@ -167,11 +203,21 @@ public abstract partial class TableViewColumn : DependencyObject
 
         try
         {
-            if (_compliedClipboardValueSetter is null && !string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath))
-                _compliedClipboardValueSetter = dataItem.GetCompiledValueSetter(ClipboardContentBindingPropertyPath!);
-
-            if (_compliedClipboardValueSetter is null)
+            if (string.IsNullOrWhiteSpace(ClipboardContentBindingPropertyPath))
                 return false;
+
+            var type = dataItem.GetType();
+
+            if (!_clipboardSetters.TryGetValue(type, out var setter))
+            {
+                setter = dataItem.GetCompiledValueSetter(ClipboardContentBindingPropertyPath!);
+                _clipboardSetters[type] = setter;
+            }
+
+            if (setter is null)
+                return false;
+
+            _compliedClipboardValueSetter = setter;
 
             if (ClipboardContentBinding?.Converter is not null)
             {
@@ -199,6 +245,16 @@ public abstract partial class TableViewColumn : DependencyObject
     {
         get => GetValue(HeaderProperty);
         set => SetValue(HeaderProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets the name of the <see cref="TableViewColumnGroup"/> this column belongs to, banding it under a
+    /// shared banner in the second header level. Columns sharing a name must be contiguous in <see cref="Order"/>.
+    /// </summary>
+    public string? GroupName
+    {
+        get => (string?)GetValue(GroupNameProperty);
+        set => SetValue(GroupNameProperty, value);
     }
 
     /// <summary>
@@ -673,6 +729,11 @@ public abstract partial class TableViewColumn : DependencyObject
     /// Identifies the Header dependency property.
     /// </summary>
     public static readonly DependencyProperty HeaderProperty = DependencyProperty.Register(nameof(Header), typeof(object), typeof(TableViewColumn), new PropertyMetadata(null));
+
+    /// <summary>
+    /// Identifies the GroupName dependency property.
+    /// </summary>
+    public static readonly DependencyProperty GroupNameProperty = DependencyProperty.Register(nameof(GroupName), typeof(string), typeof(TableViewColumn), new PropertyMetadata(null, OnPropertyChanged));
 
     /// <summary>
     /// Identifies the Width dependency property.

@@ -29,6 +29,86 @@
     <Style TargetType="local:TableViewColumnHeader"
            BasedOn="{StaticResource DefaultTableViewColumnHeaderStyle}" />
 
+    <!-- A code-only control subclass is absent from the generated XamlTypeInfo, so without an implicit style
+         here XAML resolves it to its nearest native base and the style TargetType mismatch crashes at load. -->
+    <Style TargetType="local:TableViewGroupHeader">
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="VerticalAlignment" Value="Stretch" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="local:TableViewGroupHeader">
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="8"
+                                VerticalAlignment="Center">
+                        <FontIcon FontSize="12"
+                                  Glyph="&#xE76C;"
+                                  VerticalAlignment="Center"
+                                  RenderTransformOrigin="0.5,0.5"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                            <FontIcon.RenderTransform>
+                                <RotateTransform x:Name="ChevronRotation" />
+                            </FontIcon.RenderTransform>
+                        </FontIcon>
+
+                        <TextBlock Text="{Binding Group.Title, RelativeSource={RelativeSource TemplatedParent}}"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center" />
+
+                        <TextBlock Text="{Binding Group.Count, RelativeSource={RelativeSource TemplatedParent}}"
+                                   VerticalAlignment="Center"
+                                   Opacity="0.7"
+                                   Visibility="{Binding ShowItemCount, RelativeSource={RelativeSource TemplatedParent}}" />
+                    </StackPanel>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="local:TableViewColumnGroupHeader">
+        <Setter Property="Background" Value="{ThemeResource TableViewColumnGroupHeaderBackground}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="MinHeight" Value="32" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="local:TableViewColumnGroupHeader">
+                    <!-- A dedicated, themable stroke: the grid-line brush is far too faint here, so the divide
+                         between one banner and the next reads as grey on grey. -->
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{ThemeResource TableViewColumnGroupHeaderStroke}"
+                            BorderThickness="0,0,1,1"
+                            MinHeight="{TemplateBinding MinHeight}"
+                            Padding="{TemplateBinding Padding}">
+                        <!-- Name and chevron travel together, centred over the run of columns. -->
+                        <StackPanel Orientation="Horizontal"
+                                    Spacing="6"
+                                    HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                    VerticalAlignment="Center">
+                            <!-- One glyph, rotated between states rather than swapped: a RenderTransform
+                                 animation runs on the composition thread, so it costs no layout. -->
+                            <FontIcon x:Name="CollapseChevron"
+                                      FontSize="10"
+                                      Glyph="&#xE76B;"
+                                      VerticalAlignment="Center"
+                                      RenderTransformOrigin="0.5,0.5"
+                                      Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                                <FontIcon.RenderTransform>
+                                    <RotateTransform x:Name="ChevronRotation" />
+                                </FontIcon.RenderTransform>
+                            </FontIcon>
+                            <ContentPresenter Content="{TemplateBinding Content}"
+                                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                                              VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <Style TargetType="local:TableViewCell"
            BasedOn="{StaticResource DefaultTableViewCellStyle}" />
 

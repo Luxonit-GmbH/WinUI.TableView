@@ -140,6 +140,11 @@
                         <FontIcon Glyph="&#xE8B7;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Content="Grouping">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xF168;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem Content="Conditional Cell Styling">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE794;" />

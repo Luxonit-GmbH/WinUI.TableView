@@ -18,6 +18,9 @@
                           BorderBrush="{TemplateBinding BorderBrush}"
                           BorderThickness="{TemplateBinding BorderThickness}">
                         <Grid.RowDefinitions>
+                            <!-- Column-group banners. Auto, so it measures to zero when no groups are defined
+                                 and the header looks exactly as it did before. -->
+                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
@@ -80,7 +83,18 @@
                             </VisualStateGroup>
                         </VisualStateManager.VisualStateGroups>
 
-                        <Grid x:Name="CornerButtonPanel">
+                        <StackPanel x:Name="FrozenSpannersPanel"
+                                    Grid.Row="0"
+                                    Grid.Column="2"
+                                    Orientation="Horizontal" />
+
+                        <StackPanel x:Name="ScrollableSpannersPanel"
+                                    Grid.Row="0"
+                                    Grid.Column="3"
+                                    Orientation="Horizontal" />
+
+                        <Grid x:Name="CornerButtonPanel"
+                              Grid.Row="1">
                             <Button x:Name="selectAllButton"
                                     BorderThickness="0"
                                     Background="Transparent"
@@ -186,19 +200,23 @@
                         </Grid>
 
                         <Rectangle x:Name="VerticalGridLine"
+                                   Grid.Row="1"
                                    Grid.Column="1"
                                    Width="1"
                                    VerticalAlignment="Stretch" />
 
                         <StackPanel x:Name="FrozenHeadersPanel"
+                                    Grid.Row="1"
                                     Grid.Column="2"
                                     Orientation="Horizontal" />
 
                         <StackPanel x:Name="ScrollableHeadersPanel"
+                                    Grid.Row="1"
                                     Grid.Column="3"
                                     Orientation="Horizontal" />
 
                         <Border x:Name="ColumnDropIndicator"
+                                Grid.Row="1"
                                 Grid.ColumnSpan="4"
                                 Visibility="Collapsed"
                                 HorizontalAlignment="Left"
@@ -229,7 +247,7 @@
                             </Grid>
                         </Border>
                         <Rectangle x:Name="HorizontalGridLine"
-                                   Grid.Row="1"
+                                   Grid.Row="2"
                                    Grid.ColumnSpan="4"
                                    HorizontalAlignment="Stretch" />
                     </Grid>

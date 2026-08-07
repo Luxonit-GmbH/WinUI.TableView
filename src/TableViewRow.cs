@@ -144,6 +144,9 @@ public partial class TableViewRow : ListViewItem
     {
         base.OnContentChanged(oldContent, newContent);
 
+        // A recycled container may swap between a banner item and a data item, so re-decide every time.
+        RowPresenter?.ApplyBannerPresentation(newContent);
+
         // EnsureCells also detects a cell set that no longer matches the columns (see its self-healing guard), so a
         // container recycled across a column-set change rebuilds here instead of rendering the wrong columns.
         // Freshly built cells need no refresh pass, hence the else.

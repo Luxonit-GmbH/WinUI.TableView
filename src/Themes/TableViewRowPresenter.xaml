@@ -61,6 +61,14 @@
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
+                        <!-- Banner rows REPLACE the row layout rather than sitting alongside it: RootPanel is
+                             hand-arranged in ArrangeOverride, so anything drawn beside it would be overlapped. -->
+                        <ContentPresenter x:Name="BannerPresenter"
+                                          Visibility="Collapsed"
+                                          VerticalAlignment="Center"
+                                          Padding="{ThemeResource TableViewBannerRowPadding}"
+                                          Background="{ThemeResource TableViewBannerRowBackground}" />
+
                         <Grid x:Name="RootPanel"
                               Margin="{TemplateBinding Padding}">
 

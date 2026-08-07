@@ -110,6 +110,24 @@ Design points to settle before coding:
   slots expansion, paste and export — plus our additions: the drag rectangle and
   `ApplyContextRequestSelection`.
 
+#### Banner rows ("spanner rows")
+
+**Clarified 2026-08-03:** a full-width row whose content spans every column, as in #340's group headers. This is
+the *rendering half* of this item, not a separate feature — so it lands here rather than with the spanner
+headers, which are column-side work sharing no code with it.
+
+Two parts, in this order:
+
+1. **The capability** — a row that renders one full-width piece of content instead of cells, is not selectable,
+   not editable, and is skipped by keyboard navigation. Useful on its own (empty-state and section rows), and it
+   is where the `IsSelectableItem` predicate above gets enforced.
+2. **Grouping produces them** — the projection over `TreeTableViewSource` emits a banner row per group, with the
+   count and the expand/collapse chevron.
+
+`TableViewRowPresenter.ArrangeOverride` is the thing to watch: it arranges `_rootPanel` at a hardcoded y=0 and
+the cells/details panels at explicit rects, so a banner has to replace that layout for the row rather than being
+added alongside it. #340 hit exactly this and its band would have been drawn over.
+
 ### 3. Collapsible spanner headers — 4–6 days
 
 **Decided 2026-08-03:** a second header level banding columns together ("Prices" over Bid/Ask/Mid), which the
@@ -189,6 +207,44 @@ so a spanner's extent is one subtraction of two offsets.
 4. Accessibility (UIA header-group relationships) and keyboard collapse/expand.
 
 Phases 1 and 2 are independently shippable.
+
+#### Progress
+
+**Model layer done 2026-08-03** (15 tests in `TableViewColumnGroupTests`), ahead of the rendering:
+
+- `TableViewColumnGroup` (Name, Header, HeaderTemplate, IsCollapsible, IsCollapsed, CollapsedColumn),
+  `TableViewColumn.GroupName`, `TableView.ColumnGroups`.
+- `TableViewColumnsCollection.GetColumnGroupSpans` resolves banners to runs of *visible* columns, walking the
+  frozen and scrollable sets separately because only one of them pans. Ungrouped columns each stand alone rather
+  than merging into one empty banner, and a group split by a foreign column yields two spans rather than
+  swallowing the intruder.
+- `TableView.ValidateColumnGroups()` reports non-contiguous groups, frozen-boundary straddling, duplicate and
+  missing names, and columns naming a group that does not exist. It checks *all* columns, not just visible ones,
+  so a group split by a currently hidden column is reported before that column is shown.
+- `TableView.SetColumnGroupCollapsed(group, collapse)` — collapse keeps the anchor visible, expand restores each
+  member's saved visibility rather than showing everything.
+
+**Rendering done 2026-08-03** (19 tests total), which completes phases 1 and 2:
+
+- `Themes/TableViewHeaderRow.xaml` gained a banner row above the headers (`Auto` / `*` / `Auto`), with
+  `FrozenSpannersPanel` and `ScrollableSpannersPanel`. Existing content moved to row 1, the gridline to row 2.
+  With no groups defined both panels stay empty and the Auto row measures to zero, so an ungrouped grid looks
+  and costs exactly what it did before.
+- `TableViewColumnGroupHeader` renders one banner and toggles its group on tap.
+- `TableViewHeaderRow.EnsureSpanners` rebuilds the banner visuals only when the span *shape* changes, and
+  re-measures on every width pass, so dragging a column border does not churn the header.
+- The scrollable banner panel pans with its own `TranslateTransform` and clip, driven from the same
+  `ApplyHorizontalScroll`. Separate instances are mandatory — WinUI throws `E_BOUNDS` if one transform or
+  geometry is attached to two elements.
+
+Two things worth remembering, both found by tests rather than review: a `{ThemeResource}` key that does not
+exist throws `COMException` at load, not at build (`TableViewGridLinesBrush` did not exist — the real key is
+`TableViewVerticalGridLineStroke`); and a column `Visibility` change takes the `AddHeaders`/`RemoveHeaders` path
+rather than a wholesale rebuild, so `EnsureSpanners` has to be driven from `OnColumnPropertyChanged` directly or
+a collapse moves the columns and leaves the banner at its old width.
+
+**Not yet done:** phase 3 (reorder constraints, frozen-boundary enforcement) and phase 4 (UIA, keyboard).
+`ValidateColumnGroups()` reports a straddling group but nothing prevents one.
 
 ### 4. ListView-style hotkeys, reimplemented — **DONE 2026-08-03**
 

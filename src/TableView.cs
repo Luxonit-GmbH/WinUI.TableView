@@ -35,6 +35,7 @@ public partial class TableView : ListView
     private bool _shouldThrowSelectionModeChangedException;
     private bool _contextSelectionClaimed;
     private ItemIndexRange? _listViewShiftRange; // the span the current Shift+Up/Down extension owns
+    private readonly Dictionary<TableViewColumn, Visibility> _collapsedGroupVisibility = []; // restored on expand
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
     private bool _settingBaseItemsSource; // allows TableView to assign the inherited ItemsSource (otherwise guarded)
@@ -84,6 +85,11 @@ public partial class TableView : ListView
             _headerRow?.InvalidateHeaders();
             InvalidateColumnBand();
         };
+
+        // Defining or removing a banner changes the second header level without touching the columns at all, so
+        // the header row would otherwise never know to rebuild it.
+        ColumnGroups.CollectionChanged += (_, _) => _headerRow?.InvalidateHeaders();
+
         FilterHandler = new ColumnFilterHandler(this);
 
         base.ItemsSource = _collectionView;
@@ -253,6 +259,8 @@ public partial class TableView : ListView
                 DispatcherQueue.TryEnqueue(ApplyPendingCellStates);
             }
 
+            // Before the details state: a banner row hides the whole cell layout, details included.
+            row.RowPresenter?.ApplyBannerPresentation(item);
             row.RowPresenter?.ApplyDetailsPaneState(item);
 
             if (CurrentCellSlot.HasValue)
@@ -786,6 +794,10 @@ public partial class TableView : ListView
             else
             {
                 row = e.Key == VirtualKey.Up ? ctrlKey ? 0 : row - 1 : ctrlKey ? Items.Count - 1 : row + 1;
+
+                // Step over group headers and other banner rows: they hold no cells, so landing on one would
+                // leave the current cell nowhere and the next key press unanchored.
+                row = SkipUnselectableRows(row, e.Key == VirtualKey.Up ? -1 : 1);
             }
 
             var newSlot = new TableViewCellSlot(row, column);
@@ -868,9 +880,10 @@ public partial class TableView : ListView
             return false;
         }
 
+        var step = key is VirtualKey.Up ? -1 : 1;
         var target = current < 0
-            ? 0
-            : Math.Clamp(current + (key is VirtualKey.Up ? -1 : 1), 0, Items.Count - 1);
+            ? SkipUnselectableRows(0, 1)
+            : SkipUnselectableRows(Math.Clamp(current + step, 0, Items.Count - 1), step);
 
         if (shiftKey)
         {
@@ -1496,6 +1509,18 @@ public partial class TableView : ListView
     /// </summary>
     private void ApplyEffectiveItemsSource(IEnumerable? source)
     {
+        // Remember what the consumer actually bound, so toggling grouping can re-project it, and swap in the
+        // grouped projection when GroupByPath is set. Grouping produces a tree adapter, which the ListView must
+        // virtualize over directly.
+        _ungroupedSource = source;
+        source = BuildGroupedSource(source);
+
+        if (source is TreeTableViewSource && UseCollectionView)
+        {
+            UseCollectionView = false; // re-enters here with grouping already built
+            return;
+        }
+
         if (UseCollectionView)
         {
             DetachDirectSource();
@@ -2093,6 +2118,75 @@ public partial class TableView : ListView
     }
 
     /// <summary>
+    /// Reports the ways the current <see cref="ColumnGroups"/> cannot be rendered — a group split across
+    /// non-adjacent columns, one straddling the frozen boundary, a duplicate or missing name, or a column naming
+    /// a group that does not exist.
+    /// </summary>
+    /// <returns>One message per problem; empty when the groups are sound.</returns>
+    public IReadOnlyList<string> ValidateColumnGroups()
+        => (Columns as TableViewColumnsCollection)?.ValidateColumnGroups(ColumnGroups) ?? [];
+
+    /// <summary>
+    /// Collapses a column group down to its anchor column, or expands it again.
+    /// </summary>
+    /// <remarks>
+    /// Collapsing hides every member except <see cref="TableViewColumnGroup.CollapsedColumn"/> (defaulting to the
+    /// group's first column), remembering what each column's visibility was. Expanding restores exactly that,
+    /// rather than showing everything — a column the app had deliberately hidden must not reappear because a
+    /// neighbour's group was expanded.
+    /// </remarks>
+    /// <param name="group">The group to collapse or expand.</param>
+    /// <param name="collapse"><see langword="true"/> to collapse; <see langword="false"/> to expand.</param>
+    public void SetColumnGroupCollapsed(TableViewColumnGroup group, bool collapse)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+
+        if (group.IsCollapsed == collapse)
+        {
+            return;
+        }
+
+        var members = Columns
+            .OfType<TableViewColumn>()
+            .Where(column => column.GroupName == group.Name)
+            .OrderBy(column => column.Order ?? 0)
+            .ToList();
+
+        if (members.Count == 0)
+        {
+            group.IsCollapsed = collapse;
+            return;
+        }
+
+        if (collapse)
+        {
+            var anchor = group.CollapsedColumn is { } chosen && members.Contains(chosen) ? chosen : members[0];
+
+            foreach (var column in members)
+            {
+                _collapsedGroupVisibility[column] = column.Visibility;
+
+                if (!ReferenceEquals(column, anchor))
+                {
+                    column.Visibility = Visibility.Collapsed;
+                }
+            }
+        }
+        else
+        {
+            foreach (var column in members)
+            {
+                if (_collapsedGroupVisibility.Remove(column, out var previous))
+                {
+                    column.Visibility = previous;
+                }
+            }
+        }
+
+        group.IsCollapsed = collapse;
+    }
+
+    /// <summary>
     /// Drops every cached column layout and forces all realized rows and the header to rebuild from the CURRENT
     /// column set. Call after replacing the columns imperatively (e.g. <c>Columns.Clear()</c> followed by adds);
     /// assigning <see cref="ColumnsSource"/> does it automatically.
@@ -2358,6 +2452,11 @@ public partial class TableView : ListView
 
                 for (var row = 0; row < Items.Count; row++)
                 {
+                    if (!IsSelectableItem(row))
+                    {
+                        continue; // a group header or other banner row has no cells to select
+                    }
+
                     for (var column = 0; column < Columns.VisibleColumns.Count; column++)
                     {
                         selectionRange.Add(new TableViewCellSlot(row, column));
@@ -2408,6 +2507,40 @@ public partial class TableView : ListView
         SelectedCellRanges.Clear();
         OnCellSelectionChanged();
         CurrentCellSlot = null;
+    }
+
+    /// <summary>
+    /// Whether the item at a flat index can take part in selection. Banner rows
+    /// (<see cref="ITableViewBannerItem"/>) occupy an index but are not data, so they are excluded.
+    /// </summary>
+    /// <remarks>
+    /// One predicate consulted by every entry point, rather than a guard scattered through each — which is how
+    /// upstream's grouping attempt still let its header rows leak into select-all, copy and export.
+    /// </remarks>
+    /// <param name="index">The flat row index.</param>
+    /// <returns><see langword="false"/> for a row that is not data.</returns>
+    internal bool IsSelectableItem(int index)
+        => index < 0 || index >= Items.Count || Items[index] is not ITableViewBannerItem;
+
+    /// <summary>
+    /// Walks past banner rows in the given direction, so navigation lands on a row that actually has cells.
+    /// </summary>
+    /// <param name="row">The candidate row index.</param>
+    /// <param name="step">-1 to search upwards, 1 downwards.</param>
+    /// <returns>
+    /// The first selectable row at or beyond the candidate; the candidate itself when the search runs off the
+    /// end, so callers keep their existing clamping behaviour.
+    /// </returns>
+    internal int SkipUnselectableRows(int row, int step)
+    {
+        var candidate = row;
+
+        while (candidate >= 0 && candidate < Items.Count && !IsSelectableItem(candidate))
+        {
+            candidate += step;
+        }
+
+        return candidate >= 0 && candidate < Items.Count ? candidate : row;
     }
 
     /// <summary>
@@ -2465,7 +2598,7 @@ public partial class TableView : ListView
     /// </summary>
     internal void MakeSelection(TableViewCellSlot slot, bool shiftKey, bool ctrlKey = false)
     {
-        if (!slot.IsValidRow(this))
+        if (!slot.IsValidRow(this) || !IsSelectableItem(slot.Row))
         {
             return;
         }

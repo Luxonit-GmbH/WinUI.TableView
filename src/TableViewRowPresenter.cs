@@ -1,6 +1,7 @@
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Input;
@@ -33,6 +34,7 @@ public partial class TableViewRowPresenter : Control
     private Rectangle? _h_gridLine;
     private Panel? _detailsPanel;
     private ContentPresenter? _detailsPresenter;
+    private ContentPresenter? _bannerPresenter;
     private ToggleButton? _detailsToggleButton;
     private ListViewItemPresenter? _itemPresenter;
     private long? _detailsPanelVisibilityCallbackToken;
@@ -75,6 +77,7 @@ public partial class TableViewRowPresenter : Control
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _detailsPanel = GetTemplateChild("DetailsPanel") as Panel;
         _detailsPresenter = GetTemplateChild("DetailsPresenter") as ContentPresenter;
+        _bannerPresenter = GetTemplateChild("BannerPresenter") as ContentPresenter;
         _detailsToggleButton = GetTemplateChild("DetailsToggleButton") as ToggleButton;
 
         _itemPresenter = this.FindAscendant<ListViewItemPresenter>();
@@ -91,6 +94,10 @@ public partial class TableViewRowPresenter : Control
             _detailsPanelVisibilityCallbackToken =
                 _detailsPanel.RegisterPropertyChangedCallback(VisibilityProperty, OnDetailsPanelVisibilityChanged);
         }
+
+        // The template is applied AFTER PrepareContainerForItemOverride ran, so the call from there found no
+        // presenter yet. Settle it here from the row's own item, the reliable hook.
+        ApplyBannerPresentation(TableViewRow?.Content);
 
         TableViewRow?.EnsureCells();
         EnsureGridLines();
@@ -125,10 +132,73 @@ public partial class TableViewRowPresenter : Control
         return base.MeasureOverride(availableSize);
     }
 
+    /// <summary>
+    /// The built-in group header: a chevron, the title and the count. Built once, in code, because a code-only
+    /// control needs no XAML file to be referenced from.
+    /// </summary>
+    private static DataTemplate? _defaultGroupHeaderTemplate;
+
+    private static DataTemplate DefaultGroupHeaderTemplate =>
+        _defaultGroupHeaderTemplate ??= (DataTemplate)XamlReader.Load(
+            """
+            <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                          xmlns:tv="using:WinUI.TableView">
+                <tv:TableViewGroupHeader />
+            </DataTemplate>
+            """);
+
+    /// <summary>
+    /// Switches the row between the normal cell layout and a single full-width banner.
+    /// </summary>
+    /// <param name="item">The row's item; a banner is shown when it is an <see cref="ITableViewBannerItem"/>.</param>
+    internal void ApplyBannerPresentation(object? item)
+    {
+        if (_bannerPresenter is null)
+        {
+            return;
+        }
+
+        if (item is ITableViewBannerItem banner)
+        {
+            _bannerPresenter.Content = banner.BannerContent ?? item;
+
+            // A grouping header gets the group template (or the built-in chevron/title/count) rather than the
+            // generic banner template, so grouping needs no setup from the consumer.
+            _bannerPresenter.ContentTemplate = item is TableViewGroup
+                ? TableView?.GroupHeaderTemplate ?? DefaultGroupHeaderTemplate
+                : TableView?.BannerRowTemplate;
+
+            _bannerPresenter.Visibility = Visibility.Visible;
+
+            // Replace, never overlay: the cells and details are hand-arranged and would be drawn on top.
+            if (_rootPanel is not null)
+            {
+                _rootPanel.Visibility = Visibility.Collapsed;
+            }
+        }
+        else
+        {
+            _bannerPresenter.Content = null;
+            _bannerPresenter.Visibility = Visibility.Collapsed;
+
+            if (_rootPanel is not null)
+            {
+                _rootPanel.Visibility = Visibility.Visible;
+            }
+        }
+    }
+
     /// <inheritdoc/>
     protected override Size ArrangeOverride(Size finalSize)
     {
         finalSize = base.ArrangeOverride(finalSize);
+
+        // A banner row has no cells to place, and the hand-arranging below would drag the collapsed row layout
+        // back over the banner — the same way a hardcoded y=0 did to the column-group headers.
+        if (_bannerPresenter?.Visibility is Visibility.Visible)
+        {
+            return finalSize;
+        }
 
         if (TableView is not null)
         {

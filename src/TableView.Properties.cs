@@ -299,6 +299,31 @@ public partial class TableView
 
 
     /// <summary>
+    /// Identifies the <see cref="BannerRowTemplate"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty BannerRowTemplateProperty = DependencyProperty.Register(nameof(BannerRowTemplate), typeof(DataTemplate), typeof(TableView), new PropertyMetadata(null));
+
+    /// <summary>
+    /// Gets or sets the template for rows that render as a full-width banner rather than cells — items
+    /// implementing <see cref="ITableViewBannerItem"/>.
+    /// </summary>
+    public DataTemplate? BannerRowTemplate
+    {
+        get => (DataTemplate?)GetValue(BannerRowTemplateProperty);
+        set => SetValue(BannerRowTemplateProperty, value);
+    }
+
+    /// <summary>
+    /// Gets the second header level: banners spanning runs of columns, matched to columns by
+    /// <see cref="TableViewColumn.GroupName"/>.
+    /// </summary>
+    /// <remarks>
+    /// A group's columns must be contiguous in <see cref="TableViewColumn.Order"/> and must not straddle the
+    /// frozen/scrollable boundary — see <see cref="ValidateColumnGroups"/>.
+    /// </remarks>
+    public ObservableCollection<TableViewColumnGroup> ColumnGroups { get; } = [];
+
+    /// <summary>
     /// Identifies the <see cref="UseListViewHotkeys"/> dependency property.
     /// </summary>
     public static readonly DependencyProperty UseListViewHotkeysProperty = DependencyProperty.Register(nameof(UseListViewHotkeys), typeof(bool), typeof(TableView), new PropertyMetadata(false));
@@ -564,7 +589,10 @@ public partial class TableView
             {
                 for (var index = Math.Max(0, range.FirstIndex); index <= range.LastIndex && index < Items.Count; index++)
                 {
-                    if (Items[index] is { } item)
+                    // Banner rows occupy an index but are not data. A platform SelectAll sweeps them into the
+                    // ranges regardless, so they are filtered out where the ranges are READ — one place that
+                    // covers copy, export and anything else built on this.
+                    if (Items[index] is { } item && IsSelectableItem(index))
                     {
                         selected.Add(item);
                     }
@@ -599,7 +627,10 @@ public partial class TableView
                 {
                     for (var index = Math.Max(0, range.FirstIndex); index <= range.LastIndex && index < Items.Count; index++)
                     {
-                        yield return Items[index];
+                        if (IsSelectableItem(index)) // group headers are not data
+                        {
+                            yield return Items[index];
+                        }
                     }
                 }
 
@@ -614,7 +645,7 @@ public partial class TableView
 
             foreach (var index in rowIndexes)
             {
-                if (index >= 0 && index < Items.Count)
+                if (index >= 0 && index < Items.Count && IsSelectableItem(index))
                 {
                     yield return Items[index];
                 }

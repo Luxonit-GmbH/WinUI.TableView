@@ -1,0 +1,164 @@
+<Page x:Class="WinUI.TableView.SampleApp.Pages.GroupingPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="using:WinUI.TableView.SampleApp"
+      xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+      xmlns:tv="using:WinUI.TableView"
+      xmlns:controls="using:WinUI.TableView.SampleApp.Controls"
+      mc:Ignorable="d">
+
+    <Grid>
+        <controls:SamplePresenter Header="Grouping"
+                                  Description="Two independent kinds of grouping. ROW grouping takes a flat collection and a property path and projects collapsible groups with full-width header rows. COLUMN grouping adds a second header level: a banner spanning a run of columns, which collapses to a single anchor column.">
+            <controls:SamplePresenter.Example>
+                <tv:TableView x:Name="grid"
+                              AutoGenerateColumns="False"
+                              SelectionMode="Extended"
+                              SelectionUnit="Row"
+                              GroupByPath="Department">
+                    <tv:TableView.ColumnGroups>
+                        <tv:TableViewColumnGroup Name="Instrument"
+                                                 Header="Instrument" />
+                        <tv:TableViewColumnGroup Name="Prices"
+                                                 Header="Prices" />
+                        <tv:TableViewColumnGroup Name="Risk"
+                                                 Header="Risk" />
+                    </tv:TableView.ColumnGroups>
+                    <tv:TableView.Columns>
+                        <!-- A tree column, so a group's members can themselves be expandable. With the trees
+                             toggle off it simply renders the name with no chevron. -->
+                        <tv:TableViewTreeColumn Header="Name"
+                                                Width="240"
+                                                GroupName="Instrument"
+                                                Binding="{Binding Name}" />
+                        <tv:TableViewTextColumn Header="Ccy"
+                                                Width="80"
+                                                GroupName="Instrument"
+                                                Binding="{Binding Currency}" />
+                        <tv:TableViewTextColumn Header="Department"
+                                                Width="130"
+                                                GroupName="Instrument"
+                                                Binding="{Binding Department}" />
+                        <tv:TableViewNumberColumn Header="Bid"
+                                                  Width="100"
+                                                  GroupName="Prices"
+                                                  Binding="{Binding Bid}" />
+                        <tv:TableViewNumberColumn Header="Mid"
+                                                  Width="100"
+                                                  GroupName="Prices"
+                                                  Binding="{Binding Mid}" />
+                        <tv:TableViewNumberColumn Header="Ask"
+                                                  Width="100"
+                                                  GroupName="Prices"
+                                                  Binding="{Binding Ask}" />
+                        <tv:TableViewNumberColumn Header="Delta"
+                                                  Width="100"
+                                                  GroupName="Risk"
+                                                  Binding="{Binding Delta}" />
+                        <tv:TableViewNumberColumn Header="Vega"
+                                                  Width="100"
+                                                  GroupName="Risk"
+                                                  Binding="{Binding Vega}" />
+                    </tv:TableView.Columns>
+                </tv:TableView>
+            </controls:SamplePresenter.Example>
+
+            <controls:SamplePresenter.Options>
+                <StackPanel Spacing="16"
+                            MaxWidth="350">
+                    <ComboBox x:Name="groupByCombo"
+                              Header="Group by"
+                              SelectedIndex="0"
+                              HorizontalAlignment="Stretch">
+                        <ComboBoxItem Content="Department" Tag="Department" />
+                        <ComboBoxItem Content="Currency" Tag="Currency" />
+                        <ComboBoxItem Content="(none)" />
+                    </ComboBox>
+
+                    <ComboBox x:Name="groupSortCombo"
+                              Header="Group sort"
+                              SelectedIndex="0"
+                              HorizontalAlignment="Stretch">
+                        <ComboBoxItem Content="Ascending" Tag="Ascending" />
+                        <ComboBoxItem Content="Descending" Tag="Descending" />
+                        <ComboBoxItem Content="Source order" Tag="None" />
+                    </ComboBox>
+
+                    <ToggleSwitch x:Name="showHeadersToggle"
+                                  Header="Show group headers"
+                                  OnContent="On"
+                                  OffContent="Off"
+                                  IsOn="True" />
+
+                    <ToggleSwitch x:Name="showCountToggle"
+                                  Header="Show item count"
+                                  OnContent="On"
+                                  OffContent="Off"
+                                  IsOn="True" />
+
+                    <ToggleSwitch x:Name="treesInGroupsToggle"
+                                  Header="Trees inside groups"
+                                  OnContent="Rows are trees"
+                                  OffContent="Rows are flat"
+                                  IsOn="False" />
+
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="8">
+                        <Button x:Name="expandAllButton" Content="Expand all" />
+                        <Button x:Name="collapseAllButton" Content="Collapse all" />
+                    </StackPanel>
+
+                    <ToggleSwitch x:Name="columnGroupingToggle"
+                                  Header="Column grouping (banner headers)"
+                                  OnContent="On"
+                                  OffContent="Off"
+                                  IsOn="True" />
+
+                    <ToggleSwitch x:Name="collapseGroupsToggle"
+                                  Header="Collapse Prices and Risk columns"
+                                  OnContent="Collapsed"
+                                  OffContent="Expanded"
+                                  IsOn="False" />
+
+                    <InfoBar IsOpen="True"
+                             IsClosable="False"
+                             Title="Try it"
+                             Message="Click a group header row to collapse it, or a column banner to collapse that run of columns to its first one. Group headers are not data: they cannot be selected or edited, and selection steps over them." />
+                </StackPanel>
+            </controls:SamplePresenter.Options>
+
+            <controls:SamplePresenter.Xaml>
+                <x:String xml:space="preserve">
+&lt;!-- ROW grouping: bind a FLAT collection and name a property. --&gt;
+&lt;tv:TableView x:Name="grid"
+              GroupByPath="Department"
+              ShowGroupHeaders="True"
+              ShowGroupItemCount="True"
+              GroupSortDirection="Ascending"&gt;
+
+    &lt;!-- COLUMN grouping: a banner per group, matched to columns by GroupName --&gt;
+    &lt;tv:TableView.ColumnGroups&gt;
+        &lt;tv:TableViewColumnGroup Name="Prices" Header="Prices" /&gt;
+    &lt;/tv:TableView.ColumnGroups&gt;
+
+    &lt;tv:TableView.Columns&gt;
+        &lt;tv:TableViewTextColumn Header="Name" Binding="{Binding Name}" /&gt;
+        &lt;tv:TableViewNumberColumn Header="Bid" GroupName="Prices" Binding="{Binding Bid}" /&gt;
+        &lt;tv:TableViewNumberColumn Header="Ask" GroupName="Prices" Binding="{Binding Ask}" /&gt;
+    &lt;/tv:TableView.Columns&gt;
+&lt;/tv:TableView&gt;
+
+grid.ItemsSource = trades;   // a plain flat list; the grid projects the groups
+
+// Collapse and expand
+grid.SetGroupExpanded(grid.Groups[0], expanded: false);
+grid.SetAllGroupsExpanded(false);
+
+// Replace the header visual entirely if you want to
+grid.GroupHeaderTemplate = myTemplate;   // DataContext is the TableViewGroup
+                </x:String>
+            </controls:SamplePresenter.Xaml>
+        </controls:SamplePresenter>
+    </Grid>
+</Page>

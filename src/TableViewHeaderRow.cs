@@ -37,9 +37,13 @@ public partial class TableViewHeaderRow : Control
     private Rectangle? _h_gridLine;
     private StackPanel? _frozenHeadersPanel;
     private StackPanel? _scrollableHeadersPanel;
+    private StackPanel? _frozenSpannersPanel;
+    private StackPanel? _scrollableSpannersPanel;
     private Border? _columnDropIndicator;
     private RectangleGeometry? _scrollableHeadersClip;
     private TranslateTransform? _scrollableHeadersTransform;
+    private RectangleGeometry? _scrollableSpannersClip;
+    private TranslateTransform? _scrollableSpannersTransform;
     private TranslateTransform? _columnDropIndicatorTransform;
     private Image? _dragHeaderImage;
     private DispatcherTimer? _desiredWidthTimer;
@@ -49,6 +53,7 @@ public partial class TableViewHeaderRow : Control
     private int _dropColumnIndex;
     private bool _isValidDropTarget;
     private readonly Dictionary<DependencyProperty, long> _callbackTokens = [];
+    private IReadOnlyList<TableViewColumnGroupSpan> _spannerSpans = [];
 
     /// <summary>
     /// Initializes a new instance of the TableViewHeaderRow class.
@@ -75,7 +80,10 @@ public partial class TableViewHeaderRow : Control
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _frozenHeadersPanel = GetTemplateChild("FrozenHeadersPanel") as StackPanel;
         _scrollableHeadersPanel = GetTemplateChild("ScrollableHeadersPanel") as StackPanel;
+        _frozenSpannersPanel = GetTemplateChild("FrozenSpannersPanel") as StackPanel;
+        _scrollableSpannersPanel = GetTemplateChild("ScrollableSpannersPanel") as StackPanel;
         _scrollableHeadersTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
+        _scrollableSpannersTransform = null;
         _columnDropIndicator = GetTemplateChild("ColumnDropIndicator") as Border;
         _columnDropIndicatorTransform = GetTemplateChild("ColumnDropIndicatorTransform") as TranslateTransform;
         _dragHeaderImage = GetTemplateChild("DragHeaderImage") as Image;
@@ -116,8 +124,12 @@ public partial class TableViewHeaderRow : Control
         {
             // Arrange at the un-scrolled position; horizontal scroll is applied via RenderTransform in
             // ApplyHorizontalScroll so scrolling does not re-run a layout pass.
+            //
+            // The Y is the banner row's height, NOT zero: this manual Arrange overrides the Grid's row placement,
+            // so hardcoding 0 pulls the headers up over the banners and leaves their own row empty below.
             var frozenOffset = _frozenHeadersPanel.ActualOffset.X + _frozenHeadersPanel.ActualWidth;
-            _scrollableHeadersPanel.Arrange(new Rect(frozenOffset, 0, _scrollableHeadersPanel.ActualWidth, _scrollableHeadersPanel.ActualHeight));
+            var top = _scrollableSpannersPanel?.ActualHeight ?? 0;
+            _scrollableHeadersPanel.Arrange(new Rect(frozenOffset, top, _scrollableHeadersPanel.ActualWidth, _scrollableHeadersPanel.ActualHeight));
 
             ApplyHorizontalScroll();
         }
@@ -156,6 +168,30 @@ public partial class TableViewHeaderRow : Control
             _scrollableHeadersClip ??= new RectangleGeometry();
             _scrollableHeadersClip.Rect = new Rect(h, 0, Math.Max(0, _scrollableHeadersPanel.ActualWidth - h), _scrollableHeadersPanel.ActualHeight);
             _scrollableHeadersPanel.Clip = _scrollableHeadersClip;
+        }
+
+        // The banners ride the same offset — they must stay glued to the columns beneath them. Each panel needs
+        // its OWN transform and clip instance: WinUI throws E_BOUNDS if one is attached to two elements.
+        if (_scrollableSpannersPanel is { } spanners && spanners.Children.Count > 0)
+        {
+            if (_scrollableSpannersTransform is null)
+            {
+                _scrollableSpannersTransform = new TranslateTransform();
+                spanners.RenderTransform = _scrollableSpannersTransform;
+            }
+
+            _scrollableSpannersTransform.X = -h;
+
+            if (h <= 0)
+            {
+                spanners.Clip = null;
+            }
+            else
+            {
+                _scrollableSpannersClip ??= new RectangleGeometry();
+                _scrollableSpannersClip.Rect = new Rect(h, 0, Math.Max(0, spanners.ActualWidth - h), spanners.ActualHeight);
+                spanners.Clip = _scrollableSpannersClip;
+            }
         }
     }
 
@@ -215,6 +251,17 @@ public partial class TableViewHeaderRow : Control
     /// </summary>
     private void OnColumnPropertyChanged(object? sender, TableViewColumnPropertyChangedEventArgs e)
     {
+        // These four change which columns a banner covers. Visibility in particular takes the Add/RemoveHeaders
+        // path below, which never rebuilds the headers wholesale — so without this a collapse would move the
+        // columns and leave the banner above them the old width.
+        if (e.PropertyName is nameof(TableViewColumn.Visibility)
+            or nameof(TableViewColumn.Order)
+            or nameof(TableViewColumn.IsFrozen)
+            or nameof(TableViewColumn.GroupName))
+        {
+            EnsureSpanners();
+        }
+
         if (e.PropertyName is nameof(TableViewColumn.Visibility))
         {
             if (e.Column.Visibility == Visibility.Visible)
@@ -336,6 +383,10 @@ public partial class TableViewHeaderRow : Control
                 return;
             }
 
+            // Unconditionally: a group can be added or collapsed without the visible column set changing shape,
+            // and the early return below would otherwise skip the banners too.
+            EnsureSpanners();
+
             var columns = TableView.Columns.VisibleColumns;
 
             // Nothing to do when the headers already match the columns, so ordinary resizes and property changes
@@ -348,6 +399,95 @@ public partial class TableViewHeaderRow : Control
             ClearHeaders();
             AddHeaders(columns);
         });
+    }
+
+    /// <summary>
+    /// Brings the second header level in step with the columns: one banner per resolved group span, sized to the
+    /// run of columns it covers.
+    /// </summary>
+    /// <remarks>
+    /// The banner visuals are only rebuilt when the SHAPE of the spans changes; a plain resize just re-measures
+    /// them, so dragging a column border does not churn the header. With no groups defined both panels stay
+    /// empty and the Auto-height row measures to zero, leaving the header exactly as it was.
+    /// </remarks>
+    internal void EnsureSpanners()
+    {
+        if (TableView?.Columns is not TableViewColumnsCollection columns
+            || _frozenSpannersPanel is null
+            || _scrollableSpannersPanel is null)
+        {
+            return;
+        }
+
+        // No groups defined and none rendered — the overwhelmingly common case, and this runs on every
+        // header-width pass. Bail before resolving spans, which would otherwise walk and allocate per column.
+        if (TableView.ColumnGroups.Count == 0 && _spannerSpans.Count == 0)
+        {
+            return;
+        }
+
+        var spans = columns.GetColumnGroupSpans(TableView.ColumnGroups);
+
+        if (!SameSpannerShape(spans, _spannerSpans))
+        {
+            _frozenSpannersPanel.Children.Clear();
+            _scrollableSpannersPanel.Children.Clear();
+
+            // Only build anything once at least one real group exists, so an ungrouped grid pays nothing.
+            if (spans.Any(span => span.Group is not null))
+            {
+                foreach (var span in spans)
+                {
+                    var banner = new TableViewColumnGroupHeader();
+                    banner.Attach(span.Group, TableView);
+
+                    (span.IsFrozen ? _frozenSpannersPanel : _scrollableSpannersPanel).Children.Add(banner);
+                }
+            }
+
+            _spannerSpans = spans;
+        }
+
+        UpdateSpannerWidths();
+    }
+
+    private static bool SameSpannerShape(
+        IReadOnlyList<TableViewColumnGroupSpan> left,
+        IReadOnlyList<TableViewColumnGroupSpan> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < left.Count; i++)
+        {
+            if (!ReferenceEquals(left[i].Group, right[i].Group)
+                || left[i].Length != right[i].Length
+                || left[i].IsFrozen != right[i].IsFrozen)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void UpdateSpannerWidths()
+    {
+        var frozen = 0;
+        var scrollable = 0;
+
+        foreach (var span in _spannerSpans)
+        {
+            var panel = span.IsFrozen ? _frozenSpannersPanel : _scrollableSpannersPanel;
+            var index = span.IsFrozen ? frozen++ : scrollable++;
+
+            if (panel?.Children.ElementAtOrDefault(index) is TableViewColumnGroupHeader banner)
+            {
+                banner.Width = span.Columns.Sum(column => column.ActualWidth);
+            }
+        }
     }
 
     /// <summary>
@@ -472,6 +612,7 @@ public partial class TableViewHeaderRow : Control
 
             _calculatingHeaderWidths = false;
 
+            EnsureSpanners(); // banner extents are the sum of their columns' freshly settled widths
             TableView.UpdateHorizontalScrollBarMargin();
             TableView.RealizeVisibleCells(); // Column widths are now known; realize cells in view (no-op unless virtualizing).
         }

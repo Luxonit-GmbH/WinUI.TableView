@@ -59,6 +59,145 @@ public class PerformanceBenchmarks
         }, warmup: 2, iterations: 10));
     }
 
+    /// <summary>
+    /// Grouping 10k rows into 50 groups: the projection cost the consumer pays on a GroupByPath change.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grouping_Project_10kRows_50Groups()
+    {
+        var tableView = await LoadGroupingGridAsync();
+
+        Report(Measure(
+            () =>
+            {
+                tableView.GroupByPath = null;
+                tableView.GroupByPath = "Bucket"; // 50 groups over 10k rows
+                tableView.UpdateLayout();
+            },
+            warmup: 1,
+            iterations: 3),
+            "Grouping_Project_10kRows_50Groups");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// Collapsing and re-expanding one 200-row group on a live grid — the gesture a user repeats most.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grouping_CollapseExpandOneGroup_10kRows()
+    {
+        var tableView = await LoadGroupingGridAsync();
+        tableView.GroupByPath = "Bucket";
+        tableView.UpdateLayout();
+
+        var group = tableView.Groups[0];
+
+        Report(Measure(
+            () =>
+            {
+                tableView.SetGroupExpanded(group, false);
+                tableView.UpdateLayout();
+                tableView.SetGroupExpanded(group, true);
+                tableView.UpdateLayout();
+            },
+            warmup: 1,
+            iterations: 5),
+            "Grouping_CollapseExpandOneGroup_10kRows");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// The cost grouping adds to an ordinary scroll: the same horizontal pan, but over a grouped source.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grouping_HorizontalPan_100Ticks_Grouped()
+    {
+        var tableView = await LoadGroupingGridAsync();
+        tableView.GroupByPath = "Bucket";
+        tableView.UpdateLayout();
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 0; i < 100; i++)
+                {
+                    tableView.SetValue(TableView.HorizontalOffsetProperty, (double)(i * 20));
+                }
+            },
+            warmup: 2,
+            iterations: 10),
+            "Grouping_HorizontalPan_100Ticks_Grouped");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// Column grouping's cost on the header: banners must be resolved and re-measured on every width pass.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task ColumnGrouping_HeaderWidthPass_50Cols_x20()
+    {
+        var tableView = await LoadGridAsync();
+
+        for (var i = 0; i < 10; i++)
+        {
+            tableView.ColumnGroups.Add(new TableViewColumnGroup { Name = $"G{i}", Header = $"G{i}" });
+        }
+
+        for (var i = 0; i < tableView.Columns.Count; i++)
+        {
+            tableView.Columns[i].GroupName = $"G{i / 5}"; // 5 columns per banner, contiguous
+        }
+
+        tableView.UpdateLayout();
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 0; i < 20; i++)
+                {
+                    tableView.HeaderRow?.InvalidateHeaderWidths();
+                    tableView.UpdateLayout();
+                }
+            },
+            warmup: 1,
+            iterations: 5),
+            "ColumnGrouping_HeaderWidthPass_50Cols_x20");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    private static async Task<TableView> LoadGroupingGridAsync()
+    {
+        var items = new ObservableCollection<BenchItem>(Enumerable.Range(0, RowCount).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
+
+        var tableView = new TableView
+        {
+            AutoGenerateColumns = false,
+            RowHeight = 32,
+            Width = 1200,
+            Height = 600,
+        };
+
+        foreach (var column in CreateColumns(ColumnCount))
+        {
+            tableView.Columns.Add(column);
+        }
+
+        tableView.ItemsSource = items;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(tableView);
+        tableView.UpdateLayout();
+
+        return tableView;
+    }
+
     [UITestMethod]
     [TestCategory("Benchmark")]
     public void Columns_AddRange_50()
@@ -1363,6 +1502,9 @@ public class PerformanceBenchmarks
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public string Name { get; set; } = string.Empty;
+
+        /// <summary>A low-cardinality key, so grouping produces ~50 groups rather than one per row.</summary>
+        public string Bucket => $"Bucket {(int)_value % 50:D2}";
 
         public double Value
         {
