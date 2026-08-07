@@ -136,7 +136,13 @@ public partial class TableView : ListView
     /// </summary>
     private void TableView_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        TableViewTrace.Write($"TableViewSelectionChanged: AddedItems={e.AddedItems.Count}, RemovedItems={e.RemovedItems.Count}");
+        // An ISelectionInfo items source (TreeTableViewSource) takes selection bookkeeping over, and the platform
+        // then hands out args whose collections are NULL — the same reason its SelectedItems is null. Nothing here
+        // may dereference them directly, including the trace: its argument is still evaluated in a DEBUG build.
+        var addedItems = e.AddedItems ?? [];
+        var removedItems = e.RemovedItems ?? [];
+
+        TableViewTrace.Write($"TableViewSelectionChanged: AddedItems={addedItems.Count}, RemovedItems={removedItems.Count}");
 
         if (_suppressSelectionChangedCellClear)
         {
@@ -150,7 +156,7 @@ public partial class TableView : ListView
             }
             else
             {
-                var addedIndexes = e.AddedItems
+                var addedIndexes = addedItems
                     .Select(item => Items.IndexOf(item))
                     .Where(i => i >= 0);
 

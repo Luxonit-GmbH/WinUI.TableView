@@ -811,6 +811,53 @@ public partial class TreeTableViewSourceTests
     }
 
     [UITestMethod]
+    public async Task TreeSelection_SelectionChangedArgs_CollectionsAreNotDereferencedBlindly()
+    {
+        var (source, a, _) = CreateTree();
+        source.Collapse(a);
+
+        var treeTableView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            UseCollectionView = false,
+            SelectionMode = ListViewSelectionMode.Extended,
+            Width = 600,
+            Height = 400,
+        };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+
+        treeTableView.ItemsSource = source;
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        var addedWasNull = false;
+        var removedWasNull = false;
+        treeTableView.SelectionChanged += (_, e) =>
+        {
+            addedWasNull |= e.AddedItems is null;
+            removedWasNull |= e.RemovedItems is null;
+        };
+
+        // An ISelectionInfo source makes the platform hand out args with NULL collections, the same way it leaves
+        // SelectedItems null. Anything in the control that touches them must cope.
+        treeTableView.SelectAll();
+        await Task.Yield();
+        treeTableView.DeselectAll();
+        await Task.Yield();
+
+        Assert.IsTrue(addedWasNull || removedWasNull,
+            "expected the platform to hand out null selection collections for an ISelectionInfo source; "
+            + "if this ever stops being true the null guards in TableView_SelectionChanged can go");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
     public async Task TreeSelection_SelectedItems_IsPopulated_NotNull()
     {
         var (source, a, _) = CreateTree();
