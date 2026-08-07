@@ -278,6 +278,91 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
         => column.GroupName is { Length: > 0 } name && byName.TryGetValue(name, out var group) ? group : null;
 
     /// <summary>
+    /// Adjusts a drag-reorder drop so column groups survive it: a banner spans ONE run of columns, so a member
+    /// may not leave its run and an outsider may not land inside one.
+    /// </summary>
+    /// <remarks>
+    /// Constraining the drop is what keeps the invariant, rather than validating afterwards and reporting a
+    /// tree the user has already broken. Ungrouped drops that land mid-run snap to the nearer edge of it, so the
+    /// gesture still does something predictable instead of being refused.
+    /// </remarks>
+    /// <param name="groups">The defined groups.</param>
+    /// <param name="column">The column being dragged.</param>
+    /// <param name="dropIndex">The requested index within the visible columns.</param>
+    /// <returns>An index that leaves every group contiguous.</returns>
+    internal int ConstrainDropIndex(IEnumerable<TableViewColumnGroup>? groups, TableViewColumn column, int dropIndex)
+    {
+        var visible = VisibleColumns;
+
+        if (visible.Count == 0)
+        {
+            return dropIndex;
+        }
+
+        var byName = new Dictionary<string, TableViewColumnGroup>();
+
+        foreach (var group in groups ?? [])
+        {
+            if (!string.IsNullOrEmpty(group.Name))
+            {
+                byName[group.Name] = group;
+            }
+        }
+
+        if (byName.Count == 0)
+        {
+            return dropIndex;
+        }
+
+        if (ResolveGroup(column, byName) is { } dragged)
+        {
+            // A member stays inside its own run, so the banner above it keeps covering exactly its columns.
+            var first = -1;
+            var last = -1;
+
+            for (var i = 0; i < visible.Count; i++)
+            {
+                if (ReferenceEquals(ResolveGroup(visible[i], byName), dragged))
+                {
+                    if (first < 0)
+                    {
+                        first = i;
+                    }
+
+                    last = i;
+                }
+            }
+
+            return first < 0 ? dropIndex : Math.Clamp(dropIndex, first, last);
+        }
+
+        // An ungrouped column dropped between two members of the SAME group would split it in two.
+        if (dropIndex > 0 && dropIndex < visible.Count)
+        {
+            var before = ResolveGroup(visible[dropIndex - 1], byName);
+
+            if (before is not null && ReferenceEquals(before, ResolveGroup(visible[dropIndex], byName)))
+            {
+                var first = dropIndex;
+                while (first > 0 && ReferenceEquals(ResolveGroup(visible[first - 1], byName), before))
+                {
+                    first--;
+                }
+
+                var last = dropIndex;
+                while (last < visible.Count - 1 && ReferenceEquals(ResolveGroup(visible[last + 1], byName), before))
+                {
+                    last++;
+                }
+
+                return dropIndex - first <= last + 1 - dropIndex ? first : last + 1;
+            }
+        }
+
+        return dropIndex;
+    }
+
+    /// <summary>
     /// Reports the ways a set of column groups cannot be rendered, so the mistake surfaces as a message rather
     /// than as a banner drawn in the wrong place.
     /// </summary>

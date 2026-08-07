@@ -1,5 +1,8 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
@@ -146,6 +149,137 @@ public class TableViewColumnGroupTests
         // problem is reported now rather than lying in wait.
         Assert.AreEqual(1, Spans(tableView).Count, "the visible run is contiguous today");
         Assert.AreEqual(1, tableView.ValidateColumnGroups().Count, "but the arrangement is still wrong");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Reorder constraints and the frozen boundary (phase 3)
+    // ---------------------------------------------------------------------------------------------------------
+
+    [UITestMethod]
+    public void Reorder_KeepsAMemberInsideItsOwnGroup()
+    {
+        var tableView = Create(("A", null), ("Bid", "Prices"), ("Mid", "Prices"), ("Ask", "Prices"), ("Z", null));
+        AddGroup(tableView, "Prices");
+        var columns = (TableViewColumnsCollection)tableView.Columns;
+
+        // Dragging Mid (index 2) out to either end must stop at its group's run, indexes 1..3.
+        Assert.AreEqual(1, columns.ConstrainDropIndex(tableView.ColumnGroups, tableView.Columns[2], 0));
+        Assert.AreEqual(3, columns.ConstrainDropIndex(tableView.ColumnGroups, tableView.Columns[2], 4));
+        Assert.AreEqual(3, columns.ConstrainDropIndex(tableView.ColumnGroups, tableView.Columns[2], 3), "inside is fine");
+    }
+
+    [UITestMethod]
+    public void Reorder_KeepsAnOutsiderFromSplittingAGroup()
+    {
+        var tableView = Create(("A", null), ("Bid", "Prices"), ("Mid", "Prices"), ("Ask", "Prices"), ("Z", null));
+        AddGroup(tableView, "Prices");
+        var columns = (TableViewColumnsCollection)tableView.Columns;
+        var outsider = tableView.Columns[0];
+
+        // Dropping between two members would cut the banner in half; it snaps to the nearer edge of the run.
+        Assert.AreEqual(1, columns.ConstrainDropIndex(tableView.ColumnGroups, outsider, 2), "nearer the start");
+        Assert.AreEqual(4, columns.ConstrainDropIndex(tableView.ColumnGroups, outsider, 3), "nearer the end");
+        Assert.AreEqual(1, columns.ConstrainDropIndex(tableView.ColumnGroups, outsider, 1), "the boundary is allowed");
+    }
+
+    [UITestMethod]
+    public void Reorder_IsUnconstrainedWithoutGroups()
+    {
+        var tableView = Create(("A", null), ("B", null), ("C", null));
+        var columns = (TableViewColumnsCollection)tableView.Columns;
+
+        Assert.AreEqual(2, columns.ConstrainDropIndex(tableView.ColumnGroups, tableView.Columns[0], 2));
+    }
+
+    [UITestMethod]
+    public async Task FreezingOneMember_FreezesTheWholeGroup()
+    {
+        var tableView = Create(("Bid", "Prices"), ("Mid", "Prices"), ("Ask", "Prices"));
+        AddGroup(tableView, "Prices");
+        SetWidths(tableView, 100, 100, 100);
+        await LoadAsync(tableView);
+
+        // The frozen panel does not pan and the scrollable one does, so a straddling group is unrenderable.
+        // Rather than let it happen and report it, the group follows.
+        tableView.Columns[1].IsFrozen = true;
+        await SettleAsync(tableView);
+
+        Assert.IsTrue(tableView.Columns.All(column => column.IsFrozen));
+        Assert.AreEqual(0, tableView.ValidateColumnGroups().Count);
+
+        tableView.Columns[0].IsFrozen = false;
+        await SettleAsync(tableView);
+
+        Assert.IsTrue(tableView.Columns.All(column => !column.IsFrozen));
+
+        await UnloadAsync(tableView);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Keyboard and accessibility (phase 4)
+    // ---------------------------------------------------------------------------------------------------------
+
+    [UITestMethod]
+    public async Task Banner_ReportsExpandCollapseToAutomation()
+    {
+        var tableView = Create(("Bid", "Prices"), ("Ask", "Prices"));
+        var group = AddGroup(tableView, "Prices");
+        SetWidths(tableView, 100, 100);
+        await LoadAsync(tableView);
+
+        var peer = FrameworkElementAutomationPeer.CreatePeerForElement(Banners(tableView)[0]);
+        var pattern = (IExpandCollapseProvider)peer.GetPattern(PatternInterface.ExpandCollapse);
+
+        Assert.AreEqual("Prices", peer.GetName());
+        Assert.AreEqual(ExpandCollapseState.Expanded, pattern.ExpandCollapseState);
+
+        pattern.Collapse();
+        await SettleAsync(tableView);
+
+        Assert.IsTrue(group.IsCollapsed);
+        Assert.AreEqual(ExpandCollapseState.Collapsed, pattern.ExpandCollapseState);
+
+        pattern.Expand();
+        await SettleAsync(tableView);
+        Assert.IsFalse(group.IsCollapsed);
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task Banner_ThatCannotCollapse_ReportsLeafNode()
+    {
+        var tableView = Create(("Bid", "Prices"), ("Ask", "Prices"));
+        var group = AddGroup(tableView, "Prices");
+        group.IsCollapsible = false;
+        SetWidths(tableView, 100, 100);
+        await LoadAsync(tableView);
+
+        var peer = FrameworkElementAutomationPeer.CreatePeerForElement(Banners(tableView)[0]);
+
+        Assert.IsNull(peer.GetPattern(PatternInterface.ExpandCollapse),
+            "a group that can never collapse must not advertise the pattern");
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task Banner_TogglesFromTheKeyboard()
+    {
+        var tableView = Create(("Bid", "Prices"), ("Ask", "Prices"));
+        var group = AddGroup(tableView, "Prices");
+        SetWidths(tableView, 100, 100);
+        await LoadAsync(tableView);
+
+        Assert.IsTrue(Banners(tableView)[0].Toggle());
+        await SettleAsync(tableView);
+        Assert.IsTrue(group.IsCollapsed);
+
+        Assert.IsTrue(Banners(tableView)[0].Toggle());
+        await SettleAsync(tableView);
+        Assert.IsFalse(group.IsCollapsed);
+
+        await UnloadAsync(tableView);
     }
 
     // ---------------------------------------------------------------------------------------------------------

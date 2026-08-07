@@ -36,6 +36,7 @@ public partial class TableView : ListView
     private bool _contextSelectionClaimed;
     private ItemIndexRange? _listViewShiftRange; // the span the current Shift+Up/Down extension owns
     private readonly Dictionary<TableViewColumn, Visibility> _collapsedGroupVisibility = []; // restored on expand
+    private bool _syncingGroupFrozenState; // guards the cascade when a group follows one member's IsFrozen
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
     private bool _settingBaseItemsSource; // allows TableView to assign the inherited ItemsSource (otherwise guarded)
@@ -2125,6 +2126,47 @@ public partial class TableView : ListView
     /// <returns>One message per problem; empty when the groups are sound.</returns>
     public IReadOnlyList<string> ValidateColumnGroups()
         => (Columns as TableViewColumnsCollection)?.ValidateColumnGroups(ColumnGroups) ?? [];
+
+    /// <summary>
+    /// Brings the rest of a column's group with it when its frozen state changes.
+    /// </summary>
+    /// <remarks>
+    /// The frozen headers do not pan and the scrollable ones do, so a banner cannot cover both. Rather than let
+    /// the user create that state and then report it, freezing any member freezes the whole group.
+    /// </remarks>
+    internal void SyncColumnGroupFrozenState(TableViewColumn column)
+    {
+        if (_syncingGroupFrozenState
+            || column.GroupName is not { Length: > 0 } name
+            || !ColumnGroups.Any(group => group.Name == name))
+        {
+            return;
+        }
+
+        // Set synchronously so the members we are about to change cannot re-enter, but APPLY on the dispatcher:
+        // this runs from the header row's own property-changed handler, which is midway through moving headers
+        // between the frozen and scrollable panels, and changing more columns underneath it corrupts its indexes.
+        _syncingGroupFrozenState = true;
+        var frozen = column.IsFrozen;
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                foreach (var member in Columns.OfType<TableViewColumn>())
+                {
+                    if (member.GroupName == name && member.IsFrozen != frozen)
+                    {
+                        member.IsFrozen = frozen;
+                    }
+                }
+            }
+            finally
+            {
+                _syncingGroupFrozenState = false;
+            }
+        });
+    }
 
     /// <summary>
     /// Collapses a column group down to its anchor column, or expands it again.

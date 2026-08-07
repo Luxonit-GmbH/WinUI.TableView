@@ -1,6 +1,9 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using WinUI.TableView.AutomationPeers;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using System;
@@ -137,10 +140,47 @@ public partial class TableViewColumnGroupHeader : ContentControl
     {
         base.OnTapped(e);
 
-        if (Group is { IsCollapsible: true } group && _tableView is not null)
+        if (Toggle())
         {
-            _tableView.SetColumnGroupCollapsed(group, !group.IsCollapsed);
             e.Handled = true;
         }
     }
+
+    /// <inheritdoc/>
+    protected override void OnKeyDown(KeyRoutedEventArgs e)
+    {
+        base.OnKeyDown(e);
+
+        // Space and Enter are the standard "activate the focused thing" keys; Left/Right read naturally for a
+        // banner that collapses sideways, so both are accepted.
+        var wanted = e.Key switch
+        {
+            VirtualKey.Space or VirtualKey.Enter => true,
+            VirtualKey.Left => Group?.IsCollapsed is false,
+            VirtualKey.Right => Group?.IsCollapsed is true,
+            _ => false,
+        };
+
+        if (wanted && Toggle())
+        {
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// Collapses or expands the group, reporting whether anything happened.
+    /// </summary>
+    internal bool Toggle()
+    {
+        if (Group is { IsCollapsible: true } group && _tableView is not null)
+        {
+            _tableView.SetColumnGroupCollapsed(group, !group.IsCollapsed);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <inheritdoc/>
+    protected override AutomationPeer OnCreateAutomationPeer() => new TableViewColumnGroupHeaderAutomationPeer(this);
 }

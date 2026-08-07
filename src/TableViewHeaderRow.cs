@@ -254,6 +254,11 @@ public partial class TableViewHeaderRow : Control
         // These four change which columns a banner covers. Visibility in particular takes the Add/RemoveHeaders
         // path below, which never rebuilds the headers wholesale — so without this a collapse would move the
         // columns and leave the banner above them the old width.
+        if (e.PropertyName is nameof(TableViewColumn.IsFrozen) or nameof(TableViewColumn.GroupName))
+        {
+            TableView?.SyncColumnGroupFrozenState(e.Column);
+        }
+
         if (e.PropertyName is nameof(TableViewColumn.Visibility)
             or nameof(TableViewColumn.Order)
             or nameof(TableViewColumn.IsFrozen)
@@ -878,6 +883,13 @@ public partial class TableViewHeaderRow : Control
             var sourceIndex = TableView.Columns.VisibleColumnIndex(column);
             var dropIndex = sourceIndex > _dropColumnIndex ? _dropColumnIndex + 1 : _dropColumnIndex;
             dropIndex = Math.Clamp(dropIndex, 0, TableView.Columns.VisibleColumns.Count - 1);
+
+            // Keep every banner over one contiguous run: a member cannot leave its group and an outsider cannot
+            // land inside one. Applied BEFORE the event so a handler sees the index that will actually be used.
+            if (TableView.Columns is TableViewColumnsCollection columns)
+            {
+                dropIndex = columns.ConstrainDropIndex(TableView.ColumnGroups, column, dropIndex);
+            }
 
             var reorderingArgs = new TableViewColumnReorderingEventArgs(column, dropIndex);
             TableView.OnColumnReordering(reorderingArgs);

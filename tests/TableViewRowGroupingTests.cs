@@ -217,6 +217,100 @@ public class TableViewRowGroupingTests
         await UnloadAsync(tableView);
     }
 
+    // ---------------------------------------------------------------------------------------------------------
+    // Custom grouping
+    // ---------------------------------------------------------------------------------------------------------
+
+    [UITestMethod]
+    public async Task GroupingEvent_LetsTheAppOwnTheProjection()
+    {
+        var tableView = await CreateAsync(groupBy: null);
+
+        tableView.Grouping += (_, e) =>
+        {
+            // Grouped by something no property path could express.
+            var vowels = e.Items.Cast<object>().Where(item => ((Person)item).Name[0] is 'A' or 'E').ToList();
+            var rest = e.Items.Cast<object>().Except(vowels).ToList();
+
+            e.Groups = [new TableViewGroup("Vowel", vowels), new TableViewGroup("Other", rest)];
+            e.Handled = true;
+        };
+
+        tableView.RefreshGrouping();
+        await SettleAsync(tableView);
+
+        CollectionAssert.AreEqual(new[] { "Vowel", "Other" }, tableView.Groups.Select(g => g.Title).ToArray());
+        CollectionAssert.AreEqual(new[] { 2, 3 }, tableView.Groups.Select(g => g.Count).ToArray());
+        Assert.AreEqual(7, tableView.Items.Count, "two headers plus five rows");
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task GroupingEvent_IsRaisedForTheBuiltInProjectionToo()
+    {
+        var seen = 0;
+        var tableView = await CreateAsync(groupBy: "Department");
+
+        tableView.Grouping += (_, e) =>
+        {
+            seen++;
+            Assert.AreEqual("Department", e.GroupByPath);
+            Assert.AreEqual(5, e.Items.Count);
+            // Not handled: the grid falls back to its own projection.
+        };
+
+        tableView.RefreshGrouping();
+        await SettleAsync(tableView);
+
+        Assert.AreEqual(1, seen);
+        Assert.AreEqual(3, tableView.Groups.Count, "the built-in grouping still ran");
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task RefreshGrouping_KeepsCollapsedGroupsCollapsed()
+    {
+        var tableView = await CreateAsync(groupBy: "Department");
+
+        tableView.SetGroupExpanded(tableView.Groups[0], false); // collapse Engineering
+        await SettleAsync(tableView);
+        Assert.AreEqual(6, tableView.Items.Count);
+
+        tableView.RefreshGrouping();
+        await SettleAsync(tableView);
+
+        // Re-projecting must not silently re-open what the user shut.
+        Assert.IsFalse(tableView.Groups[0].IsExpanded, "Engineering is still collapsed");
+        Assert.AreEqual(6, tableView.Items.Count);
+        Assert.IsTrue(tableView.Groups[1].IsExpanded, "the others are untouched");
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task RefreshGrouping_PicksUpDataChanges()
+    {
+        var people = new ObservableCollection<Person>
+        {
+            new() { Name = "A", Department = "HR" },
+            new() { Name = "B", Department = "HR" },
+        };
+
+        var tableView = await CreateAsync(groupBy: "Department", people: people);
+        Assert.AreEqual(1, tableView.Groups.Count);
+
+        // A live mutation the grid deliberately does not watch for.
+        people[1].Department = "Legal";
+        tableView.RefreshGrouping();
+        await SettleAsync(tableView);
+
+        CollectionAssert.AreEqual(new[] { "HR", "Legal" }, tableView.Groups.Select(g => g.Title).ToArray());
+
+        await UnloadAsync(tableView);
+    }
+
     private static int[] SelectedRows(TableView tableView)
         => [.. tableView.SelectedRanges
             .SelectMany(range => Enumerable.Range(range.FirstIndex, (int)range.Length))

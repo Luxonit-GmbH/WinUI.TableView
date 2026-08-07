@@ -19,7 +19,12 @@ public sealed partial class TableViewGroup : ITableViewTreeItem, ITableViewBanne
 {
     private bool _isExpanded = true;
 
-    internal TableViewGroup(object? key, IEnumerable<object> items)
+    /// <summary>
+    /// Initializes a new group. Public so a <see cref="TableView.Grouping"/> handler can build its own.
+    /// </summary>
+    /// <param name="key">The value the members share. May be <see langword="null"/>.</param>
+    /// <param name="items">The group's members, in the order they should appear.</param>
+    public TableViewGroup(object? key, IEnumerable<object> items)
     {
         Key = key;
         Items = [.. items];

@@ -105,9 +105,37 @@ public partial class TableView
     public IReadOnlyList<TableViewGroup> Groups { get; private set; } = [];
 
     /// <summary>
+    /// Occurs before the items are projected into groups. Set
+    /// <see cref="TableViewGroupingEventArgs.Groups"/> and Handled to group them yourself.
+    /// </summary>
+    /// <remarks>
+    /// The grid cannot tell when a live source needs re-grouping — at thousands of mutations a second any
+    /// automatic invalidation would either miss changes or thrash — so the app owns that decision and calls
+    /// <see cref="RefreshGrouping"/>.
+    /// </remarks>
+    public event EventHandler<TableViewGroupingEventArgs>? Grouping;
+
+    /// <summary>
+    /// Raises the <see cref="Grouping"/> event.
+    /// </summary>
+    /// <param name="args">The event data.</param>
+    protected virtual void OnGrouping(TableViewGroupingEventArgs args) => Grouping?.Invoke(this, args);
+
+    /// <summary>
+    /// Re-projects the items into groups, preserving each group's expanded state by
+    /// <see cref="TableViewGroup.Key"/>.
+    /// </summary>
+    /// <remarks>Call after the data changes in a way that should change the grouping.</remarks>
+    public void RefreshGrouping() => RebuildGrouping();
+
+    /// <summary>
     /// Gets whether rows are currently being presented in groups.
     /// </summary>
-    internal bool IsGrouping => !string.IsNullOrWhiteSpace(GroupByPath) && ShowGroupHeaders;
+    /// <remarks>
+    /// A <see cref="Grouping"/> handler counts as grouping even with no <see cref="GroupByPath"/> set — it may
+    /// group by something no property path could express.
+    /// </remarks>
+    internal bool IsGrouping => ShowGroupHeaders && (!string.IsNullOrWhiteSpace(GroupByPath) || Grouping is not null);
 
     private static void OnGroupingChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
@@ -173,6 +201,23 @@ public partial class TableView
     /// </summary>
     private IEnumerable? BuildGroupedSource(IEnumerable? source)
     {
+        // Remember what was collapsed BEFORE the old groups go away, so a refresh does not silently re-open
+        // everything the user had shut. Keyed by group key, which is what survives a re-projection.
+        var collapsed = new HashSet<object>();
+        var nullKeyCollapsed = false;
+
+        foreach (var group in Groups.Where(group => !group.IsExpanded))
+        {
+            if (group.Key is { } key)
+            {
+                collapsed.Add(key);
+            }
+            else
+            {
+                nullKeyCollapsed = true;
+            }
+        }
+
         _groupedSource?.Dispose();
         _groupedSource = null;
         Groups = [];
@@ -182,6 +227,20 @@ public partial class TableView
             return source;
         }
 
+        var items = source.OfType<object>().ToList();
+        var args = new TableViewGroupingEventArgs(items, GroupByPath);
+        OnGrouping(args);
+
+        if (args.Handled)
+        {
+            return FinishGrouping([.. args.Groups ?? []], collapsed, nullKeyCollapsed);
+        }
+
+        if (string.IsNullOrWhiteSpace(GroupByPath))
+        {
+            return source; // a handler was subscribed but declined, and there is no path to fall back on
+        }
+
         var path = GroupByPath!;
         var ordered = new List<TableViewGroup>();
         var byKey = new Dictionary<object, TableViewGroup>();
@@ -189,7 +248,7 @@ public partial class TableView
         var index = new Dictionary<object, int>();
         var nullBucket = -1;
 
-        foreach (var item in source.OfType<object>())
+        foreach (var item in items)
         {
             // Resolved per item rather than once: the source may hold more than one type, and a compiled getter
             // is bound to the type it was built for.
@@ -224,14 +283,31 @@ public partial class TableView
             _ => buckets,
         };
 
-        foreach (var (key, items) in sorted)
+        foreach (var (key, members) in sorted)
         {
-            ordered.Add(new TableViewGroup(key, items));
+            ordered.Add(new TableViewGroup(key, members));
         }
 
-        Groups = ordered;
+        return FinishGrouping(ordered, collapsed, nullKeyCollapsed);
+    }
 
-        var roots = new ObservableCollection<ITableViewTreeItem>(ordered);
+    /// <summary>
+    /// Restores expansion state and wraps the groups in the tree adapter.
+    /// </summary>
+    /// <remarks>
+    /// Expansion is applied BEFORE the adapter is built: it flattens by reading IsExpanded, so a group marked
+    /// collapsed afterwards would have already had its members spliced in.
+    /// </remarks>
+    private IEnumerable FinishGrouping(List<TableViewGroup> groups, HashSet<object> collapsed, bool nullKeyCollapsed)
+    {
+        foreach (var group in groups)
+        {
+            group.IsExpanded = group.Key is { } key ? !collapsed.Contains(key) : !nullKeyCollapsed;
+        }
+
+        Groups = groups;
+
+        var roots = new ObservableCollection<ITableViewTreeItem>(groups);
         _groupedSource = new TreeTableViewSource(roots);
         return _groupedSource;
     }
