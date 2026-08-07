@@ -91,7 +91,7 @@ propagates, so an unhandled data bug cannot pass silently. Safe to handle becaus
 it mutates — the tree is untouched and the grid stays usable. Not raised for mutations the app makes to its own
 children collections; those throw back to the caller, where the app can catch them directly.
 
-### 2. Row grouping over `TreeTableViewSource` — 3–5 days
+### 2. Row grouping over `TreeTableViewSource` — **DONE 2026-08-07**
 
 Do not port #340. Build grouping as a projection over the adapter we already have: a group is a parent node
 whose children are its members. This reuses the treap index math, the bulk-change coalescing, `ISelectionInfo`
@@ -127,6 +127,51 @@ Two parts, in this order:
 `TableViewRowPresenter.ArrangeOverride` is the thing to watch: it arranges `_rootPanel` at a hardcoded y=0 and
 the cells/details panels at explicit rects, so a banner has to replace that layout for the row rather than being
 added alongside it. #340 hit exactly this and its band would have been drawn over.
+
+#### Progress
+
+**Done 2026-08-07** — `TableView.Grouping.cs`, `Grouping/TableViewGroup.cs`, `ITableViewBannerItem`,
+`Controls/TableViewGroupHeader`, `EventArgs/TableViewGroupingEventArgs`. 22 tests in
+`TableViewRowGroupingTests` plus `TableViewBannerRowTests`, and a `GroupingPage` demo covering both kinds of
+grouping, trees inside groups, and the custom-grouping event.
+
+Shipped as designed: a flat source plus `GroupByPath`, projected into `TableViewGroup` nodes handed to
+`TreeTableViewSource`. Public surface is `GroupByPath`, `ShowGroupHeaders`, `ShowGroupItemCount`,
+`GroupSortDirection`, `GroupHeaderTemplate`, `Groups`, `SetGroupExpanded`, `SetAllGroupsExpanded`,
+`RefreshGrouping`, and the `Grouping` event.
+
+Decisions that differ from, or sharpen, the design above:
+
+- **Snapshot semantics, as recommended.** Nothing re-groups by itself; `RefreshGrouping()` is the app's explicit
+  re-projection. At 8000 mutations a second any automatic invalidation would either miss changes or thrash.
+- **Multi-level.** `GroupByPath` is comma-separated (`"Department,Currency"`). Nesting cost nothing structurally
+  — a group is a tree node, so groups inside groups are the same mechanism — but collapse state has to be
+  preserved by the **chain** of keys from the root, not by the key alone: `"EUR"` under two departments is two
+  different groups. `GroupIdentity` joins the chain with U+001F, which cannot occur in a rendered key.
+- **`Grouping` event**, matching the sorting and filtering escape hatches: set `Groups` and `Handled` to own the
+  projection. A handler that declines with no `GroupByPath` to fall back on leaves the rows ungrouped rather
+  than emptying the grid.
+- **Banner rows are their own capability.** `ITableViewBannerItem` marks a row as full-width content;
+  `TableViewGroup` implements it *and* `ITableViewTreeItem`. `IsSelectableItem` is enforced once and consulted
+  by `SelectAll`, `SelectAllCells`, the ranges-to-slots expansion, keyboard navigation, the drag rectangle and
+  `ApplyContextRequestSelection`, rather than #340's scattered early-returns.
+
+Three traps worth remembering, all caught by tests or by the user rather than by review:
+
+- **`ArrangeOverride` beat `Grid.Row`.** The header row hand-arranged its headers panel at y=0, so the new
+  banner row was drawn over. Four structural rendering tests passed against the broken layout because they
+  checked parentage and order, not position; the test that catches it compares *transformed Y*.
+- **A compiled value getter is bound to one runtime type.** `TableViewColumn` cached a single delegate per
+  column, and a grouped source holds two types — group headers and rows — so the second one through threw
+  `InvalidCastException`. Now keyed by type. The first A/B "passed" wrongly because the fixture's header type
+  had no `Name` property; the bug only bites when both types declare it.
+- **`PrepareContainerForItemOverride` runs before the template applies**, so switching a row to banner
+  presentation from there did nothing — the presenter was still null. Driven from the presenter's
+  `OnApplyTemplate` and `OnContentChanged` instead. Third time this ordering has bitten this control.
+
+Performance: the ungrouped path early-outs before any projection, so a grid with no `GroupByPath` does what it
+did before. Grouping costs one projection per build, and the benchmark deltas sat inside this box's noise floor
+(median 16% run to run on identical code).
 
 ### 3. Collapsible spanner headers — 4–6 days
 
@@ -243,8 +288,22 @@ exist throws `COMException` at load, not at build (`TableViewGridLinesBrush` did
 rather than a wholesale rebuild, so `EnsureSpanners` has to be driven from `OnColumnPropertyChanged` directly or
 a collapse moves the columns and leaves the banner at its old width.
 
-**Not yet done:** phase 3 (reorder constraints, frozen-boundary enforcement) and phase 4 (UIA, keyboard).
-`ValidateColumnGroups()` reports a straddling group but nothing prevents one.
+**Phases 3 and 4 done 2026-08-07** (30 tests), which completes the item:
+
+- **Reorder constraints.** `TableViewColumnsCollection.ConstrainDropIndex(groups, column, dropIndex)` snaps a
+  drop to the nearest edge of whatever group it landed inside, so a drag can move a column within its own group
+  or past a group entirely, but never into the middle of a foreign one. `TableViewHeaderRow.ColumnDropCompleted`
+  routes through it, so the constraint applies to the real drag path rather than to an API only tests call.
+- **Frozen-boundary enforcement.** `SyncColumnGroupFrozenState` makes a group follow the member the user just
+  changed, as the plan recommended. It must be applied on the dispatcher, not inline: doing it synchronously
+  from `OnColumnPropertyChanged` reorders headers while a header move is still in flight and throws
+  `ArgumentOutOfRangeException` from `InsertHeader`. The re-entrancy guard is still set synchronously, or the
+  cascade re-enters before the queued work runs.
+- **Keyboard.** Space/Enter toggle a banner; Left collapses an expanded group and Right expands a collapsed one,
+  matching TreeView. Keys that do not apply are left unhandled so they still reach the grid.
+- **UIA.** `TableViewColumnGroupHeaderAutomationPeer` exposes `IExpandCollapseProvider`, but only when the group
+  is actually collapsible — advertising the pattern on a fixed banner would tell a screen reader it can do
+  something that silently does nothing.
 
 ### 4. ListView-style hotkeys, reimplemented — **DONE 2026-08-03**
 
@@ -279,9 +338,12 @@ We have no equivalent, and it is a real gap for filtered trees.
 | 2026-08-03 | Merge none of #341 / #340 / #251. Harvest ideas; reimplement the hotkeys. |
 | 2026-08-03 | "Group columns" means collapsible spanner headers, not a group-by box. |
 | 2026-08-03 | Item 3 API agreed: `TableViewColumn.GroupName` + `TableView.ColumnGroups`, collapse keeping one anchor column visible. Phase 1 cleared to start. |
+| 2026-08-07 | Row grouping takes #340's *shape* — flat source plus `GroupByPath`, banner header rows — over #340's implementation, and is built on the tree adapter so trees can live inside groups. |
+| 2026-08-07 | Grouping is snapshot semantics: `RefreshGrouping()` is the app's call. Re-keying live at 8000 mutations/sec is not on the table. |
+| 2026-08-07 | Grouping the grid cannot express as a property path is handled by the `Grouping` event, matching sorting and filtering, rather than by widening `GroupByPath`. |
 
-Still to settle, at the point each item starts rather than now: item 2's re-keying semantics and the
-one-group-per-row constraint (see that section).
+One-group-per-row still stands as a constraint: the adapter rejects duplicate instances by design, so an item
+cannot appear under two groups at once.
 
 ## Appendix: right-click selection
 

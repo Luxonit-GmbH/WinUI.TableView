@@ -19,6 +19,9 @@ namespace WinUI.TableView;
 /// </remarks>
 public partial class TableView
 {
+    /// <summary>Separates key-chain segments; it cannot occur in a rendered key, so chains never collide.</summary>
+    private const char SeparatorChar = '\u001F';
+
     private IEnumerable? _ungroupedSource;
     private TreeTableViewSource? _groupedSource;
 
@@ -55,11 +58,24 @@ public partial class TableView
     /// <summary>
     /// Gets or sets the property path to group rows by. <see langword="null"/> or empty means no grouping.
     /// </summary>
+    /// <remarks>
+    /// Comma-separate paths to nest: <c>GroupByPath="Department,Currency"</c> groups by department, then by
+    /// currency within each. Nesting costs nothing extra structurally — a group is a tree node, so a group's
+    /// members being groups is the same mechanism.
+    /// </remarks>
     public string? GroupByPath
     {
         get => (string?)GetValue(GroupByPathProperty);
         set => SetValue(GroupByPathProperty, value);
     }
+
+    /// <summary>
+    /// Splits <see cref="GroupByPath"/> into its levels.
+    /// </summary>
+    private string[] GroupByPaths =>
+        GroupByPath is { Length: > 0 } path
+            ? [.. path.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)]
+            : [];
 
     /// <summary>
     /// Gets or sets whether group header rows are shown. When <see langword="false"/> the rows are presented flat,
@@ -176,9 +192,27 @@ public partial class TableView
     /// <param name="expanded"><see langword="true"/> to expand all.</param>
     public void SetAllGroupsExpanded(bool expanded)
     {
-        foreach (var group in Groups)
+        // Depth-first when expanding so a parent opens before its children are reachable; the reverse when
+        // collapsing, since collapsing a parent removes its descendants from the flat view first.
+        foreach (var group in expanded ? AllGroups(Groups) : AllGroups(Groups).Reverse())
         {
             SetGroupExpanded(group, expanded);
+        }
+    }
+
+    /// <summary>
+    /// Every group at every level, parents before children.
+    /// </summary>
+    private static IEnumerable<TableViewGroup> AllGroups(IEnumerable<TableViewGroup> groups)
+    {
+        foreach (var group in groups)
+        {
+            yield return group;
+
+            foreach (var nested in AllGroups(group.Items.OfType<TableViewGroup>()))
+            {
+                yield return nested;
+            }
         }
     }
 
@@ -202,21 +236,11 @@ public partial class TableView
     private IEnumerable? BuildGroupedSource(IEnumerable? source)
     {
         // Remember what was collapsed BEFORE the old groups go away, so a refresh does not silently re-open
-        // everything the user had shut. Keyed by group key, which is what survives a re-projection.
-        var collapsed = new HashSet<object>();
-        var nullKeyCollapsed = false;
-
-        foreach (var group in Groups.Where(group => !group.IsExpanded))
-        {
-            if (group.Key is { } key)
-            {
-                collapsed.Add(key);
-            }
-            else
-            {
-                nullKeyCollapsed = true;
-            }
-        }
+        // everything the user had shut. Identified by the CHAIN of keys from the root, not the key alone: the
+        // same key can appear under different parents ("EUR" beneath two departments) and those are not the
+        // same group.
+        var collapsed = new HashSet<string>();
+        CaptureCollapsed(Groups, string.Empty, collapsed);
 
         _groupedSource?.Dispose();
         _groupedSource = null;
@@ -233,17 +257,53 @@ public partial class TableView
 
         if (args.Handled)
         {
-            return FinishGrouping([.. args.Groups ?? []], collapsed, nullKeyCollapsed);
+            return FinishGrouping([.. args.Groups ?? []], collapsed);
         }
 
-        if (string.IsNullOrWhiteSpace(GroupByPath))
+        var paths = GroupByPaths;
+
+        if (paths.Length == 0)
         {
             return source; // a handler was subscribed but declined, and there is no path to fall back on
         }
 
-        var path = GroupByPath!;
-        var ordered = new List<TableViewGroup>();
-        var byKey = new Dictionary<object, TableViewGroup>();
+        return FinishGrouping(BuildGroups(items, paths, 0), collapsed);
+    }
+
+    /// <summary>
+    /// Records the key-chain of every collapsed group, at any level.
+    /// </summary>
+    private static void CaptureCollapsed(IEnumerable<TableViewGroup> groups, string prefix, HashSet<string> collapsed)
+    {
+        foreach (var group in groups)
+        {
+            var id = GroupIdentity(prefix, group);
+
+            if (!group.IsExpanded)
+            {
+                collapsed.Add(id);
+            }
+
+            CaptureCollapsed(group.Items.OfType<TableViewGroup>(), id, collapsed);
+        }
+    }
+
+    /// <summary>
+    /// A group's identity across a re-projection: its key chain from the root. The unit separator cannot appear
+    /// in a rendered key, so two different chains can never collide.
+    /// </summary>
+    private static string GroupIdentity(string prefix, TableViewGroup group)
+        => prefix + (group.Key?.ToString() ?? string.Empty) + SeparatorChar;
+
+    /// <summary>
+    /// Buckets items by one path level, recursing for the next.
+    /// </summary>
+    /// <remarks>
+    /// Recursion is bounded by the number of comma-separated paths, so there is no runaway case to guard.
+    /// </remarks>
+    private List<TableViewGroup> BuildGroups(List<object> items, string[] paths, int level)
+    {
+        var path = paths[level];
         var buckets = new List<(object? Key, List<object> Items)>();
         var index = new Dictionary<object, int>();
         var nullBucket = -1;
@@ -283,12 +343,19 @@ public partial class TableView
             _ => buckets,
         };
 
+        var ordered = new List<TableViewGroup>();
+
         foreach (var (key, members) in sorted)
         {
-            ordered.Add(new TableViewGroup(key, members));
+            // The next level down produces groups; the last produces the rows themselves.
+            var children = level + 1 < paths.Length
+                ? BuildGroups(members, paths, level + 1).Cast<object>().ToList()
+                : members;
+
+            ordered.Add(new TableViewGroup(key, children, level));
         }
 
-        return FinishGrouping(ordered, collapsed, nullKeyCollapsed);
+        return ordered;
     }
 
     /// <summary>
@@ -298,18 +365,29 @@ public partial class TableView
     /// Expansion is applied BEFORE the adapter is built: it flattens by reading IsExpanded, so a group marked
     /// collapsed afterwards would have already had its members spliced in.
     /// </remarks>
-    private IEnumerable FinishGrouping(List<TableViewGroup> groups, HashSet<object> collapsed, bool nullKeyCollapsed)
+    private IEnumerable FinishGrouping(List<TableViewGroup> groups, HashSet<string> collapsed)
     {
-        foreach (var group in groups)
-        {
-            group.IsExpanded = group.Key is { } key ? !collapsed.Contains(key) : !nullKeyCollapsed;
-        }
+        RestoreCollapsed(groups, string.Empty, collapsed);
 
         Groups = groups;
 
         var roots = new ObservableCollection<ITableViewTreeItem>(groups);
         _groupedSource = new TreeTableViewSource(roots);
         return _groupedSource;
+    }
+
+    /// <summary>
+    /// Re-applies remembered collapse state at every level.
+    /// </summary>
+    private static void RestoreCollapsed(IEnumerable<TableViewGroup> groups, string prefix, HashSet<string> collapsed)
+    {
+        foreach (var group in groups)
+        {
+            var id = GroupIdentity(prefix, group);
+            group.IsExpanded = !collapsed.Contains(id);
+
+            RestoreCollapsed(group.Items.OfType<TableViewGroup>(), id, collapsed);
+        }
     }
 
     /// <summary>

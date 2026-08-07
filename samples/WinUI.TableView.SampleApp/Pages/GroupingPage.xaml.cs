@@ -14,6 +14,7 @@ public sealed partial class GroupingPage : Page
     private static readonly string[] Currencies = ["EUR", "USD", "GBP", "JPY"];
 
     private readonly List<TableViewColumnGroup> _columnGroups = [];
+    private bool _customGrouping;
 
     public GroupingPage()
     {
@@ -33,6 +34,7 @@ public sealed partial class GroupingPage : Page
         expandAllButton.Click += (_, _) => grid.SetAllGroupsExpanded(true);
         collapseAllButton.Click += (_, _) => grid.SetAllGroupsExpanded(false);
         treesInGroupsToggle.Toggled += (_, _) => ApplySource();
+        grid.Grouping += OnGrouping;
 
         ApplyGroupBy();
     }
@@ -50,8 +52,49 @@ public sealed partial class GroupingPage : Page
             : new ObservableCollection<object>(trades);
     }
 
+    /// <summary>
+    /// "#custom" hands the projection to the Grouping event below; everything else is a property path, and a
+    /// comma-separated one nests.
+    /// </summary>
     private void ApplyGroupBy()
-        => grid.GroupByPath = (groupByCombo.SelectedItem as ComboBoxItem)?.Tag as string;
+    {
+        var tag = (groupByCombo.SelectedItem as ComboBoxItem)?.Tag as string;
+
+        _customGrouping = tag == "#custom";
+        grid.GroupByPath = _customGrouping ? null : tag;
+        grid.RefreshGrouping();
+    }
+
+    /// <summary>
+    /// Grouping the grid could not express as a property path: price bands computed from the data. Handling the
+    /// event means owning the whole projection, order included — GroupSortDirection is not applied on top.
+    /// </summary>
+    private void OnGrouping(object? sender, TableViewGroupingEventArgs e)
+    {
+        if (!_customGrouping)
+        {
+            return; // leave it unhandled and the built-in projection runs
+        }
+
+        // Read Mid off whichever shape the source is currently in — the trees toggle swaps it underneath us.
+        e.Groups = [.. e.Items
+            .GroupBy(item => MidOf(item) switch
+            {
+                < 75 => "Under 75",
+                < 125 => "75 to 125",
+                _ => "125 and over",
+            })
+            .Select(band => new TableViewGroup(band.Key, band))];
+
+        e.Handled = true;
+    }
+
+    private static double MidOf(object item) => item switch
+    {
+        TradeRow row => row.Mid,
+        TradeNode node => node.Mid,
+        _ => 0,
+    };
 
     private void ApplyGroupSort()
         => grid.GroupSortDirection = (groupSortCombo.SelectedItem as ComboBoxItem)?.Tag as string switch

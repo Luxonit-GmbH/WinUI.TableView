@@ -218,6 +218,96 @@ public class TableViewRowGroupingTests
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Multi-level grouping
+    // ---------------------------------------------------------------------------------------------------------
+
+    [UITestMethod]
+    public async Task GroupByPath_CommaSeparated_NestsTheGroups()
+    {
+        var tableView = await CreateAsync(groupBy: "Department,Name");
+
+        // Engineering holds two people, so it nests two sub-groups rather than two rows.
+        var engineering = tableView.Groups[0];
+        Assert.AreEqual("Engineering", engineering.Title);
+        Assert.AreEqual(0, engineering.Depth);
+        Assert.AreEqual(2, engineering.Items.Count);
+        Assert.IsTrue(engineering.Items.All(item => item is TableViewGroup));
+
+        var alice = (TableViewGroup)engineering.Items[0];
+        Assert.AreEqual("Alice", alice.Title);
+        Assert.AreEqual(1, alice.Depth, "the child level indents one further");
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task NestedGroups_CountTheirLeaves_NotTheirSubGroups()
+    {
+        var tableView = await CreateAsync(groupBy: "Department,Name");
+
+        // "(2)" on Engineering must mean two people, not two sub-groups that happen to number two.
+        Assert.AreEqual(2, tableView.Groups[0].Count);
+        Assert.AreEqual(1, tableView.Groups[1].Count, "Finance has one person");
+    }
+
+    [UITestMethod]
+    public async Task NestedGroups_CollapseIndependently()
+    {
+        var tableView = await CreateAsync(groupBy: "Department,Name");
+        var flatWhenOpen = tableView.Items.Count;
+
+        var alice = (TableViewGroup)tableView.Groups[0].Items[0];
+        tableView.SetGroupExpanded(alice, false);
+        await SettleAsync(tableView);
+
+        Assert.AreEqual(flatWhenOpen - 1, tableView.Items.Count, "only Alice's own row went away");
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task RefreshGrouping_TellsNestedGroupsApart_ByTheirKeyChain()
+    {
+        // Two departments each containing a "Shared" name: collapsing one must not collapse the other.
+        var people = new ObservableCollection<Person>
+        {
+            new() { Name = "Shared", Department = "HR" },
+            new() { Name = "Shared", Department = "Legal" },
+        };
+
+        var tableView = await CreateAsync(groupBy: "Department,Name", people: people);
+
+        var underHr = (TableViewGroup)tableView.Groups[0].Items[0];
+        tableView.SetGroupExpanded(underHr, false);
+        await SettleAsync(tableView);
+
+        tableView.RefreshGrouping();
+        await SettleAsync(tableView);
+
+        Assert.IsFalse(((TableViewGroup)tableView.Groups[0].Items[0]).IsExpanded, "HR/Shared stays collapsed");
+        Assert.IsTrue(((TableViewGroup)tableView.Groups[1].Items[0]).IsExpanded,
+            "Legal/Shared has the same key but is a different group");
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task SetAllGroupsExpanded_ReachesNestedGroups()
+    {
+        var tableView = await CreateAsync(groupBy: "Department,Name");
+
+        tableView.SetAllGroupsExpanded(false);
+        await SettleAsync(tableView);
+        Assert.AreEqual(3, tableView.Items.Count, "only the three department headers remain");
+
+        tableView.SetAllGroupsExpanded(true);
+        await SettleAsync(tableView);
+        Assert.AreEqual(13, tableView.Items.Count, "3 departments + 5 names + 5 rows");
+
+        await UnloadAsync(tableView);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Custom grouping
     // ---------------------------------------------------------------------------------------------------------
 
@@ -265,6 +355,24 @@ public class TableViewRowGroupingTests
 
         Assert.AreEqual(1, seen);
         Assert.AreEqual(3, tableView.Groups.Count, "the built-in grouping still ran");
+
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    public async Task GroupingEvent_Declined_WithNoPath_LeavesTheRowsUngrouped()
+    {
+        // A handler stays subscribed but only groups for some of the app's modes. Declining with nothing to fall
+        // back on must present the source untouched, not an empty grid.
+        var tableView = await CreateAsync(groupBy: null);
+
+        tableView.Grouping += (_, _) => { };
+
+        tableView.RefreshGrouping();
+        await SettleAsync(tableView);
+
+        Assert.AreEqual(0, tableView.Groups.Count);
+        Assert.AreEqual(5, tableView.Items.Count, "every row, no headers");
 
         await UnloadAsync(tableView);
     }

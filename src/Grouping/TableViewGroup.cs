@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Linq;
 
 namespace WinUI.TableView;
 
@@ -23,11 +24,17 @@ public sealed partial class TableViewGroup : ITableViewTreeItem, ITableViewBanne
     /// Initializes a new group. Public so a <see cref="TableView.Grouping"/> handler can build its own.
     /// </summary>
     /// <param name="key">The value the members share. May be <see langword="null"/>.</param>
-    /// <param name="items">The group's members, in the order they should appear.</param>
-    public TableViewGroup(object? key, IEnumerable<object> items)
+    /// <param name="items">
+    /// The group's members, in the order they should appear. They may themselves be
+    /// <see cref="TableViewGroup"/> instances, which is what makes grouping multi-level: a group is a tree node,
+    /// so nesting needs no separate mechanism.
+    /// </param>
+    /// <param name="depth">How deep this group sits, so a tree column indents it correctly. Roots are 0.</param>
+    public TableViewGroup(object? key, IEnumerable<object> items, int depth = 0)
     {
         Key = key;
         Items = [.. items];
+        Depth = depth;
     }
 
     /// <inheritdoc/>
@@ -44,9 +51,13 @@ public sealed partial class TableViewGroup : ITableViewTreeItem, ITableViewBanne
     public ObservableCollection<object> Items { get; }
 
     /// <summary>
-    /// Gets how many rows the group holds.
+    /// Gets how many DATA rows the group holds, counting through any nested groups.
     /// </summary>
-    public int Count => Items.Count;
+    /// <remarks>
+    /// A parent in a multi-level grouping reports the leaves beneath it, not its number of sub-groups — "(12)"
+    /// on a department should mean twelve people, however many currencies they are split across.
+    /// </remarks>
+    public int Count => Items.Sum(item => item is TableViewGroup nested ? nested.Count : 1);
 
     /// <summary>
     /// Gets the text shown in the header — the key, or "(none)" when it is null.
@@ -58,7 +69,7 @@ public sealed partial class TableViewGroup : ITableViewTreeItem, ITableViewBanne
     public object? BannerContent => this;
 
     /// <inheritdoc/>
-    public int Depth => 0;
+    public int Depth { get; }
 
     /// <inheritdoc/>
     public IEnumerable? ChildrenSource => Items;

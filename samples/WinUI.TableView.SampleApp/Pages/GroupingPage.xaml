@@ -73,6 +73,8 @@
                               HorizontalAlignment="Stretch">
                         <ComboBoxItem Content="Department" Tag="Department" />
                         <ComboBoxItem Content="Currency" Tag="Currency" />
+                        <ComboBoxItem Content="Department, then Currency" Tag="Department,Currency" />
+                        <ComboBoxItem Content="Custom (Grouping event)" Tag="#custom" />
                         <ComboBoxItem Content="(none)" />
                     </ComboBox>
 
