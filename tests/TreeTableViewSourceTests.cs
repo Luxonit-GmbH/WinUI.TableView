@@ -1019,6 +1019,166 @@ public partial class TreeTableViewSourceTests
         Assert.ThrowsExactly<InvalidOperationException>(() => bChildren.Add(a1));
     }
 
+    [UITestMethod]
+    public async Task ExpandFailure_RaisesError_AndIsSwallowedWhenHandled()
+    {
+        var (treeTableView, source, offender) = await CreateGridWithBadExpandAsync();
+
+        TreeTableViewErrorEventArgs? captured = null;
+        treeTableView.Error += (_, e) =>
+        {
+            captured = e;
+            e.Handled = true;
+        };
+
+        // A chevron click on malformed data must not take the app down.
+        treeTableView.RequestExpandCollapse(offender, expand: true);
+        await Task.Yield();
+
+        Assert.IsNotNull(captured);
+        Assert.AreSame(offender, captured!.Item);
+        Assert.IsTrue(captured.Expanding);
+        Assert.IsInstanceOfType(captured.Exception, typeof(InvalidOperationException));
+
+        // Validation runs before any mutation, so the grid is untouched and still usable.
+        Assert.IsFalse(offender.IsExpanded);
+        Assert.AreEqual(2, source.Count);
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public async Task ExpandFailure_StillThrows_WhenNobodyHandlesIt()
+    {
+        var (treeTableView, _, offender) = await CreateGridWithBadExpandAsync();
+
+        // Default stays loud: an unhandled data bug must not disappear.
+        Assert.ThrowsExactly<InvalidOperationException>(
+            () => treeTableView.RequestExpandCollapse(offender, expand: true));
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    [UITestMethod]
+    public async Task ExpandFailure_RaisesError_ButDoesNotSwallowUnlessAsked()
+    {
+        var (treeTableView, _, offender) = await CreateGridWithBadExpandAsync();
+
+        var raised = 0;
+        treeTableView.Error += (_, _) => raised++; // observes without handling
+
+        Assert.ThrowsExactly<InvalidOperationException>(
+            () => treeTableView.RequestExpandCollapse(offender, expand: true));
+        Assert.AreEqual(1, raised, "the handler still gets to see it before it propagates");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(treeTableView);
+    }
+
+    /// <summary>
+    /// A two-row grid where expanding "B" would introduce a duplicate of a row already visible.
+    /// </summary>
+    private static async Task<(TreeTableView Grid, TreeTableViewSource Source, Node Offender)> CreateGridWithBadExpandAsync()
+    {
+        var shared = new Node("Shared", 0);
+        var offender = new Node("B", 0);
+        var roots = new ObservableCollection<ITableViewTreeItem> { shared, offender };
+        var source = new TreeTableViewSource(roots);
+
+        offender.SetChildren(new ObservableCollection<ITableViewTreeItem> { shared });
+
+        var treeTableView = new TreeTableView
+        {
+            AutoGenerateColumns = false,
+            UseCollectionView = false,
+            Width = 600,
+            Height = 400,
+        };
+        treeTableView.Columns.Add(new TableViewTreeColumn
+        {
+            Header = "Name",
+            Width = new GridLength(250, GridUnitType.Pixel),
+            Binding = new Binding { Path = new PropertyPath(nameof(Node.Name)) },
+        });
+        treeTableView.ItemsSource = source;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(treeTableView);
+        treeTableView.UpdateLayout();
+
+        return (treeTableView, source, offender);
+    }
+
+    [TestMethod]
+    public void ChainDeeperThanMaxDepth_ThrowsBeforeAnythingIsSpliced()
+    {
+        // Start empty so MaxDepth is in force before the deep chain arrives — an object initialiser would run
+        // after the constructor had already flattened it.
+        var roots = new ObservableCollection<ITableViewTreeItem>();
+        var source = new TreeTableViewSource(roots) { MaxDepth = 8 };
+
+        var error = Assert.ThrowsExactly<InvalidOperationException>(() => roots.Add(BuildChain(40)));
+
+        StringAssert.Contains(error.Message, "MaxDepth");
+        Assert.AreEqual(0, source.Count, "nothing was spliced");
+    }
+
+    [TestMethod]
+    public void DepthWithinTheCap_IsAccepted()
+    {
+        var source = new TreeTableViewSource(
+            new ObservableCollection<ITableViewTreeItem> { BuildChain(40) });
+
+        Assert.AreEqual(40, source.Count, "every level of the chain is flattened");
+    }
+
+    [TestMethod]
+    public void DepthIsMeasuredFromTheROOT_NotFromTheInsertedSubtree()
+    {
+        // The real hazard: a tree deepened one Expand at a time. Each individual expand only walks one level, so
+        // a guard that measured the inserted subtree alone would never fire — and the eventual collapse, which
+        // recurses the WHOLE expanded chain, is what overflows the stack.
+        var root = new Node("L0", 0);
+        var roots = new ObservableCollection<ITableViewTreeItem> { root };
+        var source = new TreeTableViewSource(roots) { MaxDepth = 6 };
+
+        var parent = root;
+        var depth = 1;
+
+        while (depth < 6)
+        {
+            var child = new Node($"L{depth}", depth);
+            parent.SetChildren(new ObservableCollection<ITableViewTreeItem> { child });
+            source.Expand(parent);
+            parent = child;
+            depth++;
+        }
+
+        var tooDeep = new Node("TooDeep", depth);
+        parent.SetChildren(new ObservableCollection<ITableViewTreeItem> { tooDeep });
+
+        var error = Assert.ThrowsExactly<InvalidOperationException>(() => source.Expand(parent));
+        StringAssert.Contains(error.Message, "TooDeep");
+
+        // Rejected before anything was spliced, and the branch is not left half-expanded.
+        Assert.IsFalse(parent.IsExpanded);
+        Assert.AreEqual(6, source.Count);
+    }
+
+    /// <summary>A single pre-expanded chain of the given length: L0 -&gt; L1 -&gt; ... </summary>
+    private static Node BuildChain(int levels)
+    {
+        var root = new Node("L0", 0) { IsExpanded = true };
+        var current = root;
+
+        for (var i = 1; i < levels; i++)
+        {
+            var child = new Node($"L{i}", i) { IsExpanded = true };
+            current.SetChildren(new ObservableCollection<ITableViewTreeItem> { child });
+            current = child;
+        }
+
+        return root;
+    }
+
     [TestMethod]
     public void CircularChildren_ThrowCleanly_RatherThanRecursingForever()
     {

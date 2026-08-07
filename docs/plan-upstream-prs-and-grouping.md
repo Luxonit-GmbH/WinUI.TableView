@@ -66,17 +66,30 @@ Worth keeping from it: `ToggleCurrentRowSelection` works through `SelectedRanges
 
 Ordered by risk-adjusted value.
 
-### 1. Bound recursion depth in the tree adapter — ~1h
+### 1. Bound recursion depth in the tree adapter — **DONE 2026-08-03**
 
-`BuildSubtree` and `ValidateInsertable` recurse once per tree level with no cap. A deep enough expanded chain is
-a `StackOverflowException`, which .NET cannot catch: the process dies. #341 caps depth at 50.
+Shipped as `TreeTableViewSource.MaxDepth` (default 256). Exceeding it throws a diagnostic
+`InvalidOperationException` before anything is spliced, consistent with the duplicate-item guard.
 
-Add a configurable maximum (default generous, e.g. 256) and throw a diagnostic
-`InvalidOperationException` on exceeding it, consistent with the duplicate-item guard.
+Depth is measured **from the root**, not from the subtree being inserted. That distinction is the whole point:
+a tree deepened one `Expand` at a time only ever walks one level per operation, so a per-subtree guard would
+never fire — and the eventual *collapse*, which recurses the whole expanded chain, is what overflows the stack.
+Root-relative depth is computed by walking parent pointers (bounded by `MaxDepth`, once per structural
+operation) rather than caching a field that would have to be maintained on the streaming hot path.
 
-Related hardening: the cycle/duplicate exception currently propagates out of the chevron click handler, so a
-cyclic backend response crashes the app unless the consumer wraps the call. Decide whether the control should
-catch and surface it instead.
+Because nothing can be inserted past the cap, teardown depth is bounded by the same number for free — so
+`DropBranchesRecursive` needed no change.
+
+Verified by A/B: replacing root-relative depth with a naive per-subtree count makes
+`DepthIsMeasuredFromTheROOT_NotFromTheInsertedSubtree` fail while the other depth tests still pass. Benchmarks
+unchanged (streaming 2000 inserts 5.1ms, 500k-branch 70.7ms).
+
+**Follow-up, also done:** `TreeTableView.Error` closes the crash path. When the control's own expand or collapse
+fails on malformed data it raises `TreeTableViewErrorEventArgs` (Exception, Item, Expanding, Handled) instead of
+letting the throw escape a chevron click. Set `Handled` to log and carry on; leave it and the exception still
+propagates, so an unhandled data bug cannot pass silently. Safe to handle because the adapter validates before
+it mutates — the tree is untouched and the grid stays usable. Not raised for mutations the app makes to its own
+children collections; those throw back to the caller, where the app can catch them directly.
 
 ### 2. Row grouping over `TreeTableViewSource` — 3–5 days
 

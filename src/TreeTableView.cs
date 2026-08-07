@@ -142,6 +142,19 @@ public partial class TreeTableView : TableView
     public event EventHandler<TreeTableViewExpandCollapseEventArgs>? CollapseRequested;
 
     /// <summary>
+    /// Occurs when expanding or collapsing fails because the data is malformed — a repeated item instance, a
+    /// cycle, or a chain past <see cref="TreeTableViewSource.MaxDepth"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>The adapter validates before it mutates, so the tree is untouched when this fires and the grid stays
+    /// usable. Without a handler the exception propagates out of the chevron click and takes the app down; set
+    /// <see cref="TreeTableViewErrorEventArgs.Handled"/> to log it and carry on instead.</para>
+    /// <para>Not raised for mutations the app makes to its own children collections — those throw back to the
+    /// caller, where the app can catch them directly.</para>
+    /// </remarks>
+    public event EventHandler<TreeTableViewErrorEventArgs>? Error;
+
+    /// <summary>
     /// Raises <see cref="ExpandRequested"/> or <see cref="CollapseRequested"/> for the given item. No-op requests
     /// (expanding an already expanded item, one without children, or one whose asynchronous expansion is still in
     /// flight) are filtered out here so callers and the chevron/keyboard paths share one gate.
@@ -184,16 +197,39 @@ public partial class TreeTableView : TableView
         // rows — or set args.Cancel for strict fetch-then-expand timing.
         if (!args.Cancel && ItemsSource is TreeTableViewSource treeSource)
         {
-            if (expand)
+            try
             {
-                treeSource.Expand(item);
+                if (expand)
+                {
+                    treeSource.Expand(item);
+                }
+                else
+                {
+                    treeSource.Collapse(item);
+                }
             }
-            else
+            catch (InvalidOperationException exception)
             {
-                treeSource.Collapse(item);
+                // The adapter rejects malformed data — a repeated instance, a cycle, a chain past MaxDepth — and
+                // it validates BEFORE it mutates, so the tree is untouched and the grid stays usable. Without a
+                // hook this throw would leave a chevron click and take the app down; with one the consumer can
+                // log it and carry on. Unhandled it still propagates, so a bug never passes silently.
+                var error = new TreeTableViewErrorEventArgs(exception, item, expand);
+                OnError(error);
+
+                if (!error.Handled)
+                {
+                    throw;
+                }
             }
         }
     }
+
+    /// <summary>
+    /// Raises the <see cref="Error"/> event.
+    /// </summary>
+    /// <param name="args">The event data.</param>
+    protected virtual void OnError(TreeTableViewErrorEventArgs args) => Error?.Invoke(this, args);
 
     /// <summary>
     /// Raises <see cref="ExpandRequested"/> or <see cref="CollapseRequested"/> for the given item, resolving its

@@ -63,6 +63,18 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     public int BulkChangeThreshold { get; set; } = 32;
 
     /// <summary>
+    /// Gets or sets how deep the tree may nest. Defaults to 256.
+    /// </summary>
+    /// <remarks>
+    /// Flattening, validation and branch teardown all recurse once per level, so an unbounded chain — a malformed
+    /// backend response, say — would overflow the stack, which .NET cannot catch and which takes the process down
+    /// with it. Exceeding this throws a diagnostic <see cref="InvalidOperationException"/> BEFORE anything is
+    /// spliced instead. Because nothing can be inserted deeper than this, teardown depth is bounded by the same
+    /// number for free. Raise it if the data genuinely nests further.
+    /// </remarks>
+    public int MaxDepth { get; set; } = 256;
+
+    /// <summary>
     /// Suspends per-row notifications until the returned scope is disposed, then raises a single reset if anything
     /// changed. Wrap bulk mutations of YOUR OWN children collections in this — removing or adding thousands of
     /// children one call at a time otherwise makes the host run a virtualization and measure pass per row.
@@ -626,7 +638,7 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
         // removal from the same branch — precisely the symptom this guard exists to replace.
         try
         {
-            ValidateInsertable(child);
+            ValidateInsertable(child, DepthOf(branch.Key) + 1);
         }
         catch
         {
@@ -670,16 +682,25 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
     /// somewhere unrelated, which is the very failure mode this guard exists to remove.
     /// </summary>
     /// <remarks>Allocation-free for a leaf — the streaming hot path settles in a single probe.</remarks>
-    private void ValidateInsertable(object node)
+    private void ValidateInsertable(object node, int depth)
     {
         if (_nodes.ContainsKey(node))
         {
             throw DuplicateItemError(node);
         }
 
+        if (depth > MaxDepth)
+        {
+            throw DepthExceededError(node, depth);
+        }
+
         if (TrackableChildrenOf(node) is { } children)
         {
-            ValidateInsertable(children, new HashSet<object>(ReferenceEqualityComparer.Instance) { node }, NothingVacating);
+            ValidateInsertable(
+                children,
+                new HashSet<object>(ReferenceEqualityComparer.Instance) { node },
+                NothingVacating,
+                depth + 1);
         }
     }
 
@@ -690,15 +711,21 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
         => ValidateInsertable(
             branch.Shadow,
             new HashSet<object>(branch.Shadow.Count, ReferenceEqualityComparer.Instance), // sized: branches get big
-            NothingVacating);
+            NothingVacating,
+            DepthOf(branch.Key) + 1);
 
     /// <summary>
     /// Validates a whole set of siblings against each other and against the tree, before any of them is inserted.
     /// </summary>
-    private void ValidateInsertable(IEnumerable items, HashSet<object> seen, (int Start, int End) vacating)
+    private void ValidateInsertable(IEnumerable items, HashSet<object> seen, (int Start, int End) vacating, int depth)
     {
         foreach (var item in items)
         {
+            if (depth > MaxDepth)
+            {
+                throw DepthExceededError(item, depth);
+            }
+
             if (!seen.Add(item) || IsPlacedOutside(item, vacating))
             {
                 throw DuplicateItemError(item);
@@ -706,10 +733,38 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
 
             if (TrackableChildrenOf(item) is { } children)
             {
-                ValidateInsertable(children, seen, vacating);
+                ValidateInsertable(children, seen, vacating, depth + 1);
             }
         }
     }
+
+    /// <summary>
+    /// The number of ancestors above a branch key: 0 for the roots, 1 for a root item's children, and so on.
+    /// </summary>
+    /// <remarks>
+    /// Walks parent pointers rather than caching a depth on every entry — the walk is bounded by
+    /// <see cref="MaxDepth"/> and only runs once per structural operation, whereas a cached field would have to be
+    /// maintained on the streaming hot path.
+    /// </remarks>
+    private int DepthOf(object key)
+    {
+        var depth = 0;
+
+        while (!ReferenceEquals(key, RootsKey) && _nodes.TryGetValue(key, out var entry) && depth <= MaxDepth)
+        {
+            depth++;
+            key = entry.ParentKey;
+        }
+
+        return depth;
+    }
+
+    private InvalidOperationException DepthExceededError(object node, int depth)
+        => new($"'{node}' ({node.GetType().FullName}) would sit at depth {depth}, past {nameof(MaxDepth)} " +
+            $"({MaxDepth}). Every traversal here recurses once per level, so an unbounded chain would overflow " +
+            "the stack — which cannot be caught, and takes the process down. Raise " +
+            $"{nameof(MaxDepth)} if the data really is this deep, or check the source for a chain that never " +
+            "terminates.");
 
     /// <summary>
     /// Whether the item already holds a row that this operation is NOT about to free.
@@ -833,7 +888,8 @@ public partial class TreeTableViewSource : IObservableVector<object>, ISelection
         ValidateInsertable(
             newChildren.Take(newEnd).Skip(prefix),
             new HashSet<object>(newEnd - prefix, ReferenceEqualityComparer.Instance),
-            vacating);
+            vacating,
+            DepthOf(branch.Key) + 1);
 
         for (var i = oldEnd - 1; i >= prefix; i--)
         {
