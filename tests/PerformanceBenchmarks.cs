@@ -803,7 +803,7 @@ public class PerformanceBenchmarks
     /// in a 1200x800 viewport. Column virtualization is a parameter rather than a constant because it is the
     /// biggest fork in the horizontal path, and because the control ships with it off.
     /// </summary>
-    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization)
+    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization, int frozenColumns = 0)
     {
         var items = new ObservableCollection<BenchItem>(
             Enumerable.Range(0, RowCount).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
@@ -816,6 +816,8 @@ public class PerformanceBenchmarks
             Width = 1200,
             Height = 800,
             SelectionMode = ListViewSelectionMode.Extended,
+            FrozenColumnCount = frozenColumns,
+            RowHeaderWidth = frozenColumns > 0 ? 40 : double.NaN,
         };
 
         tableView.Columns.AddRange(CreateColumns(columnCount));
@@ -836,6 +838,44 @@ public class PerformanceBenchmarks
 
             return tableView;
         }
+    }
+
+    /// <summary>
+    /// The pan with FROZEN COLUMNS and a row header — the shape a real blotter has, and the one the other pan
+    /// benchmarks miss entirely by leaving FrozenColumnCount at its default of 0.
+    ///
+    /// It matters because the two configurations exercise different halves of the fix. With nothing frozen the
+    /// grid pans as a single visual and there is nothing to hold back. With frozen columns every realized row
+    /// carries counter-translated chrome — the row-header group, the grid line, the frozen cells panel — so the
+    /// per-row work the fix was meant to remove partly returns, as compositor expression evaluations rather than
+    /// UI-thread writes. If this number is materially worse than its unfrozen twin, that is where it went.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_Frozen_100Frames_Rendered()
+    {
+        var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true, frozenColumns: 3);
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    tableView.SetValue(TableView.HorizontalOffsetProperty, i * PanStep);
+                    tableView.UpdateLayout();
+                    await WaitForRenderAsync();
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                tableView.SetValue(TableView.HorizontalOffsetProperty, 0d);
+                tableView.UpdateLayout();
+            });
+
+        Report(result, "Grid_HorizontalPan_80Cols_Frozen_100Frames_Rendered");
+        await UnloadAsync(tableView);
     }
 
     /// <summary>
@@ -935,6 +975,9 @@ public class PerformanceBenchmarks
     public async Task Grid_Idle_DispatcherGap()
         => await DispatcherGapAsync(horizontal: true, "Grid_Idle_DispatcherGap", pan: false);
 
+    /// <summary>A gap longer than one frame is a dropped frame; anything under it is just scheduling.</summary>
+    private const double FrameMs = 16.7;
+
     private async Task DispatcherGapAsync(bool horizontal, string benchmarkName, bool pan = true)
     {
         var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true);
@@ -989,6 +1032,13 @@ public class PerformanceBenchmarks
             tableView.UpdateLayout();
         }
 
+        // Total time the thread was unavailable, counting only gaps longer than a frame. THIS is the number to
+        // gate on. The pickup count and the percentiles are only meaningful once the thread is responsive enough
+        // to be scheduled often: while it is saturated the heartbeat runs a handful of times, so those statistics
+        // are computed over 3-5 samples and swing wildly between identical runs (3, 0, 39 have all been observed).
+        // Blocked time does not care how many samples there were — it measures the thing the user feels.
+        var blockedMs = gaps.Where(gap => gap > FrameMs).Sum();
+
         gaps.Sort();
 
         var median = Percentile(gaps, 0.50);
@@ -996,8 +1046,9 @@ public class PerformanceBenchmarks
         var max = gaps.Count > 0 ? gaps[^1] : 0d;
 
         TestContext.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"{benchmarkName}: {gaps.Count} gaps, median {median:F2} ms, p95 {p95:F2} ms, max {max:F2} ms"));
+            $"{benchmarkName}: BLOCKED {blockedMs:F0} ms total | {gaps.Count} gaps, median {median:F2} ms, p95 {p95:F2} ms, max {max:F2} ms"));
 
+        Report(new BenchResult(blockedMs, blockedMs, blockedMs, gaps.Count), $"{benchmarkName}_BlockedMs");
         Report(new BenchResult(median, Percentile(gaps, 0.05), max, gaps.Count), benchmarkName);
         Report(new BenchResult(p95, p95, p95, gaps.Count), $"{benchmarkName}_P95");
 

@@ -236,6 +236,16 @@ public partial class TableViewCell : ContentControl
             return;
         }
 
+        // Only contribute when the mode actually sizes from cells. Our fork dropped this check during the
+        // measure-caching work; upstream still has it, so a Headers-only column was being widened by its content
+        // anyway.
+        var autoWidthMode = Column.ColumnAutoWidthMode ?? TableView?.ColumnAutoWidthMode;
+
+        if (autoWidthMode is not (TableViewColumnAutoWidthMode.Cells or TableViewColumnAutoWidthMode.Both))
+        {
+            return;
+        }
+
         if (double.IsNaN(_contentDesiredWidth))
         {
             _contentDesiredWidth = MeasureContentDesiredWidth(element);

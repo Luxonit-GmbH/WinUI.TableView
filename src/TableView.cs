@@ -1616,9 +1616,18 @@ public partial class TableView : ListView
     /// </summary>
     private void RealizeAllCells()
     {
-        foreach (var row in _rows)
+        // Chunked like the band realize: this touches every cell of every realized row, which at 80 columns is
+        // thousands of content generations, and running it in one go blocks the frame it lands on.
+        RealizeAllCellsChunk([.. _rows], 0);
+    }
+
+    private void RealizeAllCellsChunk(TableViewRow[] rows, int start)
+    {
+        var end = Math.Min(start + RealizeRowChunkSize, rows.Length);
+
+        for (var i = start; i < end; i++)
         {
-            if (row.RowPresenter is { } presenter)
+            if (rows[i].RowPresenter is { } presenter)
             {
                 foreach (var cell in presenter.Cells)
                 {
@@ -1626,6 +1635,11 @@ public partial class TableView : ListView
                     cell.EnsureContent();
                 }
             }
+        }
+
+        if (end < rows.Length)
+        {
+            DispatcherQueue.TryEnqueue(() => RealizeAllCellsChunk(rows, end));
         }
     }
 

@@ -40,10 +40,8 @@ public partial class TableViewHeaderRow : Control
     private StackPanel? _frozenSpannersPanel;
     private StackPanel? _scrollableSpannersPanel;
     private Border? _columnDropIndicator;
-    private RectangleGeometry? _scrollableHeadersClip;
-    private TranslateTransform? _scrollableHeadersTransform;
-    private RectangleGeometry? _scrollableSpannersClip;
-    private TranslateTransform? _scrollableSpannersTransform;
+    private bool _boundToPan;
+    private RectangleGeometry? _panClip;
     private TranslateTransform? _columnDropIndicatorTransform;
     private Image? _dragHeaderImage;
     private DispatcherTimer? _desiredWidthTimer;
@@ -83,8 +81,7 @@ public partial class TableViewHeaderRow : Control
         _scrollableHeadersPanel = GetTemplateChild("ScrollableHeadersPanel") as StackPanel;
         _frozenSpannersPanel = GetTemplateChild("FrozenSpannersPanel") as StackPanel;
         _scrollableSpannersPanel = GetTemplateChild("ScrollableSpannersPanel") as StackPanel;
-        _scrollableHeadersTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
-        _scrollableSpannersTransform = null;
+        _boundToPan = false; // the new panels need re-binding to the shared pan offset
         _columnDropIndicator = GetTemplateChild("ColumnDropIndicator") as Border;
         _columnDropIndicatorTransform = GetTemplateChild("ColumnDropIndicatorTransform") as TranslateTransform;
         _dragHeaderImage = GetTemplateChild("DragHeaderImage") as Image;
@@ -145,55 +142,61 @@ public partial class TableViewHeaderRow : Control
     /// </summary>
     internal void ApplyHorizontalScroll()
     {
-        if (TableView is null || _scrollableHeadersPanel is null || _frozenHeadersPanel is null || _scrollableHeadersPanel.ActualWidth <= 0)
+        if (TableView is null || _scrollableHeadersPanel is null || _frozenHeadersPanel is null)
         {
             return;
         }
 
-        var h = TableView.HorizontalOffset;
-
-        if (_scrollableHeadersTransform is null)
+        if (_boundToPan)
         {
-            _scrollableHeadersTransform = new TranslateTransform();
-            _scrollableHeadersPanel.RenderTransform = _scrollableHeadersTransform;
+            return; // bound once; the compositor moves them from the shared offset thereafter
         }
 
-        _scrollableHeadersTransform.X = -h;
+        // Same mechanism as the rows (TableView.BindToPan), deliberately: the header has to move in lockstep with
+        // the cells, and a UI-thread transform here against a compositor-driven one there would let them drift by
+        // a frame on a fast drag — visible as the headers shearing off their columns.
+        TableView.BindToPan(_scrollableHeadersPanel, pinned: false);
 
-        if (h <= 0)
+        if (_scrollableSpannersPanel is { } spanners)
         {
-            _scrollableHeadersPanel.Clip = null;
-        }
-        else
-        {
-            _scrollableHeadersClip ??= new RectangleGeometry();
-            _scrollableHeadersClip.Rect = new Rect(h, 0, Math.Max(0, _scrollableHeadersPanel.ActualWidth - h), _scrollableHeadersPanel.ActualHeight);
-            _scrollableHeadersPanel.Clip = _scrollableHeadersClip;
+            TableView.BindToPan(spanners, pinned: false);
         }
 
-        // The banners ride the same offset — they must stay glued to the columns beneath them. Each panel needs
-        // its OWN transform and clip instance: WinUI throws E_BOUNDS if one is attached to two elements.
-        if (_scrollableSpannersPanel is { } spanners && spanners.Children.Count > 0)
+        // The scrolling headers now slide UNDER the frozen ones rather than being clipped away from them, so the
+        // frozen side has to draw (and hit-test) on top.
+        Canvas.SetZIndex(_frozenHeadersPanel, 1);
+
+        if (_frozenSpannersPanel is not null)
         {
-            if (_scrollableSpannersTransform is null)
-            {
-                _scrollableSpannersTransform = new TranslateTransform();
-                spanners.RenderTransform = _scrollableSpannersTransform;
-            }
-
-            _scrollableSpannersTransform.X = -h;
-
-            if (h <= 0)
-            {
-                spanners.Clip = null;
-            }
-            else
-            {
-                _scrollableSpannersClip ??= new RectangleGeometry();
-                _scrollableSpannersClip.Rect = new Rect(h, 0, Math.Max(0, spanners.ActualWidth - h), spanners.ActualHeight);
-                spanners.Clip = _scrollableSpannersClip;
-            }
+            Canvas.SetZIndex(_frozenSpannersPanel, 1);
         }
+
+        if (_cornerButtonPanel is not null)
+        {
+            Canvas.SetZIndex(_cornerButtonPanel, 2);
+        }
+
+        _boundToPan = true;
+        UpdatePanClip();
+    }
+
+    /// <summary>
+    /// Clips the header row to its own bounds, so panned headers cannot spill outside the control.
+    /// </summary>
+    /// <remarks>
+    /// Static: it depends on the control's size, not on the scroll offset, so it is rebuilt on resize rather than
+    /// on every tick — which is the whole point of moving the pan onto the compositor.
+    /// </remarks>
+    private void UpdatePanClip()
+    {
+        if (ActualWidth <= 0 || ActualHeight <= 0)
+        {
+            return;
+        }
+
+        _panClip ??= new RectangleGeometry();
+        _panClip.Rect = new Rect(0, 0, ActualWidth, ActualHeight);
+        Clip = _panClip;
     }
 
     /// <summary>
@@ -1010,6 +1013,7 @@ public partial class TableViewHeaderRow : Control
     private void OnTableViewSizeChanged(object sender, SizeChangedEventArgs e)
     {
         InvalidateHeaderWidths();
+        UpdatePanClip(); // the clip bounds the control, so it follows a resize and nothing else
     }
 
     /// <summary>
