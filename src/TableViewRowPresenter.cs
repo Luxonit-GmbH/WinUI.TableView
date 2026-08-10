@@ -26,6 +26,9 @@ public partial class TableViewRowPresenter : Control
 {
     private TableViewRowHeader? _rowHeader;
     private Panel? _rootPanel;
+    private Panel? _pinnedHeaderPanel;
+    private bool _pinnedToPan;
+    private bool _detailsPinned;
     private Panel? _scrollableCellsPanel;
     private StackPanel? _frozenCellsPanel;
     private readonly List<TableViewCell> _cellsList = [];
@@ -38,8 +41,6 @@ public partial class TableViewRowPresenter : Control
     private ToggleButton? _detailsToggleButton;
     private ListViewItemPresenter? _itemPresenter;
     private long? _detailsPanelVisibilityCallbackToken;
-    private RectangleGeometry? _scrollableCellsClip;
-    private RectangleGeometry? _detailsClip;
     private TranslateTransform? _scrollableCellsTransform;
     private TranslateTransform? _detailsTransform;
 
@@ -68,9 +69,12 @@ public partial class TableViewRowPresenter : Control
 
         _rowHeader = GetTemplateChild("RowHeader") as TableViewRowHeader;
         _rootPanel = GetTemplateChild("RootPanel") as Panel;
+        _pinnedHeaderPanel = GetTemplateChild("PinnedHeaderPanel") as Panel;
         _scrollableCellsPanel = GetTemplateChild("ScrollableCellsPanel") as Panel;
         _frozenCellsPanel = GetTemplateChild("FrozenCellsPanel") as StackPanel;
         _cellsList.Clear(); // Template (re)applied: the new panels start empty.
+        _pinnedToPan = false;   // ...and the new chrome needs re-binding to the pan offset.
+        _detailsPinned = false;
         _scrollableCellsTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
         _detailsTransform = null;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
@@ -107,6 +111,36 @@ public partial class TableViewRowPresenter : Control
         SetRowHeaderWidth();
         SetRowDetailsVisibility();
         SetRowDetailsTemplate();
+
+        PinChromeToPan();
+    }
+
+    /// <summary>
+    /// Counter-translates the chrome that must not scroll. The items panel pans as a single visual, which carries
+    /// every row with it; these three ride back the other way so they hold their place.
+    /// </summary>
+    /// <remarks>
+    /// Bound once per template application, to expression animations over the TableView's shared offset — so a
+    /// scroll tick costs one scalar write for the whole grid rather than a property set per row. The template
+    /// gives them a higher Canvas.ZIndex so the cells sliding underneath stay underneath, for hit-testing too.
+    /// </remarks>
+    private void PinChromeToPan()
+    {
+        if (_pinnedToPan || TableView is null)
+        {
+            return;
+        }
+
+        if (_pinnedHeaderPanel is null && _v_gridLine is null && _frozenCellsPanel is null)
+        {
+            return; // template not applied yet; the next OnApplyTemplate will bind
+        }
+
+        if (_pinnedHeaderPanel is not null) TableView.BindToPan(_pinnedHeaderPanel, pinned: true);
+        if (_v_gridLine is not null) TableView.BindToPan(_v_gridLine, pinned: true);
+        if (_frozenCellsPanel is not null) TableView.BindToPan(_frozenCellsPanel, pinned: true);
+
+        _pinnedToPan = true;
     }
 
     /// <summary>
@@ -247,6 +281,12 @@ public partial class TableViewRowPresenter : Control
                 var offset = _v_gridLine.Visibility is Visibility.Visible ? relativePosition.X : 0d;
                 offset -= Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
 
+                // TransformToVisual DOES report composition Translation (verified). The pan applied to the items
+                // panel is on a shared ancestor of both elements, so it cancels in this relative transform — but
+                // the grid line's own counter-translation does not, and would otherwise make this offset grow by
+                // the scroll offset. Take it back off: this value is a layout boundary, not a scrolled position.
+                offset -= TableView.HorizontalOffset;
+
                 TableView.SetValue(TableView.CellsHorizontalOffsetProperty, Math.Max(0, offset));
             }
         }
@@ -266,59 +306,18 @@ public partial class TableViewRowPresenter : Control
     /// </param>
     internal void ApplyHorizontalScroll(bool useCachedClip = false)
     {
-        if (TableView is null)
+        // The cells no longer move per row: the items panel pans as one visual and carries them. All that is left
+        // here is the row-details panel, which pans with the row unless it is frozen, in which case it needs the
+        // same counter-translation as the rest of the pinned chrome. Bound once, not per tick.
+        if (TableView is null || _detailsPanel is null || _detailsPinned)
         {
             return;
         }
 
-        var h = TableView.HorizontalOffset;
-
-        if (_scrollableCellsPanel is not null && _frozenCellsPanel is not null)
+        if (_detailsPanel.Visibility is Visibility.Visible && TableView.AreRowDetailsFrozen)
         {
-            if (_scrollableCellsTransform is null)
-            {
-                _scrollableCellsTransform = new TranslateTransform();
-                _scrollableCellsPanel.RenderTransform = _scrollableCellsTransform;
-            }
-
-            _scrollableCellsTransform.X = -h;
-
-            if (h <= 0)
-            {
-                _scrollableCellsPanel.Clip = null;
-            }
-            else
-            {
-                _scrollableCellsClip ??= new RectangleGeometry();
-                _scrollableCellsClip.Rect = useCachedClip && TableView.CellsClipRect is { } cached
-                    ? cached
-                    : new(h, 0, Math.Max(0, _scrollableCellsPanel.ActualWidth - h), _scrollableCellsPanel.ActualHeight);
-                _scrollableCellsPanel.Clip = _scrollableCellsClip;
-            }
-        }
-
-        if (_detailsPanel?.Visibility is Visibility.Visible)
-        {
-            var frozen = TableView.AreRowDetailsFrozen;
-
-            if (_detailsTransform is null)
-            {
-                _detailsTransform = new TranslateTransform();
-                _detailsPanel.RenderTransform = _detailsTransform;
-            }
-
-            _detailsTransform.X = frozen ? 0 : -h;
-
-            if (frozen || h <= 0)
-            {
-                _detailsPanel.Clip = null;
-            }
-            else
-            {
-                _detailsClip ??= new RectangleGeometry();
-                _detailsClip.Rect = new(h, 0, Math.Max(0, _detailsPanel.ActualWidth - h), _detailsPanel.ActualHeight);
-                _detailsPanel.Clip = _detailsClip;
-            }
+            TableView.BindToPan(_detailsPanel, pinned: true);
+            _detailsPinned = true;
         }
     }
 

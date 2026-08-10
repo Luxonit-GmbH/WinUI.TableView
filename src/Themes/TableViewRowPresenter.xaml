@@ -84,7 +84,11 @@
                                 <ColumnDefinition x:Name="ScrollableCellsPanelColumn" Width="*" />
                             </Grid.ColumnDefinitions>
 
-                            <Grid>
+                            <!-- The pinned chrome. RootPanel's whole subtree pans with the items panel, so these
+                                 three are counter-translated to stay put, and must draw ABOVE the scrolling cells
+                                 that now slide underneath them (Canvas.ZIndex, also the hit-test order). -->
+                            <Grid x:Name="PinnedHeaderPanel"
+                                  Canvas.ZIndex="1">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition x:Name="RowHeaderColumn" Width="Auto" />
                                     <ColumnDefinition x:Name="DetailsExpandChevronColumn" Width="Auto" />
@@ -104,11 +108,13 @@
                                        Width="1"
                                        Grid.RowSpan="2"
                                        Grid.Column="1"
+                                       Canvas.ZIndex="1"
                                        VerticalAlignment="Stretch"
                                        IsHitTestVisible="False" />
 
                             <StackPanel x:Name="FrozenCellsPanel"
                                         Grid.Column="2"
+                                        Canvas.ZIndex="1"
                                         Orientation="Horizontal" />
 
                             <local:TableViewCellsPanel x:Name="ScrollableCellsPanel"
