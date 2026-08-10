@@ -402,11 +402,17 @@
                             MinWidth="{Binding (helpers:AttachedPropertiesHelper.FrozenColumnScrollBarSpace), RelativeSource={RelativeSource TemplatedParent}}"
                             win:Background="{ThemeResource ScrollViewerScrollBarSeparatorBackground}" />
 
+                    <!-- SmallChange/LargeChange are set explicitly because this is not the ScrollViewer's own
+                         scrollbar part: nothing assigns them, so it would otherwise keep the RangeBase defaults of
+                         1 and 10, making an arrow click move one pixel and a track click move ten against a
+                         viewport of a thousand or more. -->
                     <ScrollBar x:Name="HorizontalScrollBar2"
                                Grid.Column="1"
                                IsTabStop="False"
                                Maximum="{TemplateBinding ScrollableWidth}"
                                Orientation="Horizontal"
+                               SmallChange="48"
+                               LargeChange="{TemplateBinding ViewportWidth}"
                                ViewportSize="{TemplateBinding ViewportWidth}" />
                 </Grid>
                 <Border x:Name="ScrollBarSeparator"

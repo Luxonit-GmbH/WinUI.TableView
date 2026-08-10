@@ -42,11 +42,20 @@ public partial class TableView : ListView
     private bool _settingBaseItemsSource; // allows TableView to assign the inherited ItemsSource (otherwise guarded)
     private IEnumerable? _directSource; // the raw source bound straight to the ListView when UseCollectionView is false
     private readonly HashSet<TableViewRow> _rows = [];
+    private bool _realizeInFlight;
     private (int First, int Last) _lastRealizedRange = (-2, -2);
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _realizeSettleTimer; // debounces realize until horizontal scroll settles
     private const double HorizontalScrollSettleMs = 50; // ms of no horizontal movement before realizing the visible band
     private int _realizeGeneration; // bumped on every scroll; an in-flight chunked realize aborts when it changes
     private const int RealizeRowChunkSize = 8; // rows realized per dispatcher turn (keeps the settle realize off-frame)
+
+    /// <summary>
+    /// Divides a wheel notch (120) into horizontal scroll pixels. At the previous value of 4 a notch moved 30px —
+    /// a quarter of a typical column, ~320 notches to cross an 80-column grid — which reads as the control being
+    /// slow rather than as a deliberate step. One notch now moves 120px, roughly one column, or a viewport per ten
+    /// notches.
+    /// </summary>
+    private const double HorizontalWheelDivisor = 1.0;
     private bool _autoSizeMinWidthSealed; // AutoSizeMinWidth: stop capturing once the user scrolls past the first cells
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
@@ -1140,7 +1149,17 @@ public partial class TableView : ListView
     internal void InvalidateColumnBand()
     {
         _lastRealizedRange = (-2, -2);
-        RealizeVisibleCells();
+
+        if (!IsColumnVirtualizationEnabled)
+        {
+            return;
+        }
+
+        // Straight to a new pass rather than through RealizeVisibleCells: the band is invalid because the columns
+        // themselves changed, so an in-flight pass is walking rows against a set that no longer applies and must be
+        // superseded, not waited for.
+        _realizeSettleTimer?.Stop();
+        StartBandRealize();
     }
 
     /// <summary>
@@ -1162,20 +1181,59 @@ public partial class TableView : ListView
             return;
         }
 
-        // A new scroll supersedes any in-flight chunked realize — bump the generation so it aborts (instead of
-        // grinding through a band you've already scrolled away from).
-        _realizeGeneration++;
+        // Once the viewport has left the realized band there is nothing left to draw out there — those cells are
+        // collapsed — so waiting out the settle window would show the user blank columns for as long as they keep
+        // dragging. Realize now instead. A drag delivers offsets every 8-16ms, well inside the 50ms window, so the
+        // debounce below could otherwise be re-armed indefinitely and never fire at all until the drag ended.
+        if (HasLeftRealizedBand())
+        {
+            // A pass already walking the rows is left alone: restarting it on every tick would abort it mid-way
+            // and begin again at the first row, so the rows past the first chunk would never be reached at all.
+            // It re-checks the viewport when it lands and chases it from there.
+            if (_realizeInFlight)
+            {
+                return;
+            }
 
-        // Debounce realization until the horizontal offset settles. A scrollbar drag fires a continuous stream of
-        // offset changes; realizing each would create + measure every column it sweeps past (brutal the first time,
-        // since content is generated then). The transform pan keeps the drag smooth meanwhile; only once scrolling has
-        // been quiet for the settle window do we realize the final visible band. A real timer WAITS (no busy spin —
-        // the earlier reschedule approach hammered the dispatcher), and is reset only on scroll (RealizeVisibleCells
-        // isn't called on data updates), so the 8000/s stream never holds it off. Wheel/slow scroll leave gaps wider
-        // than the window, so they realize promptly.
+            _realizeSettleTimer?.Stop();
+            StartBandRealize();
+            return;
+        }
+
+        // Otherwise debounce. A scrollbar drag fires a continuous stream of offset changes; realizing each would
+        // create + measure every column it sweeps past (brutal the first time, since content is generated then).
+        // The transform pan keeps the drag smooth meanwhile; only once scrolling has been quiet for the settle
+        // window do we realize the final visible band. A real timer WAITS (no busy spin — the earlier reschedule
+        // approach hammered the dispatcher), and is reset only on scroll (RealizeVisibleCells isn't called on data
+        // updates), so the 8000/s stream never holds it off.
         _realizeSettleTimer ??= CreateRealizeSettleTimer();
         _realizeSettleTimer.Stop();
         _realizeSettleTimer.Start();
+    }
+
+    /// <summary>
+    /// Whether the visible columns have moved outside the band that was last realized, i.e. whether the user is
+    /// looking at cells whose content was never generated.
+    /// </summary>
+    /// <remarks>
+    /// Measured against the bare viewport (no cache buffer): the buffer exists precisely so that small drifts stay
+    /// inside the realized band and keep taking the debounced path.
+    /// </remarks>
+    private bool HasLeftRealizedBand()
+    {
+        var visible = GetVisibleScrollableRange(0);
+
+        if (visible.First < 0)
+        {
+            return false; // column widths not known yet — leave it to the debounced pass, which has a fallback
+        }
+
+        if (_lastRealizedRange.First < 0)
+        {
+            return true; // nothing realized, or a pass was abandoned half-applied: do not make the user wait
+        }
+
+        return visible.First < _lastRealizedRange.First || visible.Last > _lastRealizedRange.Last;
     }
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateRealizeSettleTimer()
@@ -1194,6 +1252,12 @@ public partial class TableView : ListView
     /// </summary>
     private void StartBandRealize()
     {
+        // Starting a pass is what supersedes an older one — not every scroll tick, which would abort a pass that
+        // was about to finish. Anything still walking rows is dead as of this line, so it is no longer in flight;
+        // the flag is set again below only if this pass actually starts chunking.
+        _realizeGeneration++;
+        _realizeInFlight = false;
+
         var wide = GetVisibleScrollableRange(ColumnCacheLength);
 
         if (wide.First < 0)
@@ -1206,6 +1270,7 @@ public partial class TableView : ListView
 
             if (scrollableCount > 0)
             {
+                _realizeInFlight = true;
                 RealizeRowChunk((0, scrollableCount - 1), _realizeGeneration, [.. _rows], 0, recordRange: false);
             }
 
@@ -1217,6 +1282,7 @@ public partial class TableView : ListView
             return;
         }
 
+        _realizeInFlight = true;
         RealizeRowChunk(wide, _realizeGeneration, [.. _rows], 0);
     }
 
@@ -1224,7 +1290,13 @@ public partial class TableView : ListView
     {
         if (generation != _realizeGeneration)
         {
-            return; // superseded by a newer scroll — abandon this band
+            // Superseded by a newer scroll — abandon this band. The rows already visited carry the new range while
+            // the rows behind them still carry the old one, so there is no single range that describes the grid.
+            // Recording nothing would leave _lastRealizedRange claiming the OLD range, and scrolling back to it
+            // would then hit the "band unchanged" early-out and never repair the migrated rows — they would keep
+            // their cells collapsed indefinitely. Invalidate instead, so the next pass always re-runs.
+            _lastRealizedRange = (-2, -2);
+            return;
         }
 
         var end = Math.Min(start + RealizeRowChunkSize, rows.Length);
@@ -1236,10 +1308,24 @@ public partial class TableView : ListView
         if (end < rows.Length)
         {
             DispatcherQueue.TryEnqueue(() => RealizeRowChunk(range, generation, rows, end, recordRange));
+            return;
         }
-        else if (recordRange)
+
+        _realizeInFlight = false;
+
+        if (!recordRange)
         {
-            _lastRealizedRange = range; // band fully realized
+            return; // widths were unknown, so the range this pass used describes nothing worth remembering
+        }
+
+        _lastRealizedRange = range; // band fully realized
+
+        // The viewport can have moved on while this pass walked the rows — a drag does not pause for it. Chase it
+        // now rather than waiting for the next scroll tick, which is what keeps a continuous drag realizing
+        // instead of showing collapsed cells until the user lets go.
+        if (HasLeftRealizedBand())
+        {
+            StartBandRealize();
         }
     }
 
@@ -1638,7 +1724,7 @@ public partial class TableView : ListView
         {
             e.Handled = true;
             var mouseWheelDelta = isShiftButton ? -pointerPoint.Properties.MouseWheelDelta : pointerPoint.Properties.MouseWheelDelta;
-            var xOffset = HorizontalOffset + (mouseWheelDelta / 4.0);
+            var xOffset = HorizontalOffset + (mouseWheelDelta / HorizontalWheelDivisor);
             SetValue(HorizontalOffsetProperty, Math.Clamp(xOffset, 0, _scrollViewer.ScrollableWidth));
         }
     }
