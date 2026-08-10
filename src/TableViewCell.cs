@@ -28,6 +28,8 @@ public partial class TableViewCell : ContentControl
 {
     private ContentPresenter? _contentPresenter;
     private Border? _selectionBorder;
+    private Border? _backgroundBorder;
+    private Border? _rootBorder;
     private Rectangle? _v_gridLine;
     private object? _uneditedValue;
     private RoutedEventArgs? _editingArgs;
@@ -42,6 +44,13 @@ public partial class TableViewCell : ContentControl
     private object? _resolvedContentKey;          // Content reference the cached resolved element was computed for
     private FrameworkElement? _resolvedContentElement;
     private bool _autoMinWidthMeasured;           // AutoSizeMinWidth: this cell already contributed its first-render width
+    private IList<TableViewConditionalCellStyle>? _cellStyles;
+    private bool _resizePreviewActive;
+    private double _resizePreviewWidth;
+    private double _resizePreviewMaxWidth;
+    private RectangleGeometry? _resizeClipGeometry;
+    private TranslateTransform? _gridLineShiftTransform;
+    private TranslateTransform? _downstreamShiftTransform;
 
     /// <summary>
     /// Initializes a new instance of the TableViewCell class.
@@ -95,6 +104,8 @@ public partial class TableViewCell : ContentControl
 
         _contentPresenter = GetTemplateChild("Content") as ContentPresenter;
         _selectionBorder = GetTemplateChild("SelectionBorder") as Border;
+        _backgroundBorder = GetTemplateChild("BackgroundBorder") as Border;
+        _rootBorder = GetTemplateChild("RootBorder") as Border;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
 
         EnsureGridLines();
@@ -146,7 +157,9 @@ public partial class TableViewCell : ContentControl
         {
             // Measuring the content unconstrained only feeds the column's desired (auto) width. For fixed and
             // star sized columns it is pure overhead on every measure pass, so only do it for auto columns.
-            if (Column.Width.IsAuto)
+            // Skipped while the column is being dragged: it only feeds Column.DesiredWidth, which a pixel-width
+            // drag ignores, and a preview-mode drag deliberately does not remeasure this cell per frame.
+            if (Column.Width.IsAuto && !Column.IsResizing)
             {
                 EnsureDesiredWidth(element);
             }
@@ -275,7 +288,12 @@ public partial class TableViewCell : ContentControl
             return;
         }
 
-        var columnWidth = Column.ActualWidth;
+        // While a resize preview is active the content was already generously measured once in BeginResizePreview
+        // and must keep that width, so Clip can reveal or hide it each frame without another Measure pass. Using
+        // the live Column.ActualWidth here would re-clamp it straight back to the pre-drag size — that width is
+        // deliberately frozen for the whole drag (see TableView.UpdateColumnResizePreview). The preview width is
+        // itself constant for the gesture, so it also keeps the cache key below stable.
+        var columnWidth = _resizePreviewActive ? _resizePreviewWidth : Column.ActualWidth;
         var rowHeight = !double.IsNaN(Height) ? Height
                       : ActualHeight > 0 ? ActualHeight
                       : double.PositiveInfinity;
@@ -346,6 +364,170 @@ public partial class TableViewCell : ContentControl
             Column.DesiredWidth = Math.Max(Column.DesiredWidth, _contentDesiredWidth);
             InvalidateMeasure(); // Re-apply the content constraint on the next pass.
         }
+    }
+
+    /// <inheritdoc/>
+    protected override Size ArrangeOverride(Size finalSize)
+    {
+        finalSize = base.ArrangeOverride(finalSize);
+
+        // During a resize-drag preview, manually re-arrange the overlapping template borders wider
+        // than the Grid's own column-based sizing would give them (the Grid still thinks this cell is
+        // its pre-drag width, since Width itself is left untouched for the whole drag) — this is what
+        // lets the generously-premeasured content in BeginResizePreview actually render past the old
+        // boundary; Clip then reveals/hides it every frame. Same "arrange a child beyond what the
+        // framework gave it" technique already used in TableViewRow.ArrangeOverride for _itemPresenter.
+        if (_resizePreviewActive)
+        {
+            var bordersRect = new Rect(0, 0, _resizePreviewMaxWidth, finalSize.Height);
+            _backgroundBorder?.Arrange(bordersRect);
+            _selectionBorder?.Arrange(bordersRect);
+            _rootBorder?.Arrange(new Rect(0, 0, _resizePreviewWidth, finalSize.Height));
+        }
+
+        return finalSize;
+    }
+
+    /// <summary>
+    /// Begins a live resize-drag preview for this cell: generously (re)measures its content once so
+    /// widening can freely reveal more of it, and creates this cell's own <see cref="Clip"/> geometry
+    /// and gridline shift transform. These are per-cell instances (not shared across cells — WinUI
+    /// throws if the same <see cref="RectangleGeometry"/> is assigned as <see cref="Clip"/> on more
+    /// than one element at a time), mutated in place every frame by
+    /// <see cref="UpdateResizePreviewClip"/>/<see cref="UpdateGridLineShift"/> — still no Measure/Arrange
+    /// per frame, just not a single shared instance across every row.
+    /// </summary>
+    internal void BeginResizePreview(double maxPreviewWidth)
+    {
+        _resizePreviewWidth = ActualWidth;
+
+        if (Content is FrameworkElement element)
+        {
+            if (Column is TableViewTemplateColumn)
+            {
+#if WINDOWS
+                if (element is ContentControl { ContentTemplateRoot: FrameworkElement root })
+#else
+                if (element.FindDescendant<ContentPresenter>() is { ContentTemplateRoot: FrameworkElement root })
+#endif
+                    element = root;
+                else
+                    element = null!;
+            }
+
+            if (element is not null)
+            {
+                element.MaxWidth = maxPreviewWidth;
+                element.MaxHeight = double.PositiveInfinity;
+                element.Measure(new Size(maxPreviewWidth, double.PositiveInfinity));
+
+                var desiredWidth = element.DesiredSize.Width;
+                desiredWidth += element.Margin.Left;
+                desiredWidth += element.Margin.Right;
+                desiredWidth += Padding.Left;
+                desiredWidth += Padding.Right;
+                desiredWidth += BorderThickness.Left;
+                desiredWidth += BorderThickness.Right;
+                desiredWidth += _selectionBorder?.BorderThickness.Left ?? 0;
+                desiredWidth += _selectionBorder?.BorderThickness.Right ?? 0;
+                desiredWidth += _v_gridLine?.ActualWidth ?? 0d;
+
+                _resizePreviewWidth = Math.Min(maxPreviewWidth, Math.Max(ActualWidth, desiredWidth));
+            }
+        }
+
+        _resizePreviewActive = true;
+        _resizePreviewMaxWidth = maxPreviewWidth;
+
+        _resizeClipGeometry = new RectangleGeometry { Rect = ComputeClipRect(ActualWidth, ActualHeight) };
+        Clip = _resizeClipGeometry;
+
+        if (_v_gridLine is not null)
+        {
+            _gridLineShiftTransform = new TranslateTransform();
+            _v_gridLine.RenderTransform = _gridLineShiftTransform;
+        }
+
+        InvalidateArrange();
+    }
+
+    /// <summary>
+    /// Shifts this cell sideways to visually make room for the column being resized, without any
+    /// real layout — creates this cell's own <see cref="TranslateTransform"/>, mutated in place every
+    /// frame by <see cref="UpdateDownstreamShift"/>.
+    /// </summary>
+    internal void ApplyDownstreamShift()
+    {
+        _downstreamShiftTransform = new TranslateTransform();
+        RenderTransform = _downstreamShiftTransform;
+    }
+
+    /// <summary>
+    /// Updates this resize-preview cell's clip to the given live drag width. No-op if this cell
+    /// isn't the one being resized (i.e. <see cref="BeginResizePreview"/> was never called on it).
+    /// </summary>
+    internal void UpdateResizePreviewClip(double liveWidth, double height)
+    {
+        if (_resizeClipGeometry is not null)
+        {
+            _resizeClipGeometry.Rect = ComputeClipRect(liveWidth, height);
+        }
+    }
+
+    /// <summary>
+    /// Shifts this resize-preview cell's own gridline to track the live drag boundary. No-op if this
+    /// cell isn't the one being resized.
+    /// </summary>
+    internal void UpdateGridLineShift(double deltaX)
+    {
+        if (_gridLineShiftTransform is not null)
+        {
+            _gridLineShiftTransform.X = deltaX;
+        }
+    }
+
+    /// <summary>
+    /// Updates this downstream cell's shift to the given delta. No-op if <see cref="ApplyDownstreamShift"/>
+    /// was never called on this cell.
+    /// </summary>
+    internal void UpdateDownstreamShift(double deltaX)
+    {
+        if (_downstreamShiftTransform is not null)
+        {
+            _downstreamShiftTransform.X = deltaX;
+        }
+    }
+
+    /// <summary>
+    /// Ends a resize-drag preview started by <see cref="BeginResizePreview"/> or
+    /// <see cref="ApplyDownstreamShift"/>, reverting this cell to normal layout-driven sizing.
+    /// </summary>
+    internal void EndResizePreview()
+    {
+        _resizePreviewActive = false;
+        _resizePreviewMaxWidth = 0d;
+        Clip = null;
+        RenderTransform = null;
+        _resizeClipGeometry = null;
+        _gridLineShiftTransform = null;
+        _downstreamShiftTransform = null;
+
+        if (_v_gridLine is not null)
+        {
+            _v_gridLine.RenderTransform = null;
+        }
+
+        InvalidateMeasure();
+        InvalidateArrange();
+    }
+
+    /// <summary>
+    /// Computes the clip rect that reveals/hides a resize-preview cell's content for a given live
+    /// drag width. Pure function — no side effects — so it's directly unit-testable.
+    /// </summary>
+    internal static Rect ComputeClipRect(double liveWidth, double height)
+    {
+        return new Rect(0, 0, Math.Max(0, liveWidth), Math.Max(0, height));
     }
 
     /// <inheritdoc/>

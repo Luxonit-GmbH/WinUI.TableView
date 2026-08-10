@@ -128,7 +128,14 @@ public partial class TableViewRowPresenter : Control
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
-        _rowHeader?.InvalidateMeasure(); // The row header does not measure every time.
+        // The row header's size never depends on a data column's width, but this presenter still
+        // measures every visible row every frame during a Live-mode resize drag (a cell's width
+        // really did change), so forcing this remeasure here too is pure per-frame waste during a drag.
+        if (TableView?.IsColumnResizing != true)
+        {
+            _rowHeader?.InvalidateMeasure(); // The row header does not measure every time.
+        }
+
         return base.MeasureOverride(availableSize);
     }
 
@@ -225,9 +232,15 @@ public partial class TableViewRowPresenter : Control
 
             ApplyHorizontalScroll();
 
-            // CellsHorizontalOffset is uniform across rows, so only the first row to arrange in a given layout
-            // pass computes it (the TransformToVisual is otherwise repeated for every realized row).
-            if (_v_gridLine is not null && TableView.TryClaimCellsOffsetUpdate())
+            // CellsHorizontalOffset is the boundary between the row header and the data cells — it's positioned
+            // purely by HeaderColumn's width (see TableViewRowPresenter.xaml's ColumnDefinitions), so it never
+            // depends on any data column's width and is safe to skip recomputing during a resize drag.
+            //
+            // It is also uniform across rows, so even when it IS recomputed only the first row to arrange in a
+            // given layout pass does the TransformToVisual walk; the rest read the published value. The two
+            // conditions are independent: one skips the work for a whole gesture, the other de-duplicates it
+            // within a single pass.
+            if (!TableView.IsColumnResizing && _v_gridLine is not null && TableView.TryClaimCellsOffsetUpdate())
             {
                 var transform = _v_gridLine.TransformToVisual(this);
                 var relativePosition = transform.TransformPoint(new Point(0, 0));
@@ -647,6 +660,13 @@ public partial class TableViewRowPresenter : Control
     /// Gets the list of cells in the presenter.
     /// </summary>
     public IReadOnlyList<TableViewCell> Cells => _cellsList;
+
+    /// <summary>
+    /// Gets the panel hosting scrollable (non-frozen) cells. Used to shift the whole scrollable
+    /// region in one shot when a frozen column is being resized, instead of shifting every
+    /// scrollable cell individually.
+    /// </summary>
+    internal Panel? ScrollableCellsPanel => _scrollableCellsPanel;
 
     /// <summary>
     /// Gets or sets the TableViewRow associated with the presenter.

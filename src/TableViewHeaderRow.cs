@@ -49,6 +49,7 @@ public partial class TableViewHeaderRow : Control
     private DispatcherTimer? _desiredWidthTimer;
     private bool _calculatingHeaderWidths;
     private bool _headerWidthsUpdateQueued;
+    private bool _headerWidthsCalculated; // set once the first real pass has run; see InvalidateHeaderWidths
     private bool _headersRebuildQueued;
     private int _dropColumnIndex;
     private bool _isValidDropTarget;
@@ -499,8 +500,21 @@ public partial class TableViewHeaderRow : Control
     /// Requests a header width recalculation, coalescing multiple requests raised within the same tick into a
     /// single pass. Bulk column changes and rapid resizes otherwise trigger one O(columns) recalculation each.
     /// </summary>
+    /// <remarks>
+    /// The FIRST pass runs synchronously. Coalescing exists to absorb bursts of invalidations, not to delay the
+    /// initial layout: until it has run, every column reports ActualWidth 0 and every header Width NaN, so anything
+    /// that reads a width right after the grid loads sees nothing. Deferring that one is not a saving — there is no
+    /// burst to coalesce yet — and it is a trap for callers, including a resize started before the first layout
+    /// settles, which would compute its drag from a zero width.
+    /// </remarks>
     internal void InvalidateHeaderWidths()
     {
+        if (!_headerWidthsCalculated)
+        {
+            CalculateHeaderWidths();
+            return;
+        }
+
         if (_headerWidthsUpdateQueued)
         {
             return;
@@ -552,10 +566,10 @@ public partial class TableViewHeaderRow : Control
                     ? Math.Max(min, Math.Max(header.DesiredSize.Width, column.AutoMinWidth))
                     : min;
             }
-            var starUnitWeight = starColumns.Select(x => x.Width.Value).Sum();
+            var starUnitWeight = starColumns.Sum(x => x.Width.Value);
 
-            var fixedWidth = autoColumns.Select(GetColumnDesiredWidth).Sum();
-            fixedWidth += absoluteColumns.Select(x => x.ActualWidth).Sum();
+            var fixedWidth = autoColumns.Sum(GetColumnDesiredWidth);
+            fixedWidth += absoluteColumns.Sum(x => x.ActualWidth);
 
             availableWidth -= fixedWidth;
             var starUnitWidth = starUnitWeight > 0 ? availableWidth / starUnitWeight : 0;
@@ -607,15 +621,11 @@ public partial class TableViewHeaderRow : Control
                     width = width < minWidth ? minWidth : width;
                     width = width > maxWidth ? maxWidth : width;
                     header.Width = width;
-
-                    DispatcherQueue.TryEnqueue(() =>
-                        header.Measure(
-                            new Size(header.Width,
-                            _scrollableHeadersPanel?.ActualHeight ?? ActualHeight)));
                 }
             }
 
             _calculatingHeaderWidths = false;
+            _headerWidthsCalculated = true; // a real pass ran; later invalidations may coalesce
 
             EnsureSpanners(); // banner extents are the sum of their columns' freshly settled widths
             TableView.UpdateHorizontalScrollBarMargin();
@@ -626,16 +636,20 @@ public partial class TableViewHeaderRow : Control
     /// <summary>
     /// Gets the desired width of a column based on its header and cells.
     /// </summary>
-    private double GetColumnDesiredWidth(TableViewColumn column)
+    internal double GetColumnDesiredWidth(TableViewColumn column)
     {
         var autoWidthMode = column.ColumnAutoWidthMode ?? TableView?.ColumnAutoWidthMode;
         var width = column.DesiredWidth;
 
         if (column.HeaderControl is { } header && autoWidthMode is not TableViewColumnAutoWidthMode.Cells)
         {
-            header.Width = double.NaN;
-            header.Measure(new Size(double.PositiveInfinity, ActualHeight));
-            width = Math.Max(width, header.DesiredSize.Width);
+            if (header.CachedDesiredWidth is null)
+            {
+                header.Width = double.NaN;
+                header.Measure(new Size(double.PositiveInfinity, ActualHeight));
+            }
+
+            width = Math.Max(width, header.CachedDesiredWidth ?? 0d);
         }
 
         return width;

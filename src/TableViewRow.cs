@@ -156,6 +156,15 @@ public partial class TableViewRow : ListViewItem
             {
                 // The data item changed; the cached auto-size width no longer reflects this cell's content.
                 cell.InvalidateDesiredWidth();
+
+                // Defensively resync width on reuse — a recycled container can otherwise keep a
+                // stale Width if it missed a Column.ActualWidth change while off-screen (e.g. an
+                // auto-width recalculation triggered by a sort), leaving cells misaligned with headers.
+                if (cell.Column is not null)
+                {
+                    cell.Width = cell.Column.ActualWidth;
+                }
+
                 cell.RefreshElement();
             }
 
@@ -188,8 +197,14 @@ public partial class TableViewRow : ListViewItem
         var left = Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
 
         _itemPresenter?.Arrange(new Rect(-left, 0, _itemPresenter.ActualWidth + left, _itemPresenter.ActualHeight));
-                
-        UpdatePosition();
+
+        // Position feeds drag-selection hit testing only; a column-width change never moves a row
+        // relative to the drag canvas, so recomputing it (a visual-tree transform walk) on every
+        // row on every frame of a resize drag is pure waste.
+        if (TableView?.IsColumnResizing != true)
+        {
+            UpdatePosition();
+        }
 
         return finalSize;
     }
