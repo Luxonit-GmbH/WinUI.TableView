@@ -3236,14 +3236,28 @@ public partial class TableView : ListView
         // fighting, and focus landing on cells the user left long ago.
         var generation = ++_currentCellGeneration;
 
+        // Let the SetValue that got us here unwind first. This runs from CurrentCellSlot's property-changed
+        // callback, i.e. synchronously inside that SetValue; driving ScrollIntoView and layout re-entrantly from
+        // there can fail natively, where .NET cannot catch it. (Lifted from upstream be2aa5d.) It also does the
+        // generation guard's job earlier: everything queued by a held arrow key yields here, and all but the
+        // latest bail below before touching the scroll machinery at all.
+        await Task.Yield();
+
         if (oldSlot.HasValue)
         {
+            // Unconditional: clearing the old cell's current state is right even if this navigation has been
+            // superseded, since that cell is not current either way.
             var cell = GetCellFromSlot(oldSlot.Value);
             cell?.ApplyCurrentCellState();
         }
 
         if (newSlot.HasValue)
         {
+            if (generation != _currentCellGeneration)
+            {
+                return; // superseded during the yield; skip the scroll entirely
+            }
+
             var cell = await ScrollCellIntoView(newSlot.Value);
 
             if (generation != _currentCellGeneration)

@@ -342,8 +342,38 @@ We have no equivalent, and it is a real gap for filtered trees.
 | 2026-08-07 | Grouping is snapshot semantics: `RefreshGrouping()` is the app's call. Re-keying live at 8000 mutations/sec is not on the table. |
 | 2026-08-07 | Grouping the grid cannot express as a property path is handled by the `Grouping` event, matching sorting and filtering, rather than by widening `GroupByPath`. |
 
+| 2026-08-10 | **The fork is diverged from upstream, deliberately.** Upstream landed its own row grouping (PR #425): it is the CollectionView's grouping (`GroupDescriptions => _collectionView.GroupDescriptions`, `RefreshGrouping() => _collectionView.RefreshGrouping()`), so it does nothing on the direct-binding path that the 100M-row target requires (`UseCollectionView=false`); it is Windows-only; and it cannot host trees inside groups. It is excluded permanently. Ours stays. |
+| 2026-08-10 | No further full merges of `upstream/main`. Upstream is read for ideas and mined for fixes by cherry-pick; features are re-implemented against our constraints rather than lifted. |
+
 One-group-per-row still stands as a constraint: the adapter rejects duplicate instances by design, so an item
 cannot appear under two groups at once.
+
+## Upstream policy
+
+Our needs — performance with very large data, direct binding, trees inside groups — are not upstream's, and
+the two grouping implementations cannot coexist: they share public names (`RefreshGrouping`,
+`TableViewGroupingEventArgs`, `GroupingPage`) with different meanings, and every future upstream grouping change
+would conflict with ours on the same lines. So the relationship is now:
+
+- **Fixes:** cherry-pick with `-x`, so the origin is recorded. Dry-run first on a throwaway branch — apply the
+  candidates one at a time, note which conflict, build, run the suite, delete the branch — then apply the clean
+  ones for real. The first such pass (2026-08-10) took the resize-before-double-tap fix and the sortable-column
+  hint icon; both landed clean and green.
+- **Features:** read the implementation, take the idea, build it against our constraints. Do not lift code that
+  assumes the CollectionView.
+- **Standing rejects**, resolved "ours" every time they come up:
+  - Upstream grouping, in its entirety (the 14 new files, and the grouping hunks in `TableView.cs`,
+    `TableView.Properties.cs`, `TableViewColumnHeader.cs`).
+  - Upstream `753331b` "Update row positions on scroll and size changes": it re-adds a per-row
+    `TransformToVisual` on every scroll event that we removed to stop starving the live feed. `Position` is
+    computed on demand at its readers here.
+  - The column-header sort refactor inside the grouping PR (`b7ce0aa`, `8e39863`): grouping-dependent, does not
+    apply without it. Our Shift+click multi-sort stays.
+- **Worth doing by hand, not by pick:** upstream's pointer refactor (`bd94046`, `708de3a`) replaces our
+  `AddHandler(PointerPressedEvent, …, handledEventsToo: true)` — which runs on every press, including ones a
+  child already handled — with per-control `OnPointerPressed` overrides. Cleaner and slightly cheaper, but it is
+  the exact area of the "context menu fires before selection" bug; do it with the context-selection tests
+  watching.
 
 ## Appendix: right-click selection
 
