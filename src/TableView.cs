@@ -46,9 +46,29 @@ public partial class TableView : ListView
     private IEnumerable? _directSource; // the raw source bound straight to the ListView when UseCollectionView is false
     private readonly HashSet<TableViewRow> _rows = [];
     private bool _realizeInFlight;
+    private bool _columnPrefetchPending; // an idle prefetch walk is queued or running (see RequestColumnPrefetch)
+    private bool _columnPrefetchAgain;   // a request arrived mid-walk; run once more when it finishes
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _columnPrefetchTimer; // debounces RequestColumnPrefetch
+    private long _lastColumnPrefetchRequestTick; // last horizontal tick, recycle or prefetch request; the pump yields while it is recent
+    private int _columnPrefetchColumnCursor;     // where a time-budgeted increment stopped inside a row's margin
+
+    /// <summary>
+    /// How many prefetch increments have actually done work. Diagnostic: a benchmark reads it before and after a
+    /// gesture to prove whether the pump ran during it.
+    /// </summary>
+    internal int ColumnPrefetchIncrements { get; private set; }
+
+    /// <summary>
+    /// How many cells the prefetch pump has actually created content for. Diagnostic, like
+    /// <see cref="ColumnPrefetchIncrements"/> — but increments only say the pump ran, and one increment can cover
+    /// dozens of cheap cells; this says what it did.
+    /// </summary>
+    internal int ColumnPrefetchedCells { get; private set; }
     private (int First, int Last) _lastRealizedRange = (-2, -2);
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _realizeSettleTimer; // debounces realize until horizontal scroll settles
     private const double HorizontalScrollSettleMs = 50; // ms of no horizontal movement before realizing the visible band
+    private const double ColumnPrefetchDelayMs = 150;   // ms of no scroll or recycle activity before the idle prefetch pump starts
+    private const double ColumnPrefetchBudgetMs = 2;    // ms of work per prefetch increment; a template-heavy cell is a few of these
     private int _realizeGeneration; // bumped on every scroll; an in-flight chunked realize aborts when it changes
     private const string PanOffsetKey = "Offset";
     private CompositionPropertySet? _panPropertySet;
@@ -1399,6 +1419,12 @@ public partial class TableView : ListView
             return;
         }
 
+        // Every horizontal tick counts as activity for the idle prefetch pump — not just the ticks that move the
+        // band. A pan that stays inside the cached band for thirty ticks raises no realize request, and a pump
+        // that only watched requests read that as quiet and ran mid-drag (measured: ~10 increments per pan,
+        // worst ticks of two seconds). The pump yields while this is recent.
+        _lastColumnPrefetchRequestTick = Environment.TickCount64;
+
         // Once the viewport has left the realized band there is nothing left to draw out there — those cells are
         // collapsed — so waiting out the settle window would show the user blank columns for as long as they keep
         // dragging. Realize now instead. A drag delivers offsets every 8-16ms, well inside the 50ms window, so the
@@ -1471,11 +1497,8 @@ public partial class TableView : ListView
     private void StartBandRealize()
     {
         // Starting a pass is what supersedes an older one — not every scroll tick, which would abort a pass that
-        // was about to finish. Anything still walking rows is dead as of this line, so it is no longer in flight;
-        // the flag is set again below only if this pass actually starts chunking.
-        _realizeGeneration++;
-        _realizeInFlight = false;
-
+        // was about to finish, and not a settle that finds the band unchanged, which would abort a queued idle
+        // prefetch for nothing. The generation is bumped only where a pass actually starts chunking.
         var wide = GetVisibleScrollableRange(ColumnCacheLength);
 
         if (wide.First < 0)
@@ -1488,6 +1511,7 @@ public partial class TableView : ListView
 
             if (scrollableCount > 0)
             {
+                _realizeGeneration++; // supersedes anything still walking rows
                 _realizeInFlight = true;
                 RealizeRowChunk((0, scrollableCount - 1), _realizeGeneration, [.. _rows], 0, recordRange: false);
             }
@@ -1497,9 +1521,14 @@ public partial class TableView : ListView
 
         if (wide == _lastRealizedRange)
         {
+            // Settled on a band that is already realized: nothing to walk, but the idle time that follows is
+            // exactly when the prefetch margin should fill. Without this, a settle after load (a second header
+            // width pass, say) would end here and the first scroll would still create everything it reveals.
+            RequestColumnPrefetch();
             return;
         }
 
+        _realizeGeneration++; // supersedes anything still walking rows
         _realizeInFlight = true;
         RealizeRowChunk(wide, _realizeGeneration, [.. _rows], 0);
     }
@@ -1544,7 +1573,12 @@ public partial class TableView : ListView
         if (HasLeftRealizedBand())
         {
             StartBandRealize();
+            return;
         }
+
+        // Settled: the viewport is inside the band it just realized. Spend the idle time that follows on the
+        // columns beside it, so the next scroll reveals content instead of creating it.
+        RequestColumnPrefetch();
     }
 
     /// <summary>
@@ -1563,6 +1597,198 @@ public partial class TableView : ListView
         // other row. Falls back to computing the band when none has been established yet (early load).
         var range = _lastRealizedRange.First >= 0 ? _lastRealizedRange : GetVisibleScrollableRange(ColumnCacheLength);
         RealizeRowCells(row, range);
+
+        // A recycled or new row has its band realized but nothing beside it; queue the margin for idle time. A
+        // vertical scroll raises this once per recycled row, and the pump folds the burst into one walk.
+        RequestColumnPrefetch();
+    }
+
+    /// <summary>
+    /// Asks for the columns just outside the realized band to have their content created while the thread is
+    /// idle, so the first horizontal scroll finds it already there.
+    /// </summary>
+    /// <remarks>
+    /// "Lags on the first scroll, smooth on the second" is content creation: every newly revealed column costs an
+    /// element per realized row, generated on the very scroll that reveals it. This moves that work to idle time.
+    /// The cells stay collapsed meanwhile, so nothing is measured or drawn until they actually scroll in, and each
+    /// new element's DataContext is pinned at once so a recycle underneath it costs nothing. Runs at Low priority
+    /// in row chunks; a real scroll (a bumped generation) abandons it and the band realize re-requests it when it
+    /// settles. Requests that arrive mid-walk — one per recycled row during a vertical scroll — fold into a single
+    /// follow-up walk rather than a queue.
+    /// </remarks>
+    internal void RequestColumnPrefetch()
+    {
+        if (!IsColumnVirtualizationEnabled || ColumnPrefetchLength <= 0)
+        {
+            return;
+        }
+
+        // "Idle" means the user has stopped, not the gap between two frames of a drag. Every settle during a pan
+        // re-requests this; running it then would create margin content AHEAD of the drag — more creation inside
+        // the gesture, which measured as a slower first scroll, not a faster one. So the request is debounced:
+        // each one restarts the timer, and the pump starts only once requests have stopped arriving.
+        _lastColumnPrefetchRequestTick = Environment.TickCount64; // the pump checks this before every increment
+        ArmColumnPrefetchTimer();
+    }
+
+    /// <summary>
+    /// (Re)starts the debounce without touching the activity stamp. The pump's own yield uses this: a yield that
+    /// stamped activity would count as activity, and the pump would then wait out the window, wake, see its own
+    /// stamp as "recent", and yield again — forever, at the timer's cadence, doing no work. Measured: 5-8
+    /// increments in four seconds of idle.
+    /// </summary>
+    private void ArmColumnPrefetchTimer()
+    {
+        _columnPrefetchTimer ??= CreateColumnPrefetchTimer();
+        _columnPrefetchTimer.Stop();
+        _columnPrefetchTimer.Start();
+    }
+
+    private bool IsColumnPrefetchActivityRecent
+        => Environment.TickCount64 - _lastColumnPrefetchRequestTick < ColumnPrefetchDelayMs;
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateColumnPrefetchTimer()
+    {
+        var timer = DispatcherQueue.CreateTimer();
+        // A little past the window, so that when this fires the recency check has already gone false. Firing
+        // exactly at the window, with TickCount64's ~16ms granularity, left it sitting on the edge.
+        timer.Interval = TimeSpan.FromMilliseconds(ColumnPrefetchDelayMs + 32);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => StartColumnPrefetch();
+        return timer;
+    }
+
+    private void StartColumnPrefetch()
+    {
+        if (!IsColumnVirtualizationEnabled || ColumnPrefetchLength <= 0)
+        {
+            return; // the request that armed the timer may predate a change that turned prefetch off
+        }
+
+        if (IsColumnPrefetchActivityRecent)
+        {
+            ArmColumnPrefetchTimer(); // still busy: wait out another window rather than queue an increment that only yields
+            return;
+        }
+
+        if (_columnPrefetchPending)
+        {
+            _columnPrefetchAgain = true;
+            return;
+        }
+
+        _columnPrefetchPending = true;
+        var generation = _realizeGeneration;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => PrefetchChunk([.. _rows], 0, generation));
+    }
+
+    private void PrefetchChunk(TableViewRow[] rows, int start, int generation)
+    {
+        // A scroll since this was queued, or a realize still walking the rows, wins: never compete with either.
+        // Both re-request prefetch when they settle, so there is nothing to carry over.
+        if (generation != _realizeGeneration || _realizeInFlight || _lastRealizedRange.First < 0)
+        {
+            _columnPrefetchPending = false;
+
+            var again = _columnPrefetchAgain;
+            _columnPrefetchAgain = false;
+
+            // Superseded by a pass that is still walking rows, or with no band to work from: that pass re-requests
+            // on completion, so nothing to do here. Superseded by a generation bump with nothing in flight — i.e. a
+            // request arrived while this walk was queued — is the one case to retry now, or the request is lost.
+            if (again && !_realizeInFlight && _lastRealizedRange.First >= 0)
+            {
+                RequestColumnPrefetch();
+            }
+
+            return;
+        }
+
+        // Scrolling resumed since the pump started — every settle and every recycle counts as a request. Stop, and
+        // let the debounce restart it once things are quiet. This is what keeps an increment out of the middle of
+        // a drag whatever the dispatcher thinks "idle" means: with heavy cells one tick can outlast the debounce
+        // window, and a Low-priority callback slipping into that gap measured as a WORSE first scroll than no
+        // prefetch at all.
+        if (IsColumnPrefetchActivityRecent)
+        {
+            _columnPrefetchPending = false;
+            _columnPrefetchAgain = false;
+            ArmColumnPrefetchTimer(); // re-arm only: stamping here would make the yield self-perpetuating
+            return;
+        }
+
+        ColumnPrefetchIncrements++; // past every yield: this increment is about to do work
+
+        var band = _lastRealizedRange;
+        var wide = GetVisibleScrollableRange(ColumnCacheLength + ColumnPrefetchLength);
+
+        if (wide.First >= 0)
+        {
+            // Time-budgeted, not row-counted: a Button-templated cell costs milliseconds to create and measure, so
+            // eight rows of margin in one callback would be hundreds of them. Each increment stops after a couple of
+            // milliseconds — mid-row if need be — and the next one picks up where it left off.
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var row = start;
+
+            while (row < rows.Length)
+            {
+                if (!PrefetchRowCells(rows[row], band, wide, started))
+                {
+                    var resumeAt = row;
+                    DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => PrefetchChunk(rows, resumeAt, generation));
+                    return;
+                }
+
+                _columnPrefetchColumnCursor = 0;
+                row++;
+            }
+        }
+
+        _columnPrefetchPending = false;
+
+        if (_columnPrefetchAgain)
+        {
+            _columnPrefetchAgain = false;
+            RequestColumnPrefetch(); // rows recycled while this walk ran; one more pass picks them up
+        }
+    }
+
+    /// <summary>
+    /// Creates content for a row's cells in the prefetch margin — inside the wide range, outside the band —
+    /// resuming from the column cursor and stopping once the increment's time budget is spent.
+    /// </summary>
+    /// <returns>Whether the row was finished; <see langword="false"/> means the cursor marks where to resume.</returns>
+    private bool PrefetchRowCells(TableViewRow row, (int First, int Last) band, (int First, int Last) wide, long started)
+    {
+        if (row.RowPresenter is not { } presenter)
+        {
+            return true;
+        }
+
+        var scrollable = Columns.VisibleScrollableColumns;
+        var first = Math.Max(0, wide.First);
+        var last = Math.Min(wide.Last, scrollable.Count - 1);
+
+        for (var i = Math.Max(first, _columnPrefetchColumnCursor); i <= last; i++)
+        {
+            if (i >= band.First && i <= band.Last)
+            {
+                continue; // in band: the realize pass owns it
+            }
+
+            if (presenter.GetCellForColumn(scrollable[i])?.PrefetchContent() is true)
+            {
+                ColumnPrefetchedCells++;
+            }
+
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds >= ColumnPrefetchBudgetMs)
+            {
+                _columnPrefetchColumnCursor = i + 1;
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private void RealizeRowCells(TableViewRow row, (int First, int Last) range)

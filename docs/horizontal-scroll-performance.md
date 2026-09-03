@@ -68,11 +68,15 @@ Two things that made this workable, both verified by probe rather than assumed:
 - **XAML hit-testing follows composition `Translation`**, including when an `ExpressionAnimation` over a shared
   `CompositionPropertySet` drives it. The widely-repeated caveat that it does not is wrong for this WinUI version.
   Without this the whole approach would have needed hit-testing rebuilt from column offsets.
-- **`TransformToVisual` also reports it** — exactly, to the pixel. That one is a hazard rather than a help: the pan
-  on the shared ancestor cancels in a relative transform, but a counter-translation does not, so
-  `CellsHorizontalOffset` (computed from the grid line's transform) grew by the scroll offset until it was
-  explicitly taken back off. Anything else that reads a position across the pinned/panned boundary has the same
-  trap.
+- **`TransformToVisual` also reports it — but only once the compositor has committed it.** That one is a hazard,
+  not a help, and it cost a regression: `CellsHorizontalOffset` (where the cells start, which sizes the header's
+  corner panel) was computed from the counter-translated grid line's transform minus `HorizontalOffset`. In the
+  synchronous layout pass right after a scroll the commit has not happened, the subtraction went negative,
+  clamped to 0, and every header slid 16px (the row header width) left of its cells — intermittently, because a
+  later re-arrange that ran after the commit corrected it. The rule: **layout boundaries come from layout
+  positions (`ActualOffset`), never from `TransformToVisual` across the pinned/panned boundary.** Positions that
+  must track the screen (drag-selection hit testing) are the opposite case, and read `TransformToVisual` on
+  demand at the moment they are needed.
 
 ## Measuring it
 
@@ -95,6 +99,47 @@ horizontal toward vertical, it has not addressed the reported problem.
 The rendered column sweep with virtualization on is flat: 12.3 / 16.3 / 15.2 / 17.4 ms per frame at 20 / 50 / 80 /
 120 columns, with 50 scoring worse than 80. Horizontal panning always cost ~3x vertical. What 80 columns changed is
 that people now *have* to scroll horizontally, and further, to reach their data.
+
+## The first scroll: idle prefetch
+
+Panning is free now, but the *first* scroll into columns that have never been shown still creates their content
+— an element per revealed column per realized row — on the scroll that reveals them. "Lags on the first scroll,
+smooth on the second" is that, and for a cell that does real work in its constructor (a UserControl with
+`InitializeComponent`) it is the whole cost.
+
+`ColumnPrefetchLength` (viewports, default 1; 0 disables) sizes a margin beside the realized band. A low-priority
+pump creates that margin's content while the grid is idle, applies templates explicitly, measures it once under the
+constraint the cell will use, and pins its DataContext — but leaves the cells collapsed, so nothing is measured or
+drawn until it actually scrolls in, and a recycle underneath costs nothing. The pump yields whenever there has
+been a horizontal tick, a recycle or a request in the last 150ms, works in 2ms increments (mid-row if need be), and
+resumes on its own after a quiet window.
+
+Measured, each arm in its own test host, constructor-built cells, 100 ticks of 20px on a fresh grid:
+
+| | median | worst single tick |
+|---|---|---|
+| prefetch off | 1577–1967 ms | 1.0–1.1 s in half the iterations |
+| prefetch on (456 cells prefetched, 0 pump increments during the pan) | 1420–1424 ms | 0.17–0.30 s |
+
+The median gain is modest; the tail is the point — those one-second hitches are what a user calls lag, and the
+proxy cell here is lighter than a real one.
+
+### What this measurement got wrong first, so nobody repeats it
+
+- **Arms measured in one test host cannot be compared.** Whichever arm ran first was fastest, every time, by up
+  to 3x; swapping two arms moved the gap with them. A collection between iterations does not clear it — it is
+  composition and DirectX state the collector cannot see. One vstest invocation per arm, with an exact-name
+  filter (`/TestCaseFilter:"Name=..."`; `/Tests:` matches substrings and quietly ran two arms in one host).
+  A "3x faster first scroll" was reported from a single-host run before this was understood, and retracted.
+- **Count what the pump did, not that it ran.** An increment is a time budget; 5-8 increments turned out to be
+  the whole margin when cells were cheap, and looked like starvation. The pump counts cells too.
+- **The proxy cell has to pay where the real one pays.** A Button pays in `ApplyTemplate` on first Measure,
+  which a Measure under a collapsed ancestor never triggers — with Button cells the prefetched arm equalled
+  "off" exactly. A `TextBlock` pays nothing. The benchmark's heavy cell builds its tree in the constructor, like
+  the consuming app's, and prefetch now applies templates explicitly as well.
+- **"Idle" is not "no request lately."** A pan that stays inside the cached band raises no realize request for
+  thirty ticks; a pump that watched requests read that as quiet and ran mid-drag. Every horizontal tick stamps
+  activity now. And the yield must not stamp activity itself, or it perpetuates.
 
 ## Left open
 

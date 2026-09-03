@@ -69,6 +69,11 @@ public partial class TableView
     public static readonly DependencyProperty ColumnCacheLengthProperty = DependencyProperty.Register(nameof(ColumnCacheLength), typeof(double), typeof(TableView), new PropertyMetadata(0.5d, OnColumnCacheLengthChanged));
 
     /// <summary>
+    /// Identifies the <see cref="ColumnPrefetchLength"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ColumnPrefetchLengthProperty = DependencyProperty.Register(nameof(ColumnPrefetchLength), typeof(double), typeof(TableView), new PropertyMetadata(1d, OnColumnPrefetchLengthChanged));
+
+    /// <summary>
     /// Identifies the UseCollectionView dependency property.
     /// </summary>
     public static readonly DependencyProperty UseCollectionViewProperty = DependencyProperty.Register(nameof(UseCollectionView), typeof(bool), typeof(TableView), new PropertyMetadata(true, OnUseCollectionViewChanged));
@@ -843,6 +848,21 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets how far beyond the realized band, in viewports, cell content is created while the thread is
+    /// idle. Defaults to 1; 0 turns idle prefetch off. Only meaningful with <see cref="IsColumnVirtualizationEnabled"/>.
+    /// </summary>
+    /// <remarks>
+    /// The realized band (<see cref="ColumnCacheLength"/>) is what is measured and drawn. The prefetch margin is
+    /// created but stays collapsed, so it costs idle time and memory, never a frame — and the first scroll into it
+    /// finds content rather than generating it. Size it to how far a user typically scrolls before pausing.
+    /// </remarks>
+    public double ColumnPrefetchLength
+    {
+        get => (double)GetValue(ColumnPrefetchLengthProperty);
+        set => SetValue(ColumnPrefetchLengthProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets whether the items source is projected through the internal collection view (which provides
     /// sorting, filtering and grouping but keeps a full in-memory copy of the source). Set to <see langword="false"/>
     /// to bind the source <b>directly</b> to the underlying list: no copy is made, so the control virtualizes straight
@@ -1298,6 +1318,18 @@ public partial class TableView
     /// <summary>
     /// Handles changes to the ColumnCacheLength property by forcing the realized column band to be recomputed.
     /// </summary>
+    /// <summary>
+    /// Handles changes to the ColumnPrefetchLength property: a wider margin is worth filling now, a narrower one
+    /// simply stops growing.
+    /// </summary>
+    private static void OnColumnPrefetchLengthChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            tableView.RequestColumnPrefetch();
+        }
+    }
+
     private static void OnColumnCacheLengthChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is TableView tableView)

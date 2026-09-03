@@ -112,6 +112,65 @@ public class PerformanceBenchmarks
     }
 
     /// <summary>
+    /// The reported shape: many groups, ~75k rows, collapse "takes forever" while expand is fast. The adapter alone
+    /// collapses AND re-expands a 100k-child branch in ~58ms (Tree_CollapseThenExpand_100kChildBranch), so the
+    /// asymmetry has to live downstream of the Reset. This splits the two directions and varies the two things
+    /// that only a removal touches: a live selection over the removed rows, and the CollectionView's rebuild.
+    /// Direct binding (UseCollectionView=false) is the consuming app's mode at scale.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grouping_Collapse_vs_Expand_75kRows()
+    {
+        const int rows = 75_000;
+
+        // Direct binding, no selection: collapse and expand timed separately.
+        var tableView = await LoadGroupingGridAsync(rows, useCollectionView: false);
+        tableView.GroupByPath = "Bucket";
+        tableView.UpdateLayout();
+        var group = tableView.Groups[0];
+
+        Report(Measure(
+            () => { tableView.SetGroupExpanded(group, false); tableView.UpdateLayout(); },
+            warmup: 1, iterations: 3,
+            reset: () => { tableView.SetGroupExpanded(group, true); tableView.UpdateLayout(); }),
+            "Grouping_Collapse_1500RowGroup_75k_Direct");
+
+        Report(Measure(
+            () => { tableView.SetGroupExpanded(group, true); tableView.UpdateLayout(); },
+            warmup: 1, iterations: 3,
+            reset: () => { tableView.SetGroupExpanded(group, false); tableView.UpdateLayout(); }),
+            "Grouping_Expand_1500RowGroup_75k_Direct");
+
+        // Same, with every row selected first: a collapse now removes selected rows, an expand adds unselected
+        // ones — the one thing that is structurally asymmetric between the two.
+        tableView.SelectAll();
+        tableView.UpdateLayout();
+
+        Report(Measure(
+            () => { tableView.SetGroupExpanded(group, false); tableView.UpdateLayout(); },
+            warmup: 1, iterations: 3,
+            reset: () => { tableView.SetGroupExpanded(group, true); tableView.UpdateLayout(); }),
+            "Grouping_Collapse_1500RowGroup_75k_Direct_SelectAll");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+
+        // CollectionView path, no selection: a Reset makes it rebuild its view copy.
+        tableView = await LoadGroupingGridAsync(rows, useCollectionView: true);
+        tableView.GroupByPath = "Bucket";
+        tableView.UpdateLayout();
+        group = tableView.Groups[0];
+
+        Report(Measure(
+            () => { tableView.SetGroupExpanded(group, false); tableView.UpdateLayout(); },
+            warmup: 1, iterations: 3,
+            reset: () => { tableView.SetGroupExpanded(group, true); tableView.UpdateLayout(); }),
+            "Grouping_Collapse_1500RowGroup_75k_CollectionView");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
     /// The cost grouping adds to an ordinary scroll: the same horizontal pan, but over a grouped source.
     /// </summary>
     [UITestMethod]
@@ -174,9 +233,9 @@ public class PerformanceBenchmarks
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
     }
 
-    private static async Task<TableView> LoadGroupingGridAsync()
+    private static async Task<TableView> LoadGroupingGridAsync(int rows = RowCount, bool useCollectionView = true)
     {
-        var items = new ObservableCollection<BenchItem>(Enumerable.Range(0, RowCount).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
+        var items = new ObservableCollection<BenchItem>(Enumerable.Range(0, rows).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
 
         var tableView = new TableView
         {
@@ -184,6 +243,7 @@ public class PerformanceBenchmarks
             RowHeight = 32,
             Width = 1200,
             Height = 600,
+            UseCollectionView = useCollectionView, // must precede ItemsSource: it decides which path binds it
         };
 
         foreach (var column in CreateColumns(ColumnCount))
@@ -799,11 +859,66 @@ public class PerformanceBenchmarks
     }
 
     /// <summary>
+    /// Columns whose cell element builds its whole visual tree in its CONSTRUCTOR — the shape of a UserControl
+    /// with InitializeComponent, which is what the consuming app's cells are and where its profiler put the
+    /// per-cell cost. The proxy matters: a templated Control (a Button) pays on first Measure instead, which a
+    /// collapsed prefetch could not reach, and measured as no benefit at all. A TextBlock pays nothing anywhere.
+    /// </summary>
+    private static IEnumerable<TableViewColumn> CreateHeavyColumns(int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            yield return new CtorHeavyColumn
+            {
+                Header = $"Col {i}",
+                Width = new GridLength(100),
+                Binding = new Binding { Path = new PropertyPath(nameof(BenchItem.Name)) },
+            };
+        }
+    }
+
+    private sealed class CtorHeavyColumn : TableViewTextColumn
+    {
+        public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem) => new CtorHeavyCell(Binding);
+    }
+
+    /// <summary>
+    /// A cell that does its work up front, like InitializeComponent does: a small tree of a border, a panel and
+    /// three text blocks, one of them bound, all created and styled in the constructor.
+    /// </summary>
+    private sealed class CtorHeavyCell : UserControl
+    {
+        public CtorHeavyCell(Binding? binding)
+        {
+            var value = new TextBlock { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+
+            if (binding is not null)
+            {
+                value.SetBinding(TextBlock.TextProperty, binding);
+            }
+
+            var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            panel.Children.Add(new TextBlock { Text = "▲", Opacity = 0.6 });
+            panel.Children.Add(value);
+            panel.Children.Add(new TextBlock { Text = "bp", Opacity = 0.6 });
+
+            Content = new Border
+            {
+                Padding = new Thickness(6, 2, 6, 2),
+                CornerRadius = new CornerRadius(3),
+                BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+                Child = panel,
+            };
+        }
+    }
+
+    /// <summary>
     /// A blotter-shaped grid: <paramref name="columnCount"/> fixed 100px columns over <see cref="RowCount"/> rows
     /// in a 1200x800 viewport. Column virtualization is a parameter rather than a constant because it is the
     /// biggest fork in the horizontal path, and because the control ships with it off.
     /// </summary>
-    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization, int frozenColumns = 0)
+    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization, int frozenColumns = 0, double prefetchLength = 1d, bool heavyCells = false)
     {
         var items = new ObservableCollection<BenchItem>(
             Enumerable.Range(0, RowCount).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
@@ -817,10 +932,11 @@ public class PerformanceBenchmarks
             Height = 800,
             SelectionMode = ListViewSelectionMode.Extended,
             FrozenColumnCount = frozenColumns,
+            ColumnPrefetchLength = prefetchLength, // set before load: the pump runs during the settle wait below
             RowHeaderWidth = frozenColumns > 0 ? 40 : double.NaN,
         };
 
-        tableView.Columns.AddRange(CreateColumns(columnCount));
+        tableView.Columns.AddRange(heavyCells ? CreateHeavyColumns(columnCount) : CreateColumns(columnCount));
         tableView.ItemsSource = items;
 
         return LoadAsync(tableView);
@@ -876,6 +992,125 @@ public class PerformanceBenchmarks
 
         Report(result, "Grid_HorizontalPan_80Cols_Frozen_100Frames_Rendered");
         await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// The FIRST horizontal scroll on a fresh grid — the one that has to create content for every column it
+    /// reveals — with idle prefetch off and on. Every other pan benchmark here measures the SECOND scroll: their
+    /// warmup pass realizes the columns, and the timed passes glide over content that already exists, which is
+    /// exactly why "lags on the first scroll" never showed up in them. This one loads a fresh grid per iteration
+    /// so creation stays inside the stopwatch. Both arms are given the same idle time before the pan; only the
+    /// prefetch arm has anything to do with it. The gap between the two rows is what the user's first drag gains.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOff()
+        => await FirstScrollAsync(heavyCells: false, "Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOff", prefetch: 0, stopPumpBeforePan: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn()
+        => await FirstScrollAsync(heavyCells: false, "Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn", prefetch: 1, stopPumpBeforePan: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn_PumpStoppedBeforePan()
+        => await FirstScrollAsync(heavyCells: false, "Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn_PumpStoppedBeforePan", prefetch: 1, stopPumpBeforePan: true);
+
+    /// <summary>
+    /// The same first scroll over Button cells (see <see cref="CreateHeavyColumns"/>). This is the one that can
+    /// show what prefetch is for: a Control's template is applied on its first Measure, so with prefetch off that
+    /// cost lands inside the scroll, and with it on it has already been paid at idle. The plain-cell twin above is
+    /// the control for the mechanism's overhead; this is the measurement of its benefit.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOff()
+        => await FirstScrollAsync(heavyCells: true, "Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOff", prefetch: 0, stopPumpBeforePan: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOn()
+        => await FirstScrollAsync(heavyCells: true, "Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOn", prefetch: 1, stopPumpBeforePan: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOn_PumpStoppedBeforePan()
+        => await FirstScrollAsync(heavyCells: true, "Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOn_PumpStoppedBeforePan", prefetch: 1, stopPumpBeforePan: true);
+
+    /// <summary>
+    /// One arm of the first-scroll measurement. Run each arm in its OWN test host: arms measured in sequence
+    /// inherit whatever the earlier ones left behind — composition and DirectX state the collector cannot see —
+    /// and whichever arm runs first is the fastest regardless of which it is. Swapping two arms moved the gap with
+    /// them. Separate hosts (one vstest invocation per test) are the only clean comparison.
+    /// </summary>
+    /// <param name="stopPumpBeforePan">
+    /// Keep the content the pump created during the idle wait but switch the pump off before panning. Separates
+    /// what the pan pays to reveal prefetched cells from what the pump costs if it runs during the pan.
+    /// </param>
+    private async Task FirstScrollAsync(bool heavyCells, string name, double prefetch, bool stopPumpBeforePan)
+    {
+        var samples = new List<double>();
+
+        for (var iteration = 0; iteration < 3; iteration++)
+        {
+            var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true, prefetchLength: prefetch, heavyCells: heavyCells);
+
+            // Idle time for the pump; a no-op when prefetch is off. Heavy cells cost the pump ~5ms each against a
+            // 2ms increment budget, so 300 margin cells need well over a second — give them enough to finish, or
+            // the "prefetched" arm is only partly prefetched and the comparison is unfair.
+            await Task.Delay(heavyCells ? 4000 : 1000);
+
+            if (stopPumpBeforePan)
+            {
+                tableView.ColumnPrefetchLength = 0; // content created so far stays; nothing more is created
+            }
+
+            tableView.UpdateLayout();
+
+            var incrementsBefore = tableView.ColumnPrefetchIncrements;
+            var cellsBefore = tableView.ColumnPrefetchedCells;
+            var stopwatch = Stopwatch.StartNew();
+            var worstTick = 0d;
+            var worstIndex = 0;
+            var lastElapsed = 0d;
+
+            for (var i = 1; i <= PanTicks; i++)
+            {
+                tableView.SetValue(TableView.HorizontalOffsetProperty, i * PanStep);
+                tableView.UpdateLayout();
+                await WaitForRenderAsync();
+
+                // Per-tick timing tells a stall apart from spread work: one 3000ms tick is a pause (GC,
+                // finalization, a layout cycle); a hundred 30ms ticks is the pan genuinely costing more.
+                var now = stopwatch.Elapsed.TotalMilliseconds;
+
+                if (now - lastElapsed > worstTick)
+                {
+                    worstTick = now - lastElapsed;
+                    worstIndex = i;
+                }
+
+                lastElapsed = now;
+            }
+
+            stopwatch.Stop();
+            samples.Add(stopwatch.Elapsed.TotalMilliseconds);
+
+            TestContext.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"{name} #{iteration}: {stopwatch.Elapsed.TotalMilliseconds:F0} ms total, worst tick {worstTick:F0} ms at tick {worstIndex}, prefetched cells before pan: {cellsBefore}, increments before pan: {incrementsBefore}, during pan: {tableView.ColumnPrefetchIncrements - incrementsBefore}"));
+
+            await UnloadAsync(tableView);
+
+            // A fresh 10k-row grid per iteration leaves a lot behind, and a collection landing inside the NEXT
+            // iteration's pan shows up as a multi-second tick unrelated to what is being measured.
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        samples.Sort();
+        Report(new BenchResult(samples[1], samples[0], samples[2], samples.Count), name);
     }
 
     /// <summary>

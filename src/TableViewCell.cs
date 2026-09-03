@@ -37,6 +37,7 @@ public partial class TableViewCell : ContentControl
     private bool _contentPending;
     private bool _isInViewport;
     private bool _dataContextPinned;              // content element's DataContext is held as a local value (see PinContentDataContext)
+    private object? _pinnedItem;                  // the row item that local value was taken from; same item on unpin = nothing to rebind
     // Cache key for the last applied content constraint (see ConstrainContent): the constraint depends only on these,
     // not on the cell's value, so unchanged passes can skip the recompute + the MaxWidth/MaxHeight/Visibility sets.
     private FrameworkElement? _constrainedElement;
@@ -123,6 +124,7 @@ public partial class TableViewCell : ContentControl
         _contentDesiredWidth = double.NaN;
         _autoMinWidthMeasured = false;
         _dataContextPinned = false; // a fresh element inherits; it is pinned again if the band has moved away
+        _pinnedItem = null;
 
         // Re-measuring unconstrained once the content loads feeds the column's desired (auto) width and the
         // AutoSizeMinWidth minimum. Skip subscribing for plain fixed/star columns to avoid an extra measure pass.
@@ -863,6 +865,37 @@ public partial class TableViewCell : ContentControl
     }
 
     /// <summary>
+    /// Creates this cell's deferred content now, while it is still outside the viewport, so the scroll that
+    /// eventually reveals it has nothing left to generate.
+    /// </summary>
+    /// <remarks>
+    /// The cell stays collapsed, so the new element is neither measured nor drawn; its bindings evaluate once
+    /// against the row's current item on attach, and the DataContext is pinned straight away so a recycle
+    /// underneath it costs nothing until it actually scrolls into view. Driven by the TableView's idle prefetch
+    /// pump, never by layout.
+    /// </remarks>
+    internal bool PrefetchContent()
+    {
+        if (_isInViewport || !EnsureContent() || Content is not FrameworkElement element)
+        {
+            return false; // in view, the realize pass owns it; otherwise nothing was pending
+        }
+
+        PinContentDataContext(pin: true);
+
+        // Creation reaches a constructor-built element's cost (a UserControl's InitializeComponent). A templated
+        // Control pays instead when its template is applied — normally on first Measure, which does not happen
+        // under a collapsed ancestor — so apply it explicitly, then measure once under the constraint the cell will
+        // use (ConstrainContent also primes its cache, so the reveal's own pass is a hit). The scroll that reveals
+        // it then re-measures an already-built tree under an unchanged constraint.
+        (element as Control)?.ApplyTemplate();
+        ConstrainContent(element);
+        element.Measure(new Size(element.MaxWidth, element.MaxHeight));
+
+        return true;
+    }
+
+    /// <summary>
     /// Sets whether this cell's column is currently within the horizontal viewport. When it leaves the viewport the
     /// entire cell is collapsed; a collapsed element's <c>Measure()</c> is a no-op, so its whole template (and content)
     /// is skipped during layout — the dominant cost for many-column grids. It is re-shown and re-measured when the
@@ -918,26 +951,40 @@ public partial class TableViewCell : ContentControl
     /// </remarks>
     private void PinContentDataContext(bool pin)
     {
-        if (pin == _dataContextPinned || Content is not FrameworkElement element)
+        if (Content is not FrameworkElement element || element.GetBindingExpression(DataContextProperty) is not null)
         {
-            return;
-        }
-
-        if (element.GetBindingExpression(DataContextProperty) is not null)
-        {
-            return; // the column binds DataContext itself (e.g. the ComboBox column); a local value would break it
+            return; // no content, or the column binds DataContext itself (the ComboBox column) — a local value would break it
         }
 
         if (pin)
         {
+            if (_dataContextPinned)
+            {
+                return;
+            }
+
+            _pinnedItem = Row?.Content;
             element.DataContext = element.DataContext;
-        }
-        else
-        {
-            element.ClearValue(DataContextProperty);
+            _dataContextPinned = true;
+            return;
         }
 
-        _dataContextPinned = pin;
+        if (!_dataContextPinned)
+        {
+            return;
+        }
+
+        // Back in view under the SAME item it was pinned to — the common case for prefetched content on the first
+        // scroll — the local value is already the right one, and clearing it would only re-run every binding for the
+        // same result. Stay pinned. A recycle under a different item is the case that must re-inherit.
+        if (ReferenceEquals(_pinnedItem, Row?.Content))
+        {
+            return;
+        }
+
+        element.ClearValue(DataContextProperty);
+        _dataContextPinned = false;
+        _pinnedItem = null;
     }
 
     /// <summary>

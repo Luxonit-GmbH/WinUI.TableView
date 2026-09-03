@@ -276,16 +276,24 @@ public partial class TableViewRowPresenter : Control
             // within a single pass.
             if (!TableView.IsColumnResizing && _v_gridLine is not null && TableView.TryClaimCellsOffsetUpdate())
             {
-                var transform = _v_gridLine.TransformToVisual(this);
-                var relativePosition = transform.TransformPoint(new Point(0, 0));
-                var offset = _v_gridLine.Visibility is Visibility.Visible ? relativePosition.X : 0d;
-                offset -= Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
+                // Layout positions only — NOT TransformToVisual. This value is a layout boundary (where the cells
+                // start), and TransformToVisual mixes in composition state: it reports the grid line's
+                // counter-translation once the compositor has committed it, and not before. In the synchronous
+                // layout pass right after a scroll it has not, so subtracting HorizontalOffset from it went
+                // negative, clamped to 0, and the header's corner panel collapsed — every header slid 16px (the
+                // row header width) left of its cells, intermittently, depending on whether a later re-arrange
+                // happened to run after the commit. ActualOffset is arrange output and carries no transform.
+                var offset = 0d;
 
-                // TransformToVisual DOES report composition Translation (verified). The pan applied to the items
-                // panel is on a shared ancestor of both elements, so it cancels in this relative transform — but
-                // the grid line's own counter-translation does not, and would otherwise make this offset grow by
-                // the scroll offset. Take it back off: this value is a layout boundary, not a scrolled position.
-                offset -= TableView.HorizontalOffset;
+                if (_v_gridLine.Visibility is Visibility.Visible)
+                {
+                    for (DependencyObject? element = _v_gridLine; element is UIElement ui && !ReferenceEquals(ui, this); element = VisualTreeHelper.GetParent(ui))
+                    {
+                        offset += ui.ActualOffset.X;
+                    }
+                }
+
+                offset -= Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
 
                 TableView.SetValue(TableView.CellsHorizontalOffsetProperty, Math.Max(0, offset));
             }
