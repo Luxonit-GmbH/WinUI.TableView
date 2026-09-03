@@ -52,6 +52,8 @@ public partial class TableView : ListView
     private int _realizeGeneration; // bumped on every scroll; an in-flight chunked realize aborts when it changes
     private const string PanOffsetKey = "Offset";
     private CompositionPropertySet? _panPropertySet;
+    private const int ScrollSettleTimeoutMs = 250; // longest ScrollRowIntoView waits for a ChangeView to settle
+    private int _currentCellGeneration;
     private const int RealizeRowChunkSize = 8; // rows realized per dispatcher turn (keeps the settle realize off-frame)
 
     /// <summary>
@@ -736,6 +738,7 @@ public partial class TableView : ListView
                 continue;
             }
 
+            row.UpdatePosition(); // on demand: only drag-selection reads Position, so it is no longer refreshed for every realized row on every scroll event
             var rowTop = row.Position.Y;
             var rowBottom = rowTop + row.ActualHeight;
 
@@ -1256,7 +1259,6 @@ public partial class TableView : ListView
         DragRectangleCanvas = GetTemplateChild("DragRectangleCanvas") as Canvas;
         _dragRectangle = GetTemplateChild("DragRectangle") as Border;
         _scrollViewer?.Loaded += OnScrollViewerLoaded;
-        _scrollViewer?.ViewChanged += OnScrollViewerViewChanged;
 
         if (IsLoaded)
         {
@@ -1266,17 +1268,6 @@ public partial class TableView : ListView
         }
 
         SetHeadersVisibility();
-    }
-
-    /// <summary>
-    /// Handles the ViewChanged event of the ScrollViewer control, updating the position of each row when the view changes.
-    /// </summary>
-    private void OnScrollViewerViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
-    {
-        foreach (var row in _rows)
-        {
-            row.UpdatePosition();
-        }
     }
 
     /// <summary>
@@ -3239,6 +3230,12 @@ public partial class TableView : ListView
             return;
         }
 
+        // Each navigation supersedes the one before it. ScrollCellIntoView yields, and may wait on a scroll to
+        // settle; without this, holding an arrow key leaves a queue of suspended navigations that all resume, each
+        // scrolling to ITS row and focusing ITS cell in whatever order they wake - overlapping ChangeView calls
+        // fighting, and focus landing on cells the user left long ago.
+        var generation = ++_currentCellGeneration;
+
         if (oldSlot.HasValue)
         {
             var cell = GetCellFromSlot(oldSlot.Value);
@@ -3248,6 +3245,12 @@ public partial class TableView : ListView
         if (newSlot.HasValue)
         {
             var cell = await ScrollCellIntoView(newSlot.Value);
+
+            if (generation != _currentCellGeneration)
+            {
+                return; // superseded while scrolling; the newer navigation owns focus now
+            }
+
             cell?.ApplyCurrentCellState();
             cell?.Focus(FocusState.Programmatic);
         }
@@ -3760,7 +3763,12 @@ public partial class TableView : ListView
                         _scrollViewer.ViewChanged += ViewChanged;
                         // null horizontal: selecting a row must never reset the horizontal scroll position.
                         _scrollViewer.ChangeView(null, yOffset, null, true);
-                        await tcs.Task;
+
+                        // Bounded. ViewChanged fires only if the view actually moves; when the target equals the
+                        // current offset (or clamps to it) it never comes, and an unbounded await would sit here
+                        // subscribed until some unrelated later scroll settled - then resume and focus a cell the
+                        // user selected minutes ago.
+                        await Task.WhenAny(tcs.Task, Task.Delay(ScrollSettleTimeoutMs));
                     }
                     finally
                     {
@@ -3803,6 +3811,7 @@ public partial class TableView : ListView
 
         foreach (var row in _rows)
         {
+            row.UpdatePosition(); // on demand: only drag-selection reads Position, so it is no longer refreshed for every realized row on every scroll event
             var rowTop = row.Position.Y;
             var rowBottom = rowTop + row.ActualHeight;
 

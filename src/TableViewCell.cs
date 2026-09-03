@@ -36,6 +36,7 @@ public partial class TableViewCell : ContentControl
     private double _contentDesiredWidth = double.NaN;
     private bool _contentPending;
     private bool _isInViewport;
+    private bool _dataContextPinned;              // content element's DataContext is held as a local value (see PinContentDataContext)
     // Cache key for the last applied content constraint (see ConstrainContent): the constraint depends only on these,
     // not on the cell's value, so unchanged passes can skip the recompute + the MaxWidth/MaxHeight/Visibility sets.
     private FrameworkElement? _constrainedElement;
@@ -121,6 +122,7 @@ public partial class TableViewCell : ContentControl
         // this NEW content once (a recycled/regenerated element is "first rendered" content, not a data update).
         _contentDesiredWidth = double.NaN;
         _autoMinWidthMeasured = false;
+        _dataContextPinned = false; // a fresh element inherits; it is pinned again if the band has moved away
 
         // Re-measuring unconstrained once the content loads feeds the column's desired (auto) width and the
         // AutoSizeMinWidth minimum. Skip subscribing for plain fixed/star columns to avoid an extra measure pass.
@@ -802,8 +804,13 @@ public partial class TableViewCell : ContentControl
         {
             Focus(FocusState.Pointer);
 
+            var content = Content;
             await Task.Delay(20);
-            if (Content is UIElement { IsHitTestVisible: true } element)
+
+            // Fire-and-forget across a delay: by now the cell may no longer be current (fast keyboard navigation
+            // fires this ~30 times a second) or may have been recycled onto another item. Focusing then would
+            // steal focus from wherever the user has since moved.
+            if (IsCurrent && ReferenceEquals(Content, content) && content is UIElement { IsHitTestVisible: true } element)
             {
                 element.Focus(FocusState.Pointer);
             }
@@ -877,17 +884,60 @@ public partial class TableViewCell : ContentControl
             {
                 Visibility = visibility;
             }
+
+            PinContentDataContext(pin: !value);
         }
-        else if (Visibility != Visibility.Visible)
+        else
         {
-            // Virtualization disabled: never leave a cell hidden (RealizeAllCells calls this with true for all cells).
-            Visibility = Visibility.Visible;
+            if (Visibility != Visibility.Visible)
+            {
+                // Virtualization disabled: never leave a cell hidden (RealizeAllCells calls this with true for all cells).
+                Visibility = Visibility.Visible;
+            }
+
+            PinContentDataContext(pin: false);
         }
 
         if (changed && value)
         {
             InvalidateMeasure();
         }
+    }
+
+    /// <summary>
+    /// Freezes (or thaws) the content element's DataContext while the cell is outside the horizontal viewport.
+    /// </summary>
+    /// <remarks>
+    /// Column virtualization collapses out-of-band cells so they are not measured - but their bound content still
+    /// inherits the row's DataContext, so every container recycle re-evaluated the bindings of all 80 cells when
+    /// only ~26 were visible. That rebind storm during a fast vertical scroll is what starved the live feed.
+    /// Assigning the element's own current DataContext as a LOCAL value is a no-op for its bindings and stops
+    /// inheritance, so the row can change item underneath it for free; clearing the local value when the cell
+    /// comes back into view re-inherits and rebinds exactly once, to the row's current item. Nothing visible ever
+    /// shows stale data, because nothing pinned is visible.
+    /// </remarks>
+    private void PinContentDataContext(bool pin)
+    {
+        if (pin == _dataContextPinned || Content is not FrameworkElement element)
+        {
+            return;
+        }
+
+        if (element.GetBindingExpression(DataContextProperty) is not null)
+        {
+            return; // the column binds DataContext itself (e.g. the ComboBox column); a local value would break it
+        }
+
+        if (pin)
+        {
+            element.DataContext = element.DataContext;
+        }
+        else
+        {
+            element.ClearValue(DataContextProperty);
+        }
+
+        _dataContextPinned = pin;
     }
 
     /// <summary>
