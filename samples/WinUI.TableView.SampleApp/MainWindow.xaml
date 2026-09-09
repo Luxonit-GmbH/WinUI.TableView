@@ -150,6 +150,11 @@
                         <FontIcon Glyph="&#xE794;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Content="Performance Test">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xEC4A;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem Content="Column Sizing">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xED5E;"

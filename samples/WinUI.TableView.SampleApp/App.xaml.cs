@@ -15,7 +15,7 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
-
+        DebugSettings.EnableFrameRateCounter = true;
 #if DEBUG && WINDOWS
         DebugSettings.BindingFailed += DebugSettings_BindingFailed;
         DebugSettings.XamlResourceReferenceFailed += DebugSettings_XamlResourceReferenceFailed;

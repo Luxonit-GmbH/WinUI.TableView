@@ -364,3 +364,7 @@ FodyWeavers.xsd
 
 # DocFx - auto-generated api eference documents
 /docs/api
+
+# The sample app ships its publish profile on purpose (x64, self-contained, untrimmed, unpackaged);
+# the *.pubxml rule above is for per-developer web-publish settings, which this is not.
+!samples/WinUI.TableView.SampleApp/Properties/PublishProfiles/*.pubxml

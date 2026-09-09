@@ -13,7 +13,12 @@
     <ApplicationIcon>Assets/TableView.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
-    <EnableMsixTooling>true</EnableMsixTooling>
+    <!-- Unpackaged: runs from its output folder, no MSIX, no registration. The Windows App SDK runtime ships
+         inside the output too, so nothing has to be installed on the machine it runs on (a Citrix image, say).
+         The .NET side of "self-contained" lives in Properties\PublishProfiles\win-x64.pubxml. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <EnableMsixTooling>false</EnableMsixTooling>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <DefineConstants>
       DISABLE_XAML_GENERATED_BINDING_DEBUG_OUTPUT;
@@ -26,12 +31,8 @@
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(Configuration)' == 'Debug'">
-    <AppxManifest Include="Package.Debug.appxmanifest">
-      <SubType>Designer</SubType>
-    </AppxManifest>
-  </ItemGroup>
-
+  <!-- The appxmanifests are not consumed by an unpackaged build; kept on disk only so the packaged
+       configuration can be restored by flipping WindowsPackageType back. -->
   <ItemGroup>
     <None Remove="Package.Debug.appxmanifest" />
   </ItemGroup>

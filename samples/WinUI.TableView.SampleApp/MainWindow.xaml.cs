@@ -76,6 +76,7 @@ public sealed partial class MainWindow : Window
                 "Grouping" => typeof(GroupingPage),
                 "Conditional Cell Styling" => typeof(ConditionalStylingPage),
                 "Column Sizing" => typeof(ColumnSizingPage),
+                "Performance Test" => typeof(PerformanceTestPage),
                 _ => typeof(BlankPage)
             };
 
