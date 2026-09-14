@@ -50,6 +50,7 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
         _visibleScrollableColumnsCached = null;
         _visibleScrollableColumnsMapCached = null;
         _visibleScrollableColumnOffsetsCached = null;
+        ColumnLayoutVersion++;
 
         if (_movingColumn) return; // Skip processing if it's a move action
 
@@ -128,15 +129,35 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
         _visibleScrollableColumnsCached = null;
         _visibleScrollableColumnsMapCached = null;
         _visibleScrollableColumnOffsetsCached = null;
+        ColumnLayoutVersion++;
 
         UpdateFrozenColumns();
     }
 
     internal void UpdateFrozenColumns()
     {
+        var frozenCount = TableView?.FrozenColumnCount ?? 0;
+
+        // With nothing frozen there is nothing to decide, and the walk is not free: VisibleColumnIndex consults a
+        // cache that the IsFrozen setter itself invalidates, so each iteration rebuilds the visible-column
+        // projection and its index map — quadratic in the column count, once per column added. A grid built by
+        // adding columns one at a time pays that for every one of them.
+        if (frozenCount is 0)
+        {
+            foreach (var column in this.OfType<TableViewColumn>())
+            {
+                if (column.IsFrozen)
+                {
+                    column.IsFrozen = false; // only writes when the value really changes
+                }
+            }
+
+            return;
+        }
+
         foreach (var column in this.OfType<TableViewColumn>())
         {
-            column.IsFrozen = VisibleColumnIndex(column) < (TableView?.FrozenColumnCount ?? 0);
+            column.IsFrozen = VisibleColumnIndex(column) < frozenCount;
         }
     }
 
@@ -159,12 +180,14 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
             _visibleScrollableColumnsCached = null;
             _visibleScrollableColumnsMapCached = null;
             _visibleScrollableColumnOffsetsCached = null;
+            ColumnLayoutVersion++;
         }
         else if (propertyName is nameof(TableViewColumn.ActualWidth))
         {
             // Width changes keep membership/order intact; only the cumulative offsets used by horizontal
             // virtualization depend on it.
             _visibleScrollableColumnOffsetsCached = null;
+            ColumnLayoutVersion++;
         }
 
         // A batch operation refreshes frozen state wholesale and raises a single CollectionChanged at the end, so
@@ -177,6 +200,22 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
             ColumnPropertyChanged?.Invoke(this, new TableViewColumnPropertyChangedEventArgs(column, propertyName, index));
         }
     }
+
+    /// <summary>
+    /// Bumped whenever anything a cell's width or position depends on changes: a column's actual width, its
+    /// visibility, its order, or whether it is frozen.
+    /// </summary>
+    /// <remarks>
+    /// A recycled row has to make sure its cells still match their columns' widths, and doing that by comparing
+    /// every cell's width against its column's is two projected property reads per column per recycled row — the
+    /// single largest item on the vertical scroll path. Recording the version a row last synced against turns that
+    /// into one integer compare.
+    /// <para>It is bumped HERE, beside the cache invalidation, and deliberately not where the change notification
+    /// is raised. A batched column change suppresses the notification and a column move skips it, yet both really
+    /// do change widths — a counter that moved only with the event would let rows believe they were in sync and
+    /// leave their cells misaligned with the headers.</para>
+    /// </remarks>
+    internal int ColumnLayoutVersion { get; private set; }
 
     /// <inheritdoc/>
     public TableView? TableView { get; }

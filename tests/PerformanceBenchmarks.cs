@@ -676,7 +676,7 @@ public class PerformanceBenchmarks
                 {
                     foreach (var row in rows)
                     {
-                        row.RowPresenter?.ApplyHorizontalScroll(useCachedClip: true);
+                        row.RowPresenter?.ApplyHorizontalScroll();
                     }
                 }
             },
@@ -822,6 +822,104 @@ public class PerformanceBenchmarks
     /// use <see cref="MeasureAsync"/>, never <see cref="Measure"/>: blocking the UI thread on a frame it is itself
     /// responsible for producing would deadlock.
     /// </summary>
+    /// <summary>
+    /// A scrollbar drag, which is a different gesture from a wheel pan and the one users complain about.
+    /// </summary>
+    /// <remarks>
+    /// <para>The existing pan benchmarks step 20px a tick, so over a hundred ticks the realized band moves about
+    /// five times and the virtualization machinery barely runs. Dragging the thumb sweeps the WHOLE extent in the
+    /// same number of frames — the band moves every tick — and that is the regime where column virtualization has
+    /// historically cost more than it saved. A benchmark that cannot reproduce the complaint cannot verify a fix
+    /// for it.</para>
+    /// <para>The warm-up iteration performs the first sweep, which is the one that creates content; the measured
+    /// iterations are therefore the steady state, i.e. what a user feels on the second and every later drag. Pair
+    /// it with the NoColumnVirtualization twin: the gap between them is the price of the feature.</para>
+    /// </remarks>
+    private async Task ScrollbarSweepAsync(int columnCount, bool columnVirtualization, string benchmarkName)
+    {
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+
+        // The full scrollable width, swept in PanTicks steps.
+        var extent = Math.Max(0d, (columnCount * 100d) - 1200d);
+        var step = extent / PanTicks;
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    tableView.SetValue(TableView.HorizontalOffsetProperty, i * step);
+                    tableView.UpdateLayout();
+                    await WaitForRenderAsync();
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                tableView.SetValue(TableView.HorizontalOffsetProperty, 0d);
+                tableView.UpdateLayout();
+            });
+
+        TestContext.WriteLine($"{benchmarkName}: {columnCount} columns, step {step:N0}px, realized rows {tableView.Rows.Count}");
+        Report(result, benchmarkName);
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// The vertical equivalent: throwing the scrollbar, where every realized container is recycled onto a distant
+    /// item on every frame. The ordinary vertical pan moves a row or two a tick and never exercises that.
+    /// </summary>
+    private async Task ScrollbarThrowAsync(int columnCount, bool columnVirtualization, string benchmarkName)
+    {
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+        var scrollViewer = GetScrollViewer(tableView);
+
+        // Far enough each tick that nothing on screen survives: ~100 rows at a row height of 32.
+        const double ThrowStep = 3200d;
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    scrollViewer.ChangeView(null, i * ThrowStep, null, true);
+                    tableView.UpdateLayout();
+                    await WaitForRenderAsync();
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                scrollViewer.ChangeView(null, 0d, null, true);
+                tableView.UpdateLayout();
+            });
+
+        Report(result, benchmarkName);
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalScrollbarSweep_80Cols_Rendered()
+        => await ScrollbarSweepAsync(WideColumnCount, columnVirtualization: true, "Grid_HorizontalScrollbarSweep_80Cols_Rendered");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalScrollbarSweep_80Cols_Rendered_NoColumnVirtualization()
+        => await ScrollbarSweepAsync(WideColumnCount, columnVirtualization: false, "Grid_HorizontalScrollbarSweep_80Cols_Rendered_NoColumnVirtualization");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalScrollbarThrow_80Cols_Rendered()
+        => await ScrollbarThrowAsync(WideColumnCount, columnVirtualization: true, "Grid_VerticalScrollbarThrow_80Cols_Rendered");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalScrollbarThrow_80Cols_Rendered_NoColumnVirtualization()
+        => await ScrollbarThrowAsync(WideColumnCount, columnVirtualization: false, "Grid_VerticalScrollbarThrow_80Cols_Rendered_NoColumnVirtualization");
+
     private async Task RenderedPanAsync(int columnCount, bool columnVirtualization, bool horizontal, string benchmarkName)
     {
         var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);

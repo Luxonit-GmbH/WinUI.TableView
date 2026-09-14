@@ -1,4 +1,4 @@
-using Microsoft.UI;
+﻿using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Markup;
@@ -41,8 +41,6 @@ public partial class TableViewRowPresenter : Control
     private ToggleButton? _detailsToggleButton;
     private ListViewItemPresenter? _itemPresenter;
     private long? _detailsPanelVisibilityCallbackToken;
-    private TranslateTransform? _scrollableCellsTransform;
-    private TranslateTransform? _detailsTransform;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TableViewRowPresenter"/> class.
@@ -75,8 +73,6 @@ public partial class TableViewRowPresenter : Control
         _cellsList.Clear(); // Template (re)applied: the new panels start empty.
         _pinnedToPan = false;   // ...and the new chrome needs re-binding to the pan offset.
         _detailsPinned = false;
-        _scrollableCellsTransform = null; // RenderTransform is (re)attached to the new panel in ApplyHorizontalScroll.
-        _detailsTransform = null;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
         _h_gridLine = GetTemplateChild("HorizontalGridLine") as Rectangle;
         _detailsPanel = GetTemplateChild("DetailsPanel") as Panel;
@@ -303,16 +299,15 @@ public partial class TableViewRowPresenter : Control
     }
 
     /// <summary>
-    /// Applies the current horizontal scroll offset to the scrollable cells (and row-details) panel via a
-    /// RenderTransform plus a clip, instead of re-arranging the row. Called from <see cref="ArrangeOverride"/> and
-    /// directly on HorizontalOffset changes, so horizontal scrolling does not trigger a layout pass per row.
+    /// Binds this row's frozen row-details panel to the shared pan offset, once.
     /// </summary>
-    /// <param name="useCachedClip">
-    /// On the per-tick horizontal-scroll path the clip rect is identical for every (uniform) row, so the TableView
-    /// computes it once and rows reuse that value here — skipping a per-row panel size read + rect rebuild. The
-    /// arrange / column-resize / auto-row-height paths pass <see langword="false"/> to compute from this panel.
-    /// </param>
-    internal void ApplyHorizontalScroll(bool useCachedClip = false)
+    /// <remarks>
+    /// The name is historical. Rows no longer move their own cells: the items panel pans as a single composition
+    /// visual and carries every row with it, so a scroll tick is one scalar write for the whole grid rather than a
+    /// transform and a clip per row. The only thing left for a row to do is counter-translate a details panel that
+    /// is pinned, and even that is bound once rather than applied per tick.
+    /// </remarks>
+    internal void ApplyHorizontalScroll()
     {
         // The cells no longer move per row: the items panel pans as one visual and carries them. All that is left
         // here is the row-details panel, which pans with the row unless it is frozen, in which case it needs the
@@ -563,6 +558,7 @@ public partial class TableViewRowPresenter : Control
             index = Math.Max(index, 0); // handles -ve index;
 
             _scrollableCellsPanel.Children.Insert(index, cell);
+            (_scrollableCellsPanel as TableViewCellsPanel)?.InvalidateChildSnapshot();
             // Scrollable cells follow the frozen cells in the ordered cell list.
             var frozenCount = _frozenCellsPanel?.Children.Count ?? 0;
             _cellsList.Insert(Math.Min(frozenCount + index, _cellsList.Count), cell);
@@ -588,6 +584,7 @@ public partial class TableViewRowPresenter : Control
         else if (_scrollableCellsPanel?.Children.Contains(cell) ?? false)
         {
             _scrollableCellsPanel.Children.Remove(cell);
+            (_scrollableCellsPanel as TableViewCellsPanel)?.InvalidateChildSnapshot();
             removed = true;
         }
 
@@ -650,6 +647,7 @@ public partial class TableViewRowPresenter : Control
     {
         _frozenCellsPanel?.Children.Clear();
         _scrollableCellsPanel?.Children.Clear();
+        (_scrollableCellsPanel as TableViewCellsPanel)?.InvalidateChildSnapshot();
         _cellsList.Clear();
         _cellsByColumn.Clear();
     }

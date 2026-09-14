@@ -93,6 +93,17 @@ public abstract partial class TableViewColumn : DependencyObject
     public virtual void RefreshElement(TableViewCell cell, object? dataItem) { }
 
     /// <summary>
+    /// Whether <see cref="RefreshElement"/> has to run when a row is recycled onto a different item.
+    /// </summary>
+    /// <remarks>
+    /// The base implementation does nothing, because a bound column's element follows the row's DataContext on its
+    /// own. Calling it anyway costs a property read and a virtual dispatch per cell per recycled row — with many
+    /// columns that is thousands of calls a second to do nothing. Override to <see langword="true"/> only in a
+    /// column whose <see cref="RefreshElement"/> actually has work to do.
+    /// </remarks>
+    protected internal virtual bool NeedsRefreshOnRecycle => false;
+
+    /// <summary>
     /// Called to prepare the cell for editing.
     /// </summary>
     /// <param name="cell">The cell to prepare for editing.</param>

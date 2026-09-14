@@ -151,3 +151,182 @@ proxy cell here is lighter than a real one.
 - Phase 3 (giving the axis back to the ScrollViewer, frozen columns hoisted into an overlay) is **dropped**. It
   existed as the fallback for a hit-testing problem that turned out not to exist, and the current numbers already
   beat vertical.
+
+---
+
+# Column virtualization was one-way (2026-09-14)
+
+Reported: with about seventy columns the grid is slow both ways, "like there is no column virtualization".
+Reproduced in the sample app's Performance Test page and in the consuming blotter.
+
+## What was actually wrong
+
+Virtualization only ever decided which cells were **visible**. A cell's content was generated once and kept for
+the life of the cell: `_contentPending` is set true when the column is assigned and false when the content is
+built, and nothing set it back. Worse, both `ColumnCacheLength` and `ColumnPrefetchLength` are multiples of the
+**viewport**, which is a pixel measure — over seventy 90px columns in a 1180px viewport, the one-viewport prefetch
+margin reached about fifty-two of them. So the idle pump deliberately built three quarters of the grid, and one
+sideways sweep built the rest.
+
+Collapsing a cell stops it being measured. It does not stop its bindings. A pinned DataContext freezes
+inheritance, not source-driven updates, so the property change, the converter and the target write all still run.
+On a blotter at 8000 updates a second, the grid was ticking every column of every realized row while showing
+thirteen of them.
+
+## The fix
+
+Three nested column ranges instead of two, each a viewport multiple **capped in columns** so the realized set is
+bounded by the viewport rather than by how many columns the consumer defined:
+
+| range | cap each side | what it means |
+|---|---|---|
+| band | 4 columns | visible and measured |
+| prefetch | 8 columns | content built, still collapsed |
+| keep | 12 columns | content retained; beyond it, released |
+
+`TableViewCell.ReleaseContent` is the inverse of `EnsureContent`. The gap between the prefetch edge and the keep
+edge is the hysteresis that stops a cell being built and dropped on alternate wheel notches.
+
+Each row now remembers the band its cells are flagged for, so a band change touches only the columns that crossed
+an edge — two, usually — instead of every column of every row, and a recycled row whose band has not moved does
+nothing at all. The chunked walk is ordered by row index rather than `HashSet` order, so the rows on screen are
+realized first rather than scattered across seven dispatcher turns.
+
+## Measured
+
+Release x64, this dev box, each arm in its own test host, against a build of the immediately preceding commit run
+the same way. The suite's noise floor is about 30%, so only the first row is a real result.
+
+| benchmark | before | after |
+|---|---|---|
+| `Grid_MutationStorm_8000Updates_VisibleRows` (median of 3 runs) | 836 ms | 339 ms |
+| `Grid_VerticalPan_80Cols_DispatcherGap_BlockedMs` | 1511 ms | 1283 ms |
+| `Grid_VerticalPan_80Cols_100Frames_Rendered` | 1158 ms | 1100 ms |
+| `Grid_HorizontalPan_ColumnSweep_100Frames_Rendered` 20/50/80/120 cols | 625/952/1009/994 ms | 635/930/981/1024 ms |
+| `Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn` | 1293 ms | 1366 ms |
+
+The mutation storm is the headline and it is the blotter's own workload: three runs each, 761/858/835 against
+298/377/339, no overlap. It is the direct consequence of releasing content — invisible columns stop ticking.
+Everything else is inside the noise floor, including first scroll, so the smaller prefetch margin did not cost
+what it saved.
+
+## Per-column work removed from the recycle path
+
+Vertical scrolling recycles a container per row, and each of these was a full pass over every column of it:
+
+- **Every cell had a `Loaded` handler** doing `InvalidateMeasure` and a visual-state transition. WinUI raises
+  `Loaded` on every descendant when a recycled container is re-attached, so this was an entire O(columns) pass
+  that no reading of call sites would find. Selection state moved to `OnApplyTemplate` and to the reveal path.
+- **`EnsureLayout`'s two `??=` searches** spanned the whole row subtree and never cached a null result, so they
+  re-walked every cell on every call. `??=` is not a cache when null is a legitimate answer.
+- `TableViewRow_Loaded` re-ran `EnsureGridLines` over every cell, re-writing values that cannot change because a
+  container came back.
+- `RefreshElement` was a property read and a virtual dispatch per cell to reach an empty method body; only the
+  template and tree columns override it, and they now say so with `NeedsRefreshOnRecycle`.
+- The queued selection-state apply ran a transition on every cell even with nothing selected anywhere.
+- `UpdatePosition` did a `TransformToVisual` per row per arrange for a value only drag-selection reads; it is now
+  seeded when a drag starts and refreshed only during one.
+
+## A latent bug this turned up
+
+`ClearContainerForItemOverride` nulls the row's `TableView`, and `PrepareContainerForItemOverride` restored it
+**after** the base call that raises `OnContentChanged`. So on every recycle that handler ran against a null grid
+and silently skipped the cell realize, the cell-set self-heal and the alternate-row colouring — alternate row
+colours were simply wrong after scrolling for anyone who set them. The back-reference is now restored before the
+base call, and `TableViewRecycledRowStateTests` covers both halves.
+
+## Things measured and found innocent, so nobody re-investigates
+
+`OnItemPropertyChanged` is unreachable while `AllowLiveShaping` is false, and it is false here. The transparent
+grid-line brush allocation never fires at the default `GridLinesVisibility`. The quadratic `InsertCell` is bounded
+to row build. The "widths unknown, realize everything" startup fallback never fires — first paint really is
+virtualized. Row width and compositor visual count are not the problem. `VisualStateManager.GoToState` does not
+force a template apply, so a collapsed cell stays cheap until something realizes it.
+
+The cells panel measuring all its children per pass is real but minor, and the expensive half is the collection
+indexer, not the short-circuited `Measure` — so the fix was to cache the child references, not to add a
+`Visibility` check, which would have swapped a cheap projected call for a comparable one. The snapshot is
+invalidated from all three mutation sites, because a column **move** removes and re-inserts one cell: the count
+returns to where it was while the order is different, and a count-only check would have laid every cell out at
+the wrong offset.
+
+---
+
+# Round two: what the cost actually is (2026-09-14)
+
+Round one did not fix scrolling. Reported after it: horizontal scrolling is about 15x faster with column
+virtualization **off**, vertical is 2x slower with it off, fast vertical scrolling and scrollbar throws are
+very laggy either way, and `MeasureOverride` keeps appearing in traces.
+
+## The benchmarks could not see the problem
+
+Every pan benchmark here steps 20px a tick. Over a hundred ticks that moves the realized band about five
+times, so the virtualization machinery barely runs. Dragging a scrollbar sweeps the whole extent in the
+same number of frames and moves the band every tick. That is a different regime, and it is the one users
+complain about.
+
+`Grid_HorizontalScrollbarSweep_80Cols_Rendered` and `Grid_VerticalScrollbarThrow_80Cols_Rendered`, with
+their `_NoColumnVirtualization` twins, sweep the full extent and throw a hundred rows a tick. They
+reproduce both complaints. The first sweep is the warm-up, so what is measured is the steady state.
+
+## Three plausible causes, all disproved by measurement
+
+Each was argued from the code, implemented, and measured. None moved the benchmark beyond noise.
+
+| hypothesis | horizontal sweep |
+|---|---|
+| content released on the scroll path, so a drag rebuilds elements forever | 1698 ms with, 1626-1733 ms without |
+| the per-cell recycle loops (width resync, style resolution) | no change |
+| the cells panel measuring and arranging all seventy children | 1816 to 1626 ms, inside noise |
+
+The create-and-destroy treadmill was real and is worth removing on its own merits, but it is not what
+makes scrolling slow. Neither is any of the managed per-cell work. **The cost is the layout passes that
+revealing a column forces, and the measure of the cells that are actually visible.**
+
+With virtualization off, nothing ever changes visibility, so a horizontal tick dirties nothing and
+`UpdateLayout` is a no-op; the compositor pans one visual and the UI thread is idle. With it on, every
+band change makes cells visible, and that forces a real layout pass over the rows.
+
+## Where it ended up
+
+| benchmark, ms per 100 ticks | before round two | after | virtualization off |
+|---|---|---|---|
+| horizontal scrollbar sweep | 1816 | 1370 (median of 3) | 599 |
+| vertical scrollbar throw | 9879 | 9892 | 30357 |
+
+Horizontal went from 3.0x the cost of running without virtualization to 2.3x. The change that produced
+it was restricting the in-motion reveal to the rows actually on screen: a grid realizes about twice its
+viewport, and dirtying the cached rows made them take part in a layout pass for a band nobody is looking
+at them against. The settle pass reconciles them a moment later.
+
+**Vertical scrolling is not a column-virtualization problem.** With virtualization on, a scrollbar throw
+is three times *faster* than with it off, and the cost tracks the number of cells measured, which is what
+virtualization already bounds. At about 99 ms a frame it is still far too slow, but the levers are
+`CacheLength` and `ColumnCacheLength`, which decide how many cells get measured, not the realize machinery.
+
+## What would close the remaining horizontal gap, and what it costs
+
+Matching the no-virtualization number means never changing visibility while the user scrolls: reveal
+columns as they come into view and collapse them only after the grid has been idle for a while, rather
+than on the 50 ms settle. Horizontal scrolling would then converge on the no-virtualization speed as the
+user explores, because a column that is already visible costs nothing to scroll over again.
+
+The price is that vertical scrolling degrades toward the no-virtualization number for as long as the
+columns stay expanded, which the table above puts at three times worse. That is a real trade between the
+two axes and not a free win, which is why it is written down here rather than simply done.
+
+## Also in this round
+
+- Selection visual state is applied idempotently: the cell remembers what it last handed to the visual
+  state manager, so the wholesale per-recycle apply becomes a field compare instead of thousands of
+  state transitions and as many array allocations a frame.
+- The reveal path only asserts selection state on a grid that has, or has had, a cell selection. The flag
+  must be sticky: a live-count guard would stop scrubbing a selected cell at exactly the moment the
+  selection is cleared while that cell is scrolled away.
+- The prefetch timer is armed only when it is not already running. It is a poll, not a debounce, so the
+  stop-and-start it was doing once per recycled container was pure waste.
+- A column-layout version lets a recycled row skip the width resync entirely when no column has moved.
+  It is bumped beside the cache invalidation, not where the change event is raised, because batched
+  column changes suppress the event while really changing widths.
+- `ReleaseContent` now refuses a cell that is visible, not merely one whose flag says it is out of band.
+  The two can disagree after virtualization is toggled, and the consequence was a blanked cell.

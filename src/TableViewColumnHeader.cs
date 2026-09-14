@@ -662,10 +662,29 @@ public partial class TableViewColumnHeader : ContentControl
         _reorderStarted = false;
     }
 
+    /// <summary>
+    /// Whether anything can still consume this header's natural (unconstrained) width.
+    /// </summary>
+    /// <remarks>
+    /// The unconstrained measure below is a second full measure of the header's whole template, and because it
+    /// alternates the constraint between infinity and the real width it also defeats the framework's own
+    /// "same available size, not dirty" short-circuit — so the header subtree is re-measured twice on every pass
+    /// it takes part in, and the cached width never gets a chance to be reused. A column with a fixed pixel width
+    /// or a star width never consults <see cref="TableViewColumn.DesiredWidth"/> — the width loop in
+    /// <c>TableViewHeaderRow.CalculateHeaderWidths</c> reaches <c>GetColumnDesiredWidth</c> only for Auto columns —
+    /// so for those the whole exercise produces a number nothing reads. Auto columns, and columns growing an auto
+    /// minimum, still need it. <c>GetColumnDesiredWidth</c> also measures on demand when the cache is empty, so a
+    /// column that later becomes Auto still gets a correct answer.
+    /// </remarks>
+    private static bool NeedsNaturalWidth(TableViewColumn column)
+    {
+        return column.Width.IsAuto || column.AutoSizeMinWidth;
+    }
+
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
-        if (Column is not null && _tableView is not null && !Column.IsResizing)
+        if (Column is not null && _tableView is not null && !Column.IsResizing && NeedsNaturalWidth(Column))
         {
             var autoWidthMode = Column.ColumnAutoWidthMode ?? _tableView.ColumnAutoWidthMode;
             if (autoWidthMode is TableViewColumnAutoWidthMode.Header or TableViewColumnAutoWidthMode.Both)

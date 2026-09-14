@@ -32,23 +32,30 @@ public sealed partial class PerformanceTestPage : Page
         InitializeComponent();
 
         // A row-number column, then the 69 value columns: 70 in all. Generated, because seventy column
-        // declarations are not worth reading in XAML.
-        grid.Columns.Add(new TableViewNumberColumn
+        // declarations are not worth reading in XAML. Built into a list and added in one call: each individual
+        // Add re-runs the frozen-column pass and drops every cached column projection, so adding seventy columns
+        // one at a time is quadratic in the column count.
+        var columns = new List<TableViewColumn>(PerfRow.ValueCount + 1)
         {
-            Header = "Row",
-            Width = new GridLength(80),
-            Binding = new Binding { Path = new PropertyPath(nameof(PerfRow.Index)) },
-        });
+            new TableViewNumberColumn
+            {
+                Header = "Row",
+                Width = new GridLength(80),
+                Binding = new Binding { Path = new PropertyPath(nameof(PerfRow.Index)) },
+            },
+        };
 
         for (var i = 0; i < PerfRow.ValueCount; i++)
         {
-            grid.Columns.Add(new TableViewNumberColumn
+            columns.Add(new TableViewNumberColumn
             {
                 Header = PerfRow.Names[i],
                 Width = new GridLength(90),
                 Binding = new Binding { Path = new PropertyPath(PerfRow.Names[i]) },
             });
         }
+
+        grid.Columns.AddRange(columns);
 
         tickingCheckBox.Checked += (_, _) => StartTicking();
         tickingCheckBox.Unchecked += (_, _) => StopTicking();

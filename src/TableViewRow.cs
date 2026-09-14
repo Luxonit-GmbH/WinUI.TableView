@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -37,10 +37,34 @@ public partial class TableViewRow : ListViewItem
     private Border? _selectionBackground;
     private Border? _selectionIndicator;
     private Border? _multiSelectIndicator;
+    private bool _selectionIndicatorResolved;  // the visual-tree search for it has run (its result may be null)
+    private bool _selectionBackgroundResolved;
     private bool _ensureCells = true;
+    private int _syncedColumnLayoutVersion = -1; // the column-layout version this row's cell widths match
     private Brush? _cellPresenterBackground;
     private Brush? _cellPresenterForeground;
     private int? _cachedIndex;
+
+    /// <summary>
+    /// The column band this row's cells are currently flagged for, and the wider range whose content it is still
+    /// holding. Remembering them per row is what lets a band change touch only the columns that actually crossed an
+    /// edge — typically one or two — instead of re-walking every column of every row, and lets a recycled row whose
+    /// band has not moved do no work at all. <c>(-2, -2)</c> means "never applied": walk the row in full.
+    /// </summary>
+    internal (int First, int Last) AppliedBand { get; set; } = (-2, -2);
+
+    /// <inheritdoc cref="AppliedBand"/>
+    internal (int First, int Last) AppliedKeep { get; set; } = (-2, -2);
+
+    /// <summary>
+    /// Forces the next realize pass to walk this row's cells in full, after something the per-row memo cannot see
+    /// (a column-set change, virtualization being toggled, a cell rebuild).
+    /// </summary>
+    internal void InvalidateAppliedBand()
+    {
+        AppliedBand = (-2, -2);
+        AppliedKeep = (-2, -2);
+    }
 
     /// <summary>
     /// Initializes a new instance of the TableViewRow class.
@@ -118,7 +142,10 @@ public partial class TableViewRow : ListViewItem
     {
         _focusVisualMargin = FocusVisualMargin;
 
-        RowPresenter?.EnsureGridLines();
+        // No EnsureGridLines() here. WinUI raises Loaded again every time a recycled container is re-attached, so
+        // this was a walk over every cell of the row on every vertical scroll step, re-writing values that cannot
+        // have changed just because the container came back. The grid lines are set where they can actually change:
+        // TableViewRowPresenter.OnApplyTemplate, TableViewCell.OnApplyTemplate, and the grid-line property handler.
         EnsureLayout();
     }
 
@@ -133,6 +160,9 @@ public partial class TableViewRow : ListViewItem
         // The template (re)applied — cached visual-tree parts found under _itemPresenter are now stale.
         _selectionIndicator = null;
         _multiSelectIndicator = null;
+        _selectionBackground = null;
+        _selectionIndicatorResolved = false;
+        _selectionBackgroundResolved = false;
 #if !WINDOWS
         RowPresenter = GetTemplateChild("RowPresenter") as TableViewRowPresenter;
         _selectionBackground = GetTemplateChild("SelectionBackground") as Border;
@@ -152,7 +182,21 @@ public partial class TableViewRow : ListViewItem
         // Freshly built cells need no refresh pass, hence the else.
         if (!EnsureCells())
         {
-            foreach (var cell in Cells)
+            // Nothing about the columns has moved since this row last synced, so every cell's width already
+            // matches its column and there is nothing to refresh. Skipping the walk is the difference between two
+            // projected property reads per column per recycled row and a single integer compare — and a vertical
+            // scrollbar throw recycles every realized container on every frame.
+            var columnsCollection = TableView?.Columns as TableViewColumnsCollection;
+            var layoutVersion = columnsCollection?.ColumnLayoutVersion ?? -1;
+            var widthsInSync = columnsCollection is not null && _syncedColumnLayoutVersion == layoutVersion;
+
+            // With widths already in sync, no content-sized column to re-measure and no column that overrides
+            // RefreshElement, the loop below has nothing left to do for any cell — skip it outright.
+            var skipCellPass = widthsInSync
+                               && TableView?.HasAnyAutoWidthColumn is false
+                               && TableView?.HasAnyRefreshOnRecycleColumn is false;
+
+            foreach (var cell in skipCellPass ? [] : Cells)
             {
                 // The data item changed; the cached auto-size width no longer reflects this cell's content.
                 cell.InvalidateDesiredWidth();
@@ -160,13 +204,21 @@ public partial class TableViewRow : ListViewItem
                 // Defensively resync width on reuse — a recycled container can otherwise keep a
                 // stale Width if it missed a Column.ActualWidth change while off-screen (e.g. an
                 // auto-width recalculation triggered by a sort), leaving cells misaligned with headers.
-                if (cell.Column is not null && !cell.Width.Equals(cell.Column.ActualWidth))
+                if (!widthsInSync && cell.Column is not null && !cell.Width.Equals(cell.Column.ActualWidth))
                 {
                     cell.Width = cell.Column.ActualWidth; // a DP write invalidates layout; a matching read costs nothing
                 }
 
-                cell.RefreshElement();
+                // Only for columns that actually do something in RefreshElement. For a bound column the element
+                // follows the DataContext by itself, so the call was a property read plus a virtual dispatch, per
+                // cell, per recycled row, to reach an empty method body.
+                if (cell.Column?.NeedsRefreshOnRecycle is true)
+                {
+                    cell.RefreshElement(newContent);
+                }
             }
+
+            _syncedColumnLayoutVersion = layoutVersion;
 
             TableView?.RealizeRowCells(this); // Ensure visible columns are realized for the recycled row.
         }
@@ -198,10 +250,12 @@ public partial class TableViewRow : ListViewItem
 
         _itemPresenter?.Arrange(new Rect(-left, 0, _itemPresenter.ActualWidth + left, _itemPresenter.ActualHeight));
 
-        // Position feeds drag-selection hit testing only; a column-width change never moves a row
-        // relative to the drag canvas, so recomputing it (a visual-tree transform walk) on every
-        // row on every frame of a resize drag is pure waste.
-        if (TableView?.IsColumnResizing != true)
+        // Position feeds drag-selection hit testing only, and both of its readers already refresh it on demand, so
+        // there is nothing to keep warm here. It is a TransformToVisual — a visual-tree ancestor walk plus matrix
+        // composition across the ABI — and this arrange runs for every realized row on every layout pass, which a
+        // vertical scroll and a horizontal reveal burst both produce continuously. Refresh it only while a drag is
+        // actually reading it.
+        if (TableView is { IsDragSelecting: true, IsColumnResizing: false })
         {
             UpdatePosition();
         }
@@ -267,6 +321,9 @@ public partial class TableViewRow : ListViewItem
             // be undone by this reset.
             _ensureCells = false;
             AddCells(TableView.Columns.VisibleColumns);
+
+            // These are brand-new cells, so whatever band the row was flagged for describes nothing any more.
+            InvalidateAppliedBand();
 
             TableView.RealizeRowCells(this); // No-op unless column virtualization is enabled.
             return true;
@@ -516,12 +573,27 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     internal void EnsureCellsStyle(TableViewColumn? column = null, object? dataItem = null)
     {
+        // One column's style changed: go straight to its cell instead of walking every cell to find it.
+        if (column is not null)
+        {
+            RowPresenter?.GetCellForColumn(column)?.EnsureStyle(dataItem ?? Content);
+            return;
+        }
+
+        // Nothing anywhere configures a cell style, so every cell would resolve to null and write null over null.
+        if (TableView?.HasAnyCellStyling is false)
+        {
+            return;
+        }
+
+        // Grid-level values are the same for every cell; read them once for the whole row.
+        var item = dataItem ?? Content;
+        var tableViewStyles = TableView?.ConditionalCellStyles;
+        var tableViewCellStyle = TableView?.CellStyle;
+
         foreach (var cell in Cells)
         {
-            if (column == null || cell.Column == column)
-            {
-                cell.EnsureStyle(dataItem ?? Content);
-            }
+            cell.EnsureStyle(item, tableViewStyles, tableViewCellStyle);
         }
     }
 
@@ -530,11 +602,16 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     internal void ApplyCurrentCellState(TableViewCellSlot slot)
     {
-        if (slot.Column >= 0 && slot.Column < Cells.Count)
+        if (slot.Column < 0 || slot.Column >= Cells.Count)
         {
-            var cell = Cells[slot.Column];
-            cell.ApplyCurrentCellState();
+            return;
         }
+
+        // Only the row that actually owns the current slot may take focus. Without this check every recycled row
+        // ran the focusing path for the cell sitting at the current slot's column index, so scrolling with a
+        // current cell set fired a focus call (twice, across a delay) per recycled row — mid-scroll.
+        var isCurrentRow = slot.Row == Index;
+        Cells[slot.Column].ApplyCurrentCellState(skipFocus: !isCurrentRow);
     }
 
     /// <summary>
@@ -559,9 +636,16 @@ public partial class TableViewRow : ListViewItem
 #if WINDOWS
         // These template parts are stable for the lifetime of the container, so find them once and cache them
         // (reset in OnApplyTemplate) instead of walking the visual tree on every EnsureLayout call.
-        _selectionIndicator ??= _itemPresenter?.FindDescendants()
-                                               .OfType<Border>()
-                                               .FirstOrDefault(x => x is { Width: 3 });
+        // `??=` is not a cache when the answer can legitimately be null: a null result was re-walked on every call,
+        // and this walk spans the whole row subtree — every cell and its template. Resolve once, remember that we
+        // did, and reset the flag wherever the cached parts are reset (OnApplyTemplate).
+        if (!_selectionIndicatorResolved)
+        {
+            _selectionIndicatorResolved = true;
+            _selectionIndicator ??= _itemPresenter?.FindDescendants()
+                                                   .OfType<Border>()
+                                                   .FirstOrDefault(x => x is { Width: 3 });
+        }
 
         var cellsHeight = ActualHeight - detailsHeight;
         var selectionIndicatorHeight = Math.Max(Selection_IndicatorHeight, cellsHeight - 40);
@@ -584,9 +668,13 @@ public partial class TableViewRow : ListViewItem
             selectionIndicator = _multiSelectIndicator;
         }
 
-        _selectionBackground ??= _itemPresenter?.FindDescendants()
-                                                .OfType<Border>()
-                                                .FirstOrDefault(x => x.Name is not Selection_Background && x.Margin == _selectionBackgroundMargin);
+        if (!_selectionBackgroundResolved)
+        {
+            _selectionBackgroundResolved = true;
+            _selectionBackground ??= _itemPresenter?.FindDescendants()
+                                                    .OfType<Border>()
+                                                    .FirstOrDefault(x => x.Name is not Selection_Background && x.Margin == _selectionBackgroundMargin);
+        }
 
         FocusVisualMargin = new Thickness(
             _focusVisualMargin.Left + left,
@@ -612,6 +700,14 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private async void EnsureSelectionIndicatorPosition(double detailsHeight, Border? selectionIndicator)
     {
+        // Check before yielding, not after. Awaiting first posts a dispatcher continuation for every row on every
+        // recycle, including the overwhelming majority that have no indicator and nothing to move — a steady drip
+        // of work items onto the same thread the scroll is running on.
+        if (selectionIndicator is null)
+        {
+            return;
+        }
+
         await Task.Yield(); // let the animations and visual state changes complete
 
         if (selectionIndicator is not null)

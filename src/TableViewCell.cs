@@ -1,4 +1,4 @@
-using Microsoft.UI;
+﻿using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
@@ -36,11 +36,27 @@ public partial class TableViewCell : ContentControl
     private double _contentDesiredWidth = double.NaN;
     private bool _contentPending;
     private bool _isInViewport;
+
+    /// <summary>
+    /// Whether this cell's column is inside the realized band, as a plain managed field rather than a read of
+    /// <see cref="UIElement.Visibility"/>.
+    /// </summary>
+    /// <remarks>
+    /// The cells panel reads this to decide which children to measure and arrange, and it is written by the same
+    /// call that writes <see cref="UIElement.Visibility"/>, so the two cannot drift apart. Reading the visibility
+    /// property instead would cost a projected call per child per layout pass, which is the very thing the skip
+    /// exists to avoid.
+    /// </remarks>
+    internal bool IsInViewport => _isInViewport;
     private bool _dataContextPinned;              // content element's DataContext is held as a local value (see PinContentDataContext)
     private object? _pinnedItem;                  // the row item that local value was taken from; same item on unpin = nothing to rebind
     // Cache key for the last applied content constraint (see ConstrainContent): the constraint depends only on these,
     // not on the cell's value, so unchanged passes can skip the recompute + the MaxWidth/MaxHeight/Visibility sets.
     private FrameworkElement? _constrainedElement;
+    // The selection visual state last handed to the visual state manager, so a repeat is a field
+    // compare. Null means "never applied", which is also the state after a template (re)application,
+    // since applying a template discards the visual state the manager had set.
+    private bool? _appliedSelectionState;
     private double _constrainedColumnWidth = double.NaN;
     private double _constrainedRowHeight = double.NaN;
     private object? _resolvedContentKey;          // Content reference the cached resolved element was computed for
@@ -60,8 +76,11 @@ public partial class TableViewCell : ContentControl
     public TableViewCell()
     {
         DefaultStyleKey = typeof(TableViewCell);
-        ManipulationMode = ManipulationModes.TranslateX | ManipulationModes.TranslateY;
-        Loaded += OnLoaded;
+        // No Loaded handler. WinUI raises Loaded on every descendant when a recycled container is re-attached to
+        // the live tree, so a per-cell handler is a full pass over every column of every recycled row — an entire
+        // O(columns) cost on the hottest path in the control, invisible to anyone reading call sites. What it did
+        // is covered elsewhere: the row invalidates its presenter's measure on recycle, and selection state is
+        // applied from OnApplyTemplate and again whenever a cell is revealed (see SetInViewport).
 #if WINDOWS
         ContextRequested += OnContextRequested;
 #endif
@@ -90,15 +109,6 @@ public partial class TableViewCell : ContentControl
     }
 
 
-    /// <summary>
-    /// Handles the Loaded event.
-    /// </summary>
-    private void OnLoaded(object sender, RoutedEventArgs e)
-    {
-        InvalidateMeasure();
-        ApplySelectionState();
-    }
-
     /// <inheritdoc/>
     protected override void OnApplyTemplate()
     {
@@ -112,6 +122,15 @@ public partial class TableViewCell : ContentControl
 
         EnsureGridLines();
         EnsureStyle(Row?.Content);
+
+        // A fresh template has no visual state, so whatever was applied before no longer holds. Clear the memo
+        // BEFORE re-applying, or the call below sees "already in that state" and the cell renders unselected.
+        _appliedSelectionState = null;
+
+        // The template carries the selection visuals, so a cell whose template is applied late — which is every
+        // off-band cell, since a collapsed element is never measured — has to be told its state here. This is what
+        // replaces the old per-cell Loaded handler.
+        ApplySelectionState();
     }
 
     /// <inheritdoc/>
@@ -774,18 +793,39 @@ public partial class TableViewCell : ContentControl
     }
 
     /// <summary>
+    /// Refreshes the element against an item the caller already has in hand, so a loop over a row's cells does not
+    /// read the row's content once per cell.
+    /// </summary>
+    internal void RefreshElement(object? dataItem)
+    {
+        Column?.RefreshElement(this, dataItem);
+    }
+
+    /// <summary>
     /// Applies the selection state to the cell.
     /// </summary>
     internal void ApplySelectionState(bool onlyToStateSelected = false)
     {
         var isSelected = IsSelected;
-        
+
         if (onlyToStateSelected && !isSelected)
         {
             return;
         }
-        
-        VisualStates.GoToState(this, false, 
+
+        // Remember what was applied and do nothing when it has not changed. The wholesale apply that runs for
+        // every recycled row visits every cell of the row and almost always asks for the state the cell is
+        // already in; at eighty columns and fifty rows that was thousands of visual-state transitions, each
+        // allocating a params array, per scroll frame. A field compare is the whole saving, and unlike
+        // restricting the pass to some subset of the cells it cannot leave a stale Selected visual behind.
+        if (_appliedSelectionState == isSelected)
+        {
+            return;
+        }
+
+        _appliedSelectionState = isSelected;
+
+        VisualStates.GoToState(this, false,
             isSelected ? VisualStates.StateSelected : VisualStates.StateUnselected);
     }
 
@@ -865,6 +905,53 @@ public partial class TableViewCell : ContentControl
     }
 
     /// <summary>
+    /// Drops this cell's content and makes it pending again, so a column the viewport has left far behind stops
+    /// costing anything. The inverse of <see cref="EnsureContent"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>Without this, column virtualization is one-way: content is generated once and kept for the life of the
+    /// cell, so after a single sweep across the columns every realized row holds a fully built element for every
+    /// column. Collapsing a cell stops it being measured, but it does not stop its bindings — a source-driven
+    /// update still runs the binding, the converter and the target write — so a live feed goes on ticking columns
+    /// nobody can see, and the saving that virtualization promised quietly disappears.</para>
+    /// <para>Only ever called for cells well outside the realized band (see the keep range in
+    /// <see cref="WinUI.TableView.TableView.RealizeRowCells(TableViewRow, ValueTuple{int, int}, ValueTuple{int, int})"/>),
+    /// never for one in view and never for the cell being edited.</para>
+    /// </remarks>
+    /// <returns>Whether content was actually released.</returns>
+    internal bool ReleaseContent()
+    {
+        // Visibility is checked as well as the flag, not instead of it: the two can disagree. SetInViewport only
+        // writes Visibility while column virtualization is on, so a cell left visible by RealizeAllCells and then
+        // caught by virtualization being switched back on reads as out-of-viewport while still being drawn.
+        // Dropping its content would blank a cell the user is looking at.
+        if (_contentPending || _isInViewport || Visibility is Visibility.Visible || Content is null)
+        {
+            return false; // nothing realized, or still in view — the realize pass owns it
+        }
+
+        if (TableView?.IsEditing is true && TableView.CurrentCellSlot == Slot)
+        {
+            return false; // dropping the editing element would discard what the user is typing
+        }
+
+        // Unpin first: the pin is a local DataContext value on the element we are about to drop, and clearing it
+        // here keeps the pinned/unpinned bookkeeping honest if the same element were ever reused.
+        PinContentDataContext(pin: false);
+
+        // Setting Content raises OnContentChanged, which resets the desired-width, auto-min-width and pinning
+        // state. The resolved-content and constraint caches are keyed on the element reference, so a new element
+        // misses them naturally; clearing them here just releases the reference.
+        Content = null;
+        _contentPending = true;
+        _resolvedContentKey = null;
+        _resolvedContentElement = null;
+        _constrainedElement = null;
+
+        return true;
+    }
+
+    /// <summary>
     /// Creates this cell's deferred content now, while it is still outside the viewport, so the scroll that
     /// eventually reveals it has nothing left to generate.
     /// </summary>
@@ -934,6 +1021,15 @@ public partial class TableViewCell : ContentControl
         if (changed && value)
         {
             InvalidateMeasure();
+
+            // Coming back into view: re-assert the selection visuals, because a cell can be scrolled past while a
+            // selection is made or cleared. Skipped entirely on a grid that has never selected a cell, where there
+            // is by definition no state to correct — this runs for every column revealed by every band change, on
+            // every realized row.
+            if (TableView?.HasOrHadCellSelection is true)
+            {
+                ApplySelectionState();
+            }
         }
     }
 
@@ -1009,30 +1105,42 @@ public partial class TableViewCell : ContentControl
     /// <param name="item">The data item associated with the cell.</param>
     internal void EnsureStyle(object? item)
     {
+        EnsureStyle(item, TableView?.ConditionalCellStyles, TableView?.CellStyle);
+    }
+
+    /// <summary>
+    /// Resolves and applies this cell's style, with the grid-level values supplied by the caller.
+    /// </summary>
+    /// <remarks>
+    /// The grid-level style and conditional-style list are the same for every cell in the row, so a caller looping
+    /// over the cells reads them once instead of twice per cell — at eighty columns that is a hundred and sixty
+    /// cross-ABI property reads per recycled row that no longer happen. The final assignment is guarded by a
+    /// reference compare, because the overwhelmingly common case is writing the same value (usually null) back.
+    /// </remarks>
+    internal void EnsureStyle(object? item, IList<TableViewConditionalCellStyle>? tableViewStyles, Style? tableViewCellStyle)
+    {
         Style? winningStyle = null;
-        
+
         // Column styles
-        if (winningStyle == null)
+        var columnStyles = Column?.ConditionalCellStyles;
+        if (columnStyles is { Count: > 0 })
         {
-             var columnStyles = Column?.ConditionalCellStyles;
-             if (columnStyles is { Count: > 0 })
-             {
-                 winningStyle = columnStyles.FirstOrDefault(c => c.Predicate?.Invoke(new(Column!, item)) is true)?.Style ?? null;
-             }
+            winningStyle = columnStyles.FirstOrDefault(c => c.Predicate?.Invoke(new(Column!, item)) is true)?.Style;
         }
-        
+
         // Table View styles
-        if (winningStyle == null)
+        if (winningStyle is null && tableViewStyles is { Count: > 0 })
         {
-             var tableViewStyles = TableView?.ConditionalCellStyles;
-             if (tableViewStyles is { Count: > 0 })
-             {
-                 winningStyle = tableViewStyles.FirstOrDefault(c => c.Predicate?.Invoke(new(Column!, item)) is true)?.Style ?? null;
-             }
+            winningStyle = tableViewStyles.FirstOrDefault(c => c.Predicate?.Invoke(new(Column!, item)) is true)?.Style;
         }
-        
+
         // Result style
-        Style = winningStyle ?? Column?.CellStyle ?? TableView?.CellStyle;
+        var resolved = winningStyle ?? Column?.CellStyle ?? tableViewCellStyle;
+
+        if (!ReferenceEquals(Style, resolved))
+        {
+            Style = resolved;
+        }
     }
 
     /// <summary>

@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
@@ -246,6 +246,9 @@ public partial class TableViewTreeColumn : TableViewBoundColumn
             _chevron.IsHitTestVisible = !_item.IsFinalItem && (_item.HasChildren || _item.IsLoading);
         }
     }
+
+    /// <inheritdoc/>
+    protected internal override bool NeedsRefreshOnRecycle => true;
 
     /// <summary>
     /// Re-points the cell's tree visuals at the recycled row's item. This is the reliable hook: the grid hands us

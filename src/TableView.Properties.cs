@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Data;
@@ -1659,7 +1659,6 @@ public partial class TableView
             // animation, so the compositor does the moving and the UI thread stays out of it. The old per-row loop
             // cost ~0.75ms per row per frame in the render walk; this costs a scalar.
             tableView.PanPropertySet.InsertScalar(PanOffsetKey, (float)tableView.HorizontalOffset);
-            tableView.UpdateCellsClipRect();
             tableView._headerRow?.ApplyHorizontalScroll();
 
             tableView.RealizeVisibleCells();
