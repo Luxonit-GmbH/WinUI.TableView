@@ -1,8 +1,11 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Composition;
+using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Media;
 using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Specialized;
@@ -34,16 +37,235 @@ public partial class TableView : ListView
     private RowDefinition? _headerRowDefinition;
     private bool _shouldThrowSelectionModeChangedException;
     private bool _contextSelectionClaimed;
+    private ItemIndexRange? _listViewShiftRange; // the span the current Shift+Up/Down extension owns
+    private readonly Dictionary<TableViewColumn, Visibility> _collapsedGroupVisibility = []; // restored on expand
+    private bool _syncingGroupFrozenState; // guards the cascade when a group follows one member's IsFrozen
     private bool _ensureColumns = true;
     private bool _isItemsSourceSuspended;
     private bool _settingBaseItemsSource; // allows TableView to assign the inherited ItemsSource (otherwise guarded)
     private IEnumerable? _directSource; // the raw source bound straight to the ListView when UseCollectionView is false
     private readonly HashSet<TableViewRow> _rows = [];
+    private bool _realizeInFlight;
+    private bool _columnPrefetchPending; // an idle prefetch walk is queued or running (see RequestColumnPrefetch)
+    private bool _columnPrefetchAgain;   // a request arrived mid-walk; run once more when it finishes
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _columnPrefetchTimer; // debounces RequestColumnPrefetch
+    private long _lastColumnPrefetchRequestTick; // last horizontal tick, recycle or prefetch request; the pump yields while it is recent
+    private int _columnPrefetchColumnCursor;     // where a time-budgeted increment stopped inside a row's margin
+
+    /// <summary>
+    /// How many prefetch increments have actually done work. Diagnostic: a benchmark reads it before and after a
+    /// gesture to prove whether the pump ran during it.
+    /// </summary>
+    internal int ColumnPrefetchIncrements { get; private set; }
+
+    /// <summary>
+    /// How many cells the prefetch pump has actually created content for. Diagnostic, like
+    /// <see cref="ColumnPrefetchIncrements"/> — but increments only say the pump ran, and one increment can cover
+    /// dozens of cheap cells; this says what it did.
+    /// </summary>
+    internal int ColumnPrefetchedCells { get; private set; }
+
+    /// <summary>
+    /// How many individual cells the band realize has flagged. Diagnostic: the point of the delta walk is that a
+    /// small scroll visits a handful of cells rather than every column of every row, and only a counter can tell
+    /// the two apart from the outside.
+    /// </summary>
+    internal int ColumnBandCellVisits { get; private set; }
+
+    /// <summary>
+    /// How many times a cell's managed measure has run. Diagnostic: WinUI skips a clean element that is offered the
+    /// size it was offered last time before the managed override is ever reached, so on a scroll that changes no
+    /// cell's constraint this should track the band's cell visits — the cells that changed visibility — and not the
+    /// number of cells on the realized rows.
+    /// </summary>
+    internal int CellMeasures { get; private set; }
+
+    /// <summary>
+    /// How many cell templates have been applied. Diagnostic: applying the template is the expensive half of a
+    /// cell's first measure, and the idle prefetch exists to move it off the scroll path, so during a sweep this
+    /// should stay close to <see cref="CellTemplatesPrefetched"/>.
+    /// </summary>
+    internal int CellTemplateApplications { get; private set; }
+
+    /// <summary>
+    /// How many of <see cref="CellTemplateApplications"/> the idle prefetch pump did, rather than layout.
+    /// </summary>
+    internal int CellTemplatesPrefetched { get; private set; }
+
+    /// <summary>
+    /// How many times a row's cells panel has measured. Diagnostic: one per row that a pass dirtied.
+    /// </summary>
+    internal int CellsPanelMeasures { get; private set; }
+
+    internal void NoteCellMeasure() => CellMeasures++;
+    internal void NoteCellTemplateApplied() => CellTemplateApplications++;
+    internal void NoteCellTemplatePrefetched() => CellTemplatesPrefetched++;
+    internal void NoteCellsPanelMeasure() => CellsPanelMeasures++;
+
+    /// <summary>
+    /// Bumped whenever a property the row headers lay out from changes, so a row presenter can tell whether its
+    /// header needs re-measuring without invalidating it on every pass.
+    /// </summary>
+    internal int RowHeaderLayoutVersion { get; private set; }
+
+    /// <summary>
+    /// The minimum height actually applied to rows: <see cref="RowMinHeight"/>, capped at <see cref="RowHeight"/>
+    /// when one is set.
+    /// </summary>
+    /// <remarks>
+    /// The two map straight onto MinHeight and Height, and MinHeight wins in WinUI — so with the default minimum of
+    /// 40 a grid that asked for 28px rows got 40px ones, while everything in here that reasons about the row height
+    /// (which rows are on screen, the cells' content constraint, the page size) took the 28 at its word. An explicit
+    /// RowHeight is the more specific setting, so it wins.
+    /// </remarks>
+    internal double EffectiveRowMinHeight
+    {
+        get
+        {
+            var rowHeight = RowHeight;
+            var rowMinHeight = RowMinHeight;
+            return double.IsNaN(rowHeight) ? rowMinHeight : Math.Min(rowMinHeight, rowHeight);
+        }
+    }
+
+    // Whether the last queued cell-state apply ran against a non-empty selection. It keeps the pass running for one
+    // more round after the selection is cleared, so the cells that carried the Selected state are scrubbed.
+    private bool _anyCellSelectionApplied;
+    private bool _everHadCellSelection;
+    private bool _anyCellStylingConfigured;
+    private int _columnTraitsVersion = -1;
+    private bool _hasAnyAutoWidthColumn;
+    private bool _hasAnyRefreshOnRecycleColumn;
+
+    /// <summary>
+    /// Whether any column's width depends on its content, so that a recycled cell's cached desired width has to be
+    /// thrown away when the item changes.
+    /// </summary>
+    internal bool HasAnyAutoWidthColumn
+    {
+        get { EnsureColumnTraits(); return _hasAnyAutoWidthColumn; }
+    }
+
+    /// <summary>
+    /// Whether any column actually does something in <see cref="TableViewColumn.RefreshElement"/>. Only the
+    /// template and tree columns do; for everything else the element follows the row's DataContext by itself.
+    /// </summary>
+    internal bool HasAnyRefreshOnRecycleColumn
+    {
+        get { EnsureColumnTraits(); return _hasAnyRefreshOnRecycleColumn; }
+    }
+
+    /// <summary>
+    /// Recomputes the per-column traits the recycle path consults, whenever the column set has changed.
+    /// </summary>
+    private void EnsureColumnTraits()
+    {
+        if (Columns is not TableViewColumnsCollection columns || _columnTraitsVersion == columns.ColumnLayoutVersion)
+        {
+            return;
+        }
+
+        _columnTraitsVersion = columns.ColumnLayoutVersion;
+        _hasAnyAutoWidthColumn = false;
+        _hasAnyRefreshOnRecycleColumn = false;
+
+        foreach (var column in columns.VisibleColumns)
+        {
+            _hasAnyAutoWidthColumn |= column.Width.IsAuto || column.AutoSizeMinWidth;
+            _hasAnyRefreshOnRecycleColumn |= column.NeedsRefreshOnRecycle;
+        }
+    }
+
+    /// <summary>
+    /// Whether any cell styling is configured anywhere — a grid-level or column-level <c>CellStyle</c>, or a
+    /// non-empty conditional style list on either.
+    /// </summary>
+    /// <remarks>
+    /// Resolving a cell's style is four property reads, and it is done for every cell of every recycled row. On a
+    /// grid that styles nothing the answer is always null, so the whole pass can be skipped.
+    /// <para>Sticky once true, for the same reason the selection flag is: if styling is configured, applied, and
+    /// then removed, the cells that were given a style still have to be cleared, and a flag that flipped back to
+    /// false would strand it on every container that recycles afterwards.</para>
+    /// </remarks>
+    internal bool HasAnyCellStyling
+    {
+        get
+        {
+            if (_anyCellStylingConfigured)
+            {
+                return true;
+            }
+
+            if (CellStyle is not null || ConditionalCellStyles is { Count: > 0 })
+            {
+                return _anyCellStylingConfigured = true;
+            }
+
+            foreach (var column in Columns.VisibleColumns)
+            {
+                if (column.CellStyle is not null || column.ConditionalCellStyles is { Count: > 0 })
+                {
+                    return _anyCellStylingConfigured = true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether this grid has a cell selection, or has had one at any point. Used to skip selection-visual work on
+    /// grids that never select cells at all.
+    /// </summary>
+    /// <remarks>
+    /// It has to be sticky. A guard on the live count alone would stop re-asserting the state at exactly the moment
+    /// it is needed most: clear the selection while a selected cell is scrolled out of view, and nothing would
+    /// scrub it when it comes back, leaving a cell that looks selected forever on an item that never was. Latching
+    /// on read is self-maintaining — every caller reads it while deciding, so any read during a live selection
+    /// records it.
+    /// </remarks>
+    internal bool HasOrHadCellSelection
+    {
+        get
+        {
+            if (SelectedCells.Count > 0 || SelectedCellRanges.Count > 0)
+            {
+                _everHadCellSelection = true;
+            }
+
+            return _everHadCellSelection;
+        }
+    }
     private (int First, int Last) _lastRealizedRange = (-2, -2);
+    private (int First, int Last) _lastKeepRange = (-2, -2); // outside this, content is released (see TableViewCell.ReleaseContent)
+    private (int First, int Last) _lastRevealedRange = (-2, -2); // band the cheap in-motion reveal last applied
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _realizeSettleTimer; // debounces realize until horizontal scroll settles
     private const double HorizontalScrollSettleMs = 50; // ms of no horizontal movement before realizing the visible band
+    private const double ColumnPrefetchDelayMs = 150;   // ms of no scroll or recycle activity before the idle prefetch pump starts
+    private const double ColumnPrefetchBudgetMs = 2;    // ms of work per prefetch increment; a template-heavy cell is a few of these
     private int _realizeGeneration; // bumped on every scroll; an in-flight chunked realize aborts when it changes
+
+    // The three nested column ranges, each a cap in COLUMNS on the corresponding viewport-multiple knob (see
+    // GetVisibleScrollableRange). Visible ⊂ band ⊂ prefetch ⊂ keep. Cells outside "keep" have their content
+    // released, which is what makes column virtualization two-way; the gap between the prefetch edge and the keep
+    // edge is the hysteresis that stops a cell being built and dropped on alternate wheel notches.
+    private const int ColumnBandMaxBufferColumns = 4;     // measured and visible
+    private const int ColumnPrefetchMaxBufferColumns = 8; // content built, still collapsed
+    private const int ColumnReleaseExtraColumns = 4;      // kept beyond the prefetch edge before content is dropped
+    private const int ColumnKeepMaxBufferColumns = ColumnPrefetchMaxBufferColumns + ColumnReleaseExtraColumns;
+    private const string PanOffsetKey = "Offset";
+    private CompositionPropertySet? _panPropertySet;
+    private const int ScrollSettleTimeoutMs = 250; // longest ScrollRowIntoView waits for a ChangeView to settle
+    private int _currentCellGeneration;
     private const int RealizeRowChunkSize = 8; // rows realized per dispatcher turn (keeps the settle realize off-frame)
+
+    /// <summary>
+    /// Divides a wheel notch (120) into horizontal scroll pixels. At the previous value of 4 a notch moved 30px —
+    /// a quarter of a typical column, ~320 notches to cross an 80-column grid — which reads as the control being
+    /// slow rather than as a deliberate step. One notch now moves 120px, roughly one column, or a viewport per ten
+    /// notches.
+    /// </summary>
+    private const double HorizontalWheelDivisor = 1.0;
     private bool _autoSizeMinWidthSealed; // AutoSizeMinWidth: stop capturing once the user scrolls past the first cells
     private bool _cellsOffsetComputedThisPass;
     private readonly CollectionView _collectionView = [];
@@ -62,6 +284,11 @@ public partial class TableView : ListView
     private ItemIndexRange? _lastDragSelectionRowRange;
     private bool _cellStateDispatchPending;
     private readonly HashSet<int> _pendingCellStateRows = [];
+    private TableViewColumn? _resizingColumn;
+    private double _resizingOriginalWidth;
+    private readonly List<TableViewCell> _resizingPreviewCells = [];
+    private readonly List<TableViewCell> _resizingDownstreamCells = [];
+    private readonly List<(Panel Panel, TranslateTransform Shift)> _resizingScrollableShifts = [];
 
     /// <summary>
     /// Initializes a new instance of the TableView class.
@@ -73,8 +300,7 @@ public partial class TableView : ListView
         Columns = new TableViewColumnsCollection(this);
         // Any change to the column set invalidates the cached realized band: a new set can span the same numeric
         // index range as the old one, and without this the realize pass is skipped and freshly created cells stay
-        // collapsed — rows then render with columns missing. The realize itself is debounced, so bulk column
-        // rebuilds still cost a single pass.
+        // collapsed — rows then render with columns missing.
         Columns.CollectionChanged += (_, _) =>
         {
             // Rebuild the headers (they carry the column widths, so a column without a header has ActualWidth 0 and
@@ -83,6 +309,11 @@ public partial class TableView : ListView
             _headerRow?.InvalidateHeaders();
             InvalidateColumnBand();
         };
+
+        // Defining or removing a banner changes the second header level without touching the columns at all, so
+        // the header row would otherwise never know to rebuild it.
+        ColumnGroups.CollectionChanged += (_, _) => _headerRow?.InvalidateHeaders();
+
         FilterHandler = new ColumnFilterHandler(this);
 
         base.ItemsSource = _collectionView;
@@ -227,18 +458,24 @@ public partial class TableView : ListView
         if (element is TableViewRow preparingRow)
         {
             preparingRow.InvalidateIndex();
+
+            // Restore the back-reference BEFORE the base call, not after. The base call sets Content, which raises
+            // OnContentChanged, and ClearContainerForItemOverride had nulled TableView on the way out — so on every
+            // recycle that handler ran against a null grid and silently skipped the cell realize, the cell-set
+            // self-healing guard and the alternate-row colouring. The colours in particular were simply stale after
+            // scrolling for anyone who sets them.
+            preparingRow.TableView = this;
+
+            if (!_rows.Contains(preparingRow))
+            {
+                _rows.Add(preparingRow);
+            }
         }
 
         base.PrepareContainerForItemOverride(element, item);
 
         if (element is TableViewRow row)
         {
-            if (!_rows.Contains(row))
-            {
-                _rows.Add(row);
-            }
-
-            row.TableView = this;
             row.EnsureCellsStyle(default, item);
 
             // Queued, but still the FULL apply (ApplyPendingCellStates calls ApplyCellsSelectionState with no
@@ -252,6 +489,8 @@ public partial class TableView : ListView
                 DispatcherQueue.TryEnqueue(ApplyPendingCellStates);
             }
 
+            // Before the details state: a banner row hides the whole cell layout, details included.
+            row.RowPresenter?.ApplyBannerPresentation(item);
             row.RowPresenter?.ApplyDetailsPaneState(item);
 
             if (CurrentCellSlot.HasValue)
@@ -290,6 +529,216 @@ public partial class TableView : ListView
         // XXX no need to add it here
         //_rows.Add(row);
         return row;
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether a column is currently being resized by the user via a live
+    /// drag preview (see <see cref="BeginColumnResizePreview"/>).
+    /// </summary>
+    internal bool IsColumnResizing { get; private set; }
+
+    /// <summary>
+    /// Starts a live resize-drag preview for <paramref name="column"/>: generously (re)measures the
+    /// column's currently-realized cells once, and creates the per-cell composition-only clip/shift
+    /// state that <see cref="UpdateColumnResizePreview"/> will mutate on every subsequent pointer-move
+    /// frame. No real layout (Width/ActualWidth) is touched here or during the drag — that only
+    /// happens once, in <see cref="EndColumnResizePreview"/>.
+    /// </summary>
+    internal void BeginColumnResizePreview(TableViewColumn column)
+    {
+        var visibleColumns = Columns.VisibleColumns;
+        var columnIndex = visibleColumns.IndexOf(column);
+
+        if (columnIndex < 0)
+        {
+            return;
+        }
+
+        _resizingColumn = column;
+        _resizingOriginalWidth = column.ActualWidth;
+        IsColumnResizing = true;
+        column.IsResizing = true;
+
+        var effectiveMax = column.MaxWidth ?? MaxColumnWidth;
+        if (double.IsPositiveInfinity(effectiveMax))
+        {
+            effectiveMax = 4000d;
+        }
+
+        _resizingPreviewCells.Clear();
+        _resizingDownstreamCells.Clear();
+        _resizingScrollableShifts.Clear();
+
+        foreach (var row in _rows)
+        {
+            foreach (var cell in row.Cells)
+            {
+                if (cell.Column is null || cell.Column.IsFrozen != column.IsFrozen)
+                {
+                    continue;
+                }
+
+                if (cell.Column == column)
+                {
+                    cell.BeginResizePreview(effectiveMax);
+                    _resizingPreviewCells.Add(cell);
+                }
+                else if (visibleColumns.IndexOf(cell.Column) > columnIndex)
+                {
+                    cell.ApplyDownstreamShift();
+                    _resizingDownstreamCells.Add(cell);
+                }
+            }
+
+            if (column.IsFrozen && row.RowPresenter?.ScrollableCellsPanel is { } scrollablePanel)
+            {
+                var shift = new TranslateTransform();
+                scrollablePanel.RenderTransform = shift;
+                _resizingScrollableShifts.Add((scrollablePanel, shift));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Updates the live resize-drag preview to <paramref name="liveWidth"/>. The only work done per
+    /// pointer-move frame: mutate each touched cell's own (not shared — see
+    /// <see cref="TableViewCell.BeginResizePreview"/>) clip/shift in place. No Measure/Arrange, just
+    /// cheap composition-only property writes, still nowhere near the cost of the real layout cascade
+    /// this preview mechanism replaces.
+    /// </summary>
+    internal void UpdateColumnResizePreview(double liveWidth)
+    {
+        if (_resizingColumn is null)
+        {
+            return;
+        }
+
+        var delta = liveWidth - _resizingOriginalWidth;
+
+        foreach (var cell in _resizingPreviewCells)
+        {
+            cell.UpdateResizePreviewClip(liveWidth, cell.ActualHeight);
+            cell.UpdateGridLineShift(delta);
+        }
+
+        foreach (var cell in _resizingDownstreamCells)
+        {
+            cell.UpdateDownstreamShift(delta);
+        }
+
+        foreach (var (_, shift) in _resizingScrollableShifts)
+        {
+            shift.X = delta;
+        }
+    }
+
+    /// <summary>
+    /// Ends the live resize-drag preview, synchronously: clears every clip/transform the preview
+    /// touched, then — if <paramref name="commitWidth"/> is not null — performs the single real width
+    /// commit (<see cref="TableViewColumn.ActualWidth"/> then <see cref="TableViewColumn.Width"/>),
+    /// cascading into a normal, one-time layout pass. Doing this all in one synchronous call (no
+    /// await/DispatcherQueue in between) means the compositor never presents an intermediate frame —
+    /// the preview's last shown state and the committed real state are numerically identical.
+    /// </summary>
+    internal void EndColumnResizePreview(double? commitWidth)
+    {
+        if (_resizingColumn is null)
+        {
+            return;
+        }
+
+        var column = _resizingColumn;
+        _resizingColumn = null;
+        IsColumnResizing = false;
+        column.IsResizing = false;
+
+        foreach (var cell in _resizingPreviewCells)
+        {
+            cell.EndResizePreview();
+        }
+
+        foreach (var cell in _resizingDownstreamCells)
+        {
+            cell.EndResizePreview();
+        }
+
+        foreach (var (panel, _) in _resizingScrollableShifts)
+        {
+            panel.RenderTransform = null;
+        }
+
+        _resizingPreviewCells.Clear();
+        _resizingDownstreamCells.Clear();
+        _resizingScrollableShifts.Clear();
+
+        if (commitWidth is double width)
+        {
+            // A hand-resize retires the AutoSizeMinWidth floor. The width committed here is clamped by MinWidth
+            // only, while the header-width pass clamps again with its own effective minimum (which folds in the
+            // auto floor) — leave the floor in place and layout springs the column straight back, so it can be
+            // widened but never narrowed.
+            column.NotifyUserResized();
+            column.ActualWidth = width;
+            column.Width = new GridLength(width, GridUnitType.Pixel);
+        }
+    }
+
+    /// <summary>
+    /// Starts a <see cref="TableViewColumnResizeMode.Live"/> resize drag for <paramref name="column"/>:
+    /// unlike <see cref="BeginColumnResizePreview"/>, no cell state is touched here — every frame's
+    /// width change goes through the normal, real <see cref="TableViewColumn.ActualWidth"/> cascade
+    /// instead (see <see cref="UpdateColumnResizeLive"/>).
+    /// </summary>
+    internal void BeginColumnResizeLive(TableViewColumn column)
+    {
+        _resizingColumn = column;
+        IsColumnResizing = true;
+        column.IsResizing = true;
+    }
+
+    /// <summary>
+    /// Updates a <see cref="TableViewColumnResizeMode.Live"/> resize drag to <paramref name="liveWidth"/>
+    /// by setting <see cref="TableViewColumn.ActualWidth"/> directly — every visible row's cell
+    /// relayouts for real on every call. Deliberately does not touch <see cref="TableViewColumn.Width"/>
+    /// (which would additionally re-run <c>CalculateHeaderWidths</c> for every column on every frame);
+    /// that commit happens once, in <see cref="EndColumnResizeLive"/>.
+    /// </summary>
+    internal void UpdateColumnResizeLive(double liveWidth)
+    {
+        if (_resizingColumn is null)
+        {
+            return;
+        }
+
+        _resizingColumn.ActualWidth = liveWidth;
+    }
+
+    /// <summary>
+    /// Ends a <see cref="TableViewColumnResizeMode.Live"/> resize drag. <see cref="TableViewColumn.ActualWidth"/>
+    /// already reflects the live width from <see cref="UpdateColumnResizeLive"/>, so only the
+    /// <see cref="TableViewColumn.Width"/> GridLength commit is left to do here.
+    /// </summary>
+    internal void EndColumnResizeLive(double? commitWidth)
+    {
+        if (_resizingColumn is null)
+        {
+            return;
+        }
+
+        var column = _resizingColumn;
+        _resizingColumn = null;
+        IsColumnResizing = false;
+        column.IsResizing = false;
+
+        if (commitWidth is double width)
+        {
+            // A hand-resize retires the AutoSizeMinWidth floor. The width committed here is clamped by MinWidth
+            // only, while the header-width pass clamps again with its own effective minimum (which folds in the
+            // auto floor) — leave the floor in place and layout springs the column straight back, so it can be
+            // widened but never narrowed.
+            column.NotifyUserResized();
+            column.Width = new GridLength(width, GridUnitType.Pixel);
+        }
     }
 
     /// <inheritdoc/>
@@ -497,6 +946,7 @@ public partial class TableView : ListView
                 continue;
             }
 
+            row.UpdatePosition(); // on demand: only drag-selection reads Position, so it is no longer refreshed for every realized row on every scroll event
             var rowTop = row.Position.Y;
             var rowBottom = rowTop + row.ActualHeight;
 
@@ -700,6 +1150,12 @@ public partial class TableView : ListView
     /// </summary>
     private void HandleNavigations(KeyRoutedEventArgs e, bool shiftKey, bool ctrlKey)
     {
+        if (TryHandleListViewHotkey(e, shiftKey, ctrlKey))
+        {
+            e.Handled = true;
+            return;
+        }
+
         var currentCell = CurrentCellSlot.HasValue ? GetCellFromSlot(CurrentCellSlot.Value) : default;
 
         if (e.Key is VirtualKey.F2 && currentCell is { IsReadOnly: false } && !IsEditing)
@@ -779,6 +1235,10 @@ public partial class TableView : ListView
             else
             {
                 row = e.Key == VirtualKey.Up ? ctrlKey ? 0 : row - 1 : ctrlKey ? Items.Count - 1 : row + 1;
+
+                // Step over group headers and other banner rows: they hold no cells, so landing on one would
+                // leave the current cell nowhere and the next key press unanchored.
+                row = SkipUnselectableRows(row, e.Key == VirtualKey.Up ? -1 : 1);
             }
 
             var newSlot = new TableViewCellSlot(row, column);
@@ -810,6 +1270,130 @@ public partial class TableView : ListView
             MakeSelection(newSlot, shiftKey);
             e.Handled = true;
         }
+    }
+
+    /// <summary>
+    /// Whether row keyboarding is the active mode: either the grid selects rows outright, or the last thing the
+    /// user did was row-based. Covers CellOrRow and CellWithRow once they have settled into row interaction.
+    /// </summary>
+    private bool IsRowKeyboardContext
+        => SelectionUnit is TableViewSelectionUnit.Row || LastSelectionUnit is TableViewSelectionUnit.Row;
+
+    /// <summary>
+    /// Applies the ListView row-keyboarding conventions when <see cref="UseListViewHotkeys"/> is set, and reports
+    /// whether the key was consumed.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately narrow: it claims only Up, Down and Enter, and only for unmodified or Shift-modified row
+    /// interaction outside editing. Everything else — Home/End as column navigation, Ctrl+Up/Down jumping to the
+    /// first/last row, Tab, Left/Right (which a <see cref="TreeTableView"/> uses to expand and collapse) — falls
+    /// through to the grid's own handling untouched. All selection changes go through this control's
+    /// range primitives, so an <see cref="ISelectionInfo"/> source keeps owning its own bookkeeping.
+    /// </remarks>
+    private bool TryHandleListViewHotkey(KeyRoutedEventArgs e, bool shiftKey, bool ctrlKey)
+        => TryHandleListViewHotkey(e.Key, shiftKey, ctrlKey);
+
+    /// <summary>
+    /// The key and modifiers are passed in rather than read from a routed event and the keyboard, so the
+    /// behaviour is testable.
+    /// </summary>
+    internal bool TryHandleListViewHotkey(VirtualKey key, bool shiftKey, bool ctrlKey)
+    {
+        if (!UseListViewHotkeys
+            || IsEditing
+            || !IsRowKeyboardContext
+            || SelectionMode is not (ListViewSelectionMode.Multiple or ListViewSelectionMode.Extended))
+        {
+            return false;
+        }
+
+        var current = CurrentRowIndex ?? CurrentCellSlot?.Row ?? -1;
+
+        if (key is VirtualKey.Enter)
+        {
+            ToggleRowSelection(current);
+            return true;
+        }
+
+        // Ctrl+Up/Down keeps meaning "jump to the first/last row"; only the plain and Shift forms are ours.
+        if (key is not (VirtualKey.Up or VirtualKey.Down) || ctrlKey || Items.Count == 0)
+        {
+            return false;
+        }
+
+        var step = key is VirtualKey.Up ? -1 : 1;
+        var target = current < 0
+            ? SkipUnselectableRows(0, 1)
+            : SkipUnselectableRows(Math.Clamp(current + step, 0, Items.Count - 1), step);
+
+        if (shiftKey)
+        {
+            SelectionStartRowIndex ??= current < 0 ? target : current;
+
+            var anchor = SelectionStartRowIndex.Value;
+            var next = new ItemIndexRange(
+                Math.Min(anchor, target),
+                (uint)(Math.Abs(target - anchor) + 1));
+
+            // Give back whatever the previous extension covered and this one does not, so reversing direction
+            // shrinks the range instead of leaving a trail — without disturbing selections made elsewhere.
+            if (_listViewShiftRange is { } previous)
+            {
+                if (previous.FirstIndex < next.FirstIndex)
+                {
+                    DeselectRange(new ItemIndexRange(previous.FirstIndex, (uint)(next.FirstIndex - previous.FirstIndex)));
+                }
+
+                if (previous.LastIndex > next.LastIndex)
+                {
+                    DeselectRange(new ItemIndexRange(next.LastIndex + 1, (uint)(previous.LastIndex - next.LastIndex)));
+                }
+            }
+
+            SelectRange(next);
+            _listViewShiftRange = next;
+        }
+        else
+        {
+            // A plain move re-anchors and leaves the selection exactly as it was: travel first, decide after.
+            SelectionStartRowIndex = target;
+            _listViewShiftRange = null;
+        }
+
+        SetCurrentCell(new TableViewCellSlot(target, CurrentCellSlot?.Column ?? -1));
+
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            var row = await ScrollRowIntoView(target);
+            row?.Focus(FocusState.Programmatic);
+        });
+
+        return true;
+    }
+
+    /// <summary>
+    /// Flips one row's selection, reading and writing through the range API so a delegated
+    /// (<see cref="ISelectionInfo"/>) source stays authoritative — SelectedItems is null there.
+    /// </summary>
+    private void ToggleRowSelection(int row)
+    {
+        if (row < 0 || row >= Items.Count)
+        {
+            return;
+        }
+
+        var range = new ItemIndexRange(row, 1);
+
+        if (SelectedRanges.Any(selected => selected.IsInRange(row)))
+        {
+            DeselectRange(range);
+        }
+        else
+        {
+            SelectRange(range);
+        }
+
+        _listViewShiftRange = null; // an explicit toggle ends the current Shift extension
     }
 
     /// <summary>
@@ -883,7 +1467,6 @@ public partial class TableView : ListView
         DragRectangleCanvas = GetTemplateChild("DragRectangleCanvas") as Canvas;
         _dragRectangle = GetTemplateChild("DragRectangle") as Border;
         _scrollViewer?.Loaded += OnScrollViewerLoaded;
-        _scrollViewer?.ViewChanged += OnScrollViewerViewChanged;
 
         if (IsLoaded)
         {
@@ -893,17 +1476,6 @@ public partial class TableView : ListView
         }
 
         SetHeadersVisibility();
-    }
-
-    /// <summary>
-    /// Handles the ViewChanged event of the ScrollViewer control, updating the position of each row when the view changes.
-    /// </summary>
-    private void OnScrollViewerViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
-    {
-        foreach (var row in _rows)
-        {
-            row.UpdatePosition();
-        }
     }
 
     /// <summary>
@@ -961,6 +1533,13 @@ public partial class TableView : ListView
         {
             itemsStackPanel.CacheLength = CacheLength;
         }
+
+        // The horizontal pan lives here: one visual carrying every row, moved by the compositor. Rows pin their
+        // own non-scrolling chrome back against it (TableViewRowPresenter.PinChromeToPan).
+        if (ItemsPanelRoot is { } panel)
+        {
+            BindToPan(panel, pinned: false);
+        }
     }
 
     /// <summary>
@@ -996,7 +1575,33 @@ public partial class TableView : ListView
     internal void InvalidateColumnBand()
     {
         _lastRealizedRange = (-2, -2);
-        RealizeVisibleCells();
+        _lastKeepRange = (-2, -2);
+        _lastRevealedRange = (-2, -2);
+
+        // Each row remembers the band its own cells are flagged for, and that memo is what lets the next pass skip
+        // work. It cannot see a column-set change, so drop it here or the next pass believes rows are already
+        // correct and leaves them flagged against columns that no longer exist.
+        foreach (var row in _rows)
+        {
+            row.InvalidateAppliedBand();
+        }
+
+        if (!IsColumnVirtualizationEnabled)
+        {
+            return;
+        }
+
+        // Supersede any in-flight pass at once — it is walking rows against a column set that no longer applies —
+        // but schedule the replacement through the settle timer rather than running it here. Adding columns one at
+        // a time raises this once per column, and starting a full chunked pass each time meant every pass but the
+        // last was abandoned part-way, having already re-walked the first rows. The timer collapses the burst into
+        // one pass, at the cost of a few milliseconds before it starts.
+        _realizeGeneration++;
+        _realizeInFlight = false;
+
+        var timer = _realizeSettleTimer ??= CreateRealizeSettleTimer();
+        timer.Stop();
+        timer.Start();
     }
 
     /// <summary>
@@ -1018,20 +1623,189 @@ public partial class TableView : ListView
             return;
         }
 
-        // A new scroll supersedes any in-flight chunked realize — bump the generation so it aborts (instead of
-        // grinding through a band you've already scrolled away from).
-        _realizeGeneration++;
+        // Every horizontal tick counts as activity for the idle prefetch pump — not just the ticks that move the
+        // band. A pan that stays inside the cached band for thirty ticks raises no realize request, and a pump
+        // that only watched requests read that as quiet and ran mid-drag (measured: ~10 increments per pan,
+        // worst ticks of two seconds). The pump yields while this is recent.
+        _lastColumnPrefetchRequestTick = Environment.TickCount64;
 
-        // Debounce realization until the horizontal offset settles. A scrollbar drag fires a continuous stream of
-        // offset changes; realizing each would create + measure every column it sweeps past (brutal the first time,
-        // since content is generated then). The transform pan keeps the drag smooth meanwhile; only once scrolling has
-        // been quiet for the settle window do we realize the final visible band. A real timer WAITS (no busy spin —
-        // the earlier reschedule approach hammered the dispatcher), and is reset only on scroll (RealizeVisibleCells
-        // isn't called on data updates), so the 8000/s stream never holds it off. Wheel/slow scroll leave gaps wider
-        // than the window, so they realize promptly.
+        // Once the viewport has left the realized band there is nothing left to draw out there — those cells are
+        // collapsed — so waiting out the settle window would show the user blank columns for as long as they keep
+        // dragging. Realize now instead. A drag delivers offsets every 8-16ms, well inside the 50ms window, so the
+        // debounce below could otherwise be re-armed indefinitely and never fire at all until the drag ended.
+        // Two paths, and the split is the whole point. While the user is moving, all that is needed is for the
+        // columns now in view to be visible: that is a couple of property writes per row and no element churn.
+        // Everything expensive — collapsing what the band left behind, releasing content further out, the
+        // generation bump, the row sort and the chunking — waits for motion to stop. Doing the expensive half on
+        // the drag is what made scrolling with virtualization on slower than scrolling with it off.
+        if (HasLeftRealizedBand())
+        {
+            RevealVisibleColumns();
+        }
+
+        // Always armed, so the full pass follows every gesture. A real timer WAITS (no busy spin — the earlier
+        // reschedule approach hammered the dispatcher), and is reset only on scroll (RealizeVisibleCells isn't
+        // called on data updates), so the 8000/s mutation stream never holds it off.
+        ArmRealizeSettleTimer();
+    }
+
+    /// <summary>
+    /// The inclusive index range of rows currently on screen, or <c>(-1, -1)</c> when it cannot be worked out and
+    /// every realized row must therefore be treated as visible.
+    /// </summary>
+    /// <remarks>
+    /// Derived arithmetically from the scroll offset and the fixed row height rather than by walking the visual
+    /// tree, so it costs two property reads. It needs a uniform row height, which rules it out while grouping is
+    /// on (banner rows are a different height) or when the row height is left to the content.
+    /// </remarks>
+    private (int First, int Last) GetVisibleRowRange()
+    {
+        var rowHeight = RowHeight;
+
+        if (_scrollViewer is null || IsGrouping || double.IsNaN(rowHeight) || rowHeight <= 0)
+        {
+            return (-1, -1);
+        }
+
+        var first = (int)(_scrollViewer.VerticalOffset / rowHeight);
+        var last = first + (int)(_scrollViewer.ViewportHeight / rowHeight) + 1;
+
+        return (Math.Max(0, first), last);
+    }
+
+    private void ArmRealizeSettleTimer()
+    {
         _realizeSettleTimer ??= CreateRealizeSettleTimer();
         _realizeSettleTimer.Stop();
         _realizeSettleTimer.Start();
+    }
+
+    /// <summary>
+    /// The cheap half of a band change, run synchronously while the user is still scrolling: show the columns that
+    /// have come into the band and hide the ones that have left it, for every realized row, and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>No content is released here, which is what keeps a drag off the create-and-destroy treadmill: once a
+    /// column has been realized, scrolling back over it costs one visibility write rather than rebuilding its
+    /// element and its bindings. It also does not bump the generation, sort the rows, chunk across dispatcher
+    /// turns, or record a range — the settled pass owns all of that.</para>
+    /// <para>A band that has jumped clear of where it was has no small delta to apply, so it is left to the settle
+    /// pass, which can chunk it. That only happens on a real jump (a scrollbar track click, a fling); an ordinary
+    /// drag moves the band by a few columns at a time and always overlaps.</para>
+    /// </remarks>
+    private void RevealVisibleColumns()
+    {
+        var band = GetVisibleScrollableRange(ColumnCacheLength, ColumnBandMaxBufferColumns);
+
+        if (band.First < 0)
+        {
+            return;
+        }
+
+        // Nothing has ever been realized: first layout, or the column set was just replaced. There is no delta to
+        // apply against, and waiting out the settle window would leave the grid showing collapsed cells for as
+        // long as it takes — so hand it straight to the chunked pass. Checked against BOTH memos: the settled range
+        // is invalidated whenever a pass is superseded, and treating that alone as "nothing realized" re-entered
+        // this synchronous full pass on every tick of a drag that followed a brief pause, each one superseding
+        // the last.
+        if (_lastRevealedRange.First < 0 && _lastRealizedRange.First < 0)
+        {
+            if (!_realizeInFlight)
+            {
+                _realizeSettleTimer?.Stop();
+                StartBandRealize();
+            }
+
+            return;
+        }
+
+        if (band == _lastRevealedRange)
+        {
+            return;
+        }
+
+        // A chunked pass still walking rows is working from an older band than this one. Supersede it — its next
+        // continuation aborts and invalidates the settled range, so the settle pass that follows redoes the work
+        // against the band the user actually ended on.
+        if (_realizeInFlight)
+        {
+            _realizeGeneration++;
+            _realizeInFlight = false;
+        }
+
+        // NOTE: a directional look-ahead (reveal a full viewport ahead while moving, shrink on settle) was tried
+        // here and measured as a clear regression on both axes — the horizontal sweep tripled and the vertical
+        // throw got a third slower — so the band stays symmetric. See docs/horizontal-scroll-performance.md.
+
+        var scrollable = Columns.VisibleScrollableColumns;
+
+        // Only the rows the user can actually see need to be right this instant. A grid realizes roughly twice
+        // the viewport (CacheLength defaults to one extra viewport), and dirtying those cached rows makes them
+        // take part in the layout pass for a band they are not being looked at against. The settle pass reconciles
+        // them a moment later, before any of them can scroll into view.
+        var (visibleFirst, visibleLast) = GetVisibleRowRange();
+
+        foreach (var row in _rows)
+        {
+            if (row.RowPresenter is not { } presenter)
+            {
+                continue;
+            }
+
+            if (visibleFirst >= 0)
+            {
+                var index = row.Index;
+
+                if (index < visibleFirst || index > visibleLast)
+                {
+                    continue;
+                }
+            }
+
+            var oldBand = row.AppliedBand;
+
+            if (oldBand == band)
+            {
+                continue;
+            }
+
+            if (oldBand.First < 0 || !Intersects(oldBand, band))
+            {
+                continue; // no delta to apply — the settle pass will walk this row in full
+            }
+
+            ApplyBandEdgeSpan(presenter, scrollable, oldBand.First, band.First, leading: true, band, row.AppliedKeep, allowRelease: false);
+            ApplyBandEdgeSpan(presenter, scrollable, oldBand.Last, band.Last, leading: false, band, row.AppliedKeep, allowRelease: false);
+
+            row.AppliedBand = band;
+        }
+
+        _lastRevealedRange = band;
+    }
+
+    /// <summary>
+    /// Whether the visible columns have moved outside the band that was last realized, i.e. whether the user is
+    /// looking at cells whose content was never generated.
+    /// </summary>
+    /// <remarks>
+    /// Measured against the bare viewport (no cache buffer): the buffer exists precisely so that small drifts stay
+    /// inside the realized band and keep taking the debounced path.
+    /// </remarks>
+    private bool HasLeftRealizedBand()
+    {
+        var visible = GetVisibleScrollableRange(0);
+
+        if (visible.First < 0)
+        {
+            return false; // column widths not known yet — leave it to the debounced pass, which has a fallback
+        }
+
+        if (_lastRealizedRange.First < 0)
+        {
+            return true; // nothing realized, or a pass was abandoned half-applied: do not make the user wait
+        }
+
+        return visible.First < _lastRealizedRange.First || visible.Last > _lastRealizedRange.Last;
     }
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateRealizeSettleTimer()
@@ -1050,7 +1824,11 @@ public partial class TableView : ListView
     /// </summary>
     private void StartBandRealize()
     {
-        var wide = GetVisibleScrollableRange(ColumnCacheLength);
+        // Starting a pass is what supersedes an older one — not every scroll tick, which would abort a pass that
+        // was about to finish, and not a settle that finds the band unchanged, which would abort a queued idle
+        // prefetch for nothing. The generation is bumped only where a pass actually starts chunking.
+        var wide = GetVisibleScrollableRange(ColumnCacheLength, ColumnBandMaxBufferColumns);
+        var keep = GetVisibleScrollableRange(ColumnCacheLength + ColumnPrefetchLength, ColumnKeepMaxBufferColumns);
 
         if (wide.First < 0)
         {
@@ -1062,41 +1840,101 @@ public partial class TableView : ListView
 
             if (scrollableCount > 0)
             {
-                RealizeRowChunk((0, scrollableCount - 1), _realizeGeneration, [.. _rows], 0, recordRange: false);
+                _realizeGeneration++; // supersedes anything still walking rows
+                _realizeInFlight = true;
+                var all = (0, scrollableCount - 1);
+                RealizeRowChunk(all, all, _realizeGeneration, [.. _rows], 0, recordRange: false);
             }
 
             return;
         }
 
-        if (wide == _lastRealizedRange)
+        if (wide == _lastRealizedRange && keep == _lastKeepRange)
         {
+            // Settled on a band that is already realized: nothing to walk, but the idle time that follows is
+            // exactly when the prefetch margin should fill. Without this, a settle after load (a second header
+            // width pass, say) would end here and the first scroll would still create everything it reveals.
+            RequestColumnPrefetch();
             return;
         }
 
-        RealizeRowChunk(wide, _realizeGeneration, [.. _rows], 0);
+        _realizeGeneration++; // supersedes anything still walking rows
+        _realizeInFlight = true;
+        RealizeRowChunk(wide, keep, _realizeGeneration, RowsInVisualOrder(), 0);
     }
 
-    private void RealizeRowChunk((int First, int Last) range, int generation, TableViewRow[] rows, int start, bool recordRange = true)
+    /// <summary>
+    /// The realized rows, ordered by row index rather than by <see cref="HashSet{T}"/> order.
+    /// </summary>
+    /// <remarks>
+    /// The chunked realize walks eight rows per dispatcher turn, so with a full cache the last chunk lands several
+    /// turns after the first. Walking in hash order scatters those turns over the viewport, and cells appear in
+    /// scrambled vertical order — which reads as the grid struggling far more than the same total delay applied
+    /// top to bottom. Sorting costs one small array pass per band change and makes the rows the user is looking at
+    /// come first.
+    /// </remarks>
+    private TableViewRow[] RowsInVisualOrder()
+    {
+        var rows = new TableViewRow[_rows.Count];
+        _rows.CopyTo(rows);
+        Array.Sort(rows, static (x, y) => x.Index.CompareTo(y.Index));
+        return rows;
+    }
+
+    private void RealizeRowChunk((int First, int Last) range, (int First, int Last) keep, int generation, TableViewRow[] rows, int start, bool recordRange = true)
     {
         if (generation != _realizeGeneration)
         {
-            return; // superseded by a newer scroll — abandon this band
+            // Superseded by a newer scroll — abandon this band. The rows already visited carry the new range while
+            // the rows behind them still carry the old one, so there is no single range that describes the grid.
+            // Recording nothing would leave _lastRealizedRange claiming the OLD range, and scrolling back to it
+            // would then hit the "band unchanged" early-out and never repair the migrated rows — they would keep
+            // their cells collapsed indefinitely. Invalidate instead, so the next pass always re-runs.
+            _lastRealizedRange = (-2, -2);
+            _lastKeepRange = (-2, -2);
+
+            // _realizeInFlight is deliberately NOT cleared here. Whoever bumped the generation owns it: a newer
+            // pass has already set it true, and the two callers that supersede without starting a pass
+            // (InvalidateColumnBand, RevealVisibleColumns) clear it themselves. Clearing it here would hand a
+            // running pass's flag away to the pass it just replaced.
+            return;
         }
 
         var end = Math.Min(start + RealizeRowChunkSize, rows.Length);
         for (var i = start; i < end; i++)
         {
-            RealizeRowCells(rows[i], range);
+            RealizeRowCells(rows[i], range, keep);
         }
 
         if (end < rows.Length)
         {
-            DispatcherQueue.TryEnqueue(() => RealizeRowChunk(range, generation, rows, end, recordRange));
+            DispatcherQueue.TryEnqueue(() => RealizeRowChunk(range, keep, generation, rows, end, recordRange));
+            return;
         }
-        else if (recordRange)
+
+        _realizeInFlight = false;
+
+        if (!recordRange)
         {
-            _lastRealizedRange = range; // band fully realized
+            return; // widths were unknown, so the range this pass used describes nothing worth remembering
         }
+
+        _lastRealizedRange = range; // band fully realized
+        _lastKeepRange = keep;
+        _lastRevealedRange = range; // the in-motion reveal has nothing left to do for this band
+
+        // The viewport can have moved on while this pass walked the rows — a drag does not pause for it. Chase it
+        // now rather than waiting for the next scroll tick, which is what keeps a continuous drag realizing
+        // instead of showing collapsed cells until the user lets go.
+        if (HasLeftRealizedBand())
+        {
+            StartBandRealize();
+            return;
+        }
+
+        // Settled: the viewport is inside the band it just realized. Spend the idle time that follows on the
+        // columns beside it, so the next scroll reveals content instead of creating it.
+        RequestColumnPrefetch();
     }
 
     /// <summary>
@@ -1112,44 +1950,348 @@ public partial class TableView : ListView
         }
 
         // Flag this (newly realized / recycled) row to match the current realized band, so it lines up with every
-        // other row. Falls back to computing the band when none has been established yet (early load).
-        var range = _lastRealizedRange.First >= 0 ? _lastRealizedRange : GetVisibleScrollableRange(ColumnCacheLength);
-        RealizeRowCells(row, range);
+        // other row. Falls back to computing the band when none has been established yet (early load). A row whose
+        // memo already matches returns without touching a cell, which is the usual case on a recycle.
+        var range = _lastRealizedRange.First >= 0
+            ? _lastRealizedRange
+            : GetVisibleScrollableRange(ColumnCacheLength, ColumnBandMaxBufferColumns);
+        var keep = _lastKeepRange.First >= 0
+            ? _lastKeepRange
+            : GetVisibleScrollableRange(ColumnCacheLength + ColumnPrefetchLength, ColumnKeepMaxBufferColumns);
+        RealizeRowCells(row, range, keep);
+
+        // A recycled or new row has its band realized but nothing beside it; queue the margin for idle time. A
+        // vertical scroll raises this once per recycled row, and the pump folds the burst into one walk.
+        RequestColumnPrefetch();
     }
 
-    private void RealizeRowCells(TableViewRow row, (int First, int Last) range)
+    /// <summary>
+    /// Asks for the columns just outside the realized band to have their content created while the thread is
+    /// idle, so the first horizontal scroll finds it already there.
+    /// </summary>
+    /// <remarks>
+    /// "Lags on the first scroll, smooth on the second" is content creation: every newly revealed column costs an
+    /// element per realized row, generated on the very scroll that reveals it. This moves that work to idle time.
+    /// The cells stay collapsed meanwhile, so nothing is measured or drawn until they actually scroll in, and each
+    /// new element's DataContext is pinned at once so a recycle underneath it costs nothing. Runs at Low priority
+    /// in row chunks; a real scroll (a bumped generation) abandons it and the band realize re-requests it when it
+    /// settles. Requests that arrive mid-walk — one per recycled row during a vertical scroll — fold into a single
+    /// follow-up walk rather than a queue.
+    /// </remarks>
+    internal void RequestColumnPrefetch()
+    {
+        if (!IsColumnVirtualizationEnabled || ColumnPrefetchLength <= 0)
+        {
+            return;
+        }
+
+        // "Idle" means the user has stopped, not the gap between two frames of a drag. Every settle during a pan
+        // re-requests this; running it then would create margin content AHEAD of the drag — more creation inside
+        // the gesture, which measured as a slower first scroll, not a faster one. So the request is debounced:
+        // each one restarts the timer, and the pump starts only once requests have stopped arriving.
+        _lastColumnPrefetchRequestTick = Environment.TickCount64; // the pump checks this before every increment
+        ArmColumnPrefetchTimer();
+    }
+
+    /// <summary>
+    /// (Re)starts the debounce without touching the activity stamp. The pump's own yield uses this: a yield that
+    /// stamped activity would count as activity, and the pump would then wait out the window, wake, see its own
+    /// stamp as "recent", and yield again — forever, at the timer's cadence, doing no work. Measured: 5-8
+    /// increments in four seconds of idle.
+    /// </summary>
+    private void ArmColumnPrefetchTimer()
+    {
+        _columnPrefetchTimer ??= CreateColumnPrefetchTimer();
+
+        // Already counting down: leave it. This is a poll, not a debounce — when it fires, StartColumnPrefetch
+        // checks the activity stamp and re-arms if things are still moving — so restarting it buys nothing and
+        // costs a cancel and a re-register on the dispatcher's timer list. That matters because a vertical
+        // scrollbar throw recycles every container every frame and each recycle asks for a prefetch: stopping and
+        // starting the timer once per recycled row was ~112 timer operations a frame.
+        if (_columnPrefetchTimer.IsRunning)
+        {
+            return;
+        }
+
+        _columnPrefetchTimer.Start();
+    }
+
+    private bool IsColumnPrefetchActivityRecent
+        => Environment.TickCount64 - _lastColumnPrefetchRequestTick < ColumnPrefetchDelayMs;
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateColumnPrefetchTimer()
+    {
+        var timer = DispatcherQueue.CreateTimer();
+        // A little past the window, so that when this fires the recency check has already gone false. Firing
+        // exactly at the window, with TickCount64's ~16ms granularity, left it sitting on the edge.
+        timer.Interval = TimeSpan.FromMilliseconds(ColumnPrefetchDelayMs + 32);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => StartColumnPrefetch();
+        return timer;
+    }
+
+    private void StartColumnPrefetch()
+    {
+        if (!IsColumnVirtualizationEnabled || ColumnPrefetchLength <= 0)
+        {
+            return; // the request that armed the timer may predate a change that turned prefetch off
+        }
+
+        if (IsColumnPrefetchActivityRecent)
+        {
+            ArmColumnPrefetchTimer(); // still busy: wait out another window rather than queue an increment that only yields
+            return;
+        }
+
+        if (_columnPrefetchPending)
+        {
+            _columnPrefetchAgain = true;
+            return;
+        }
+
+        _columnPrefetchPending = true;
+        var generation = _realizeGeneration;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => PrefetchChunk([.. _rows], 0, generation));
+    }
+
+    private void PrefetchChunk(TableViewRow[] rows, int start, int generation)
+    {
+        // A scroll since this was queued, or a realize still walking the rows, wins: never compete with either.
+        // Both re-request prefetch when they settle, so there is nothing to carry over.
+        if (generation != _realizeGeneration || _realizeInFlight || _lastRealizedRange.First < 0)
+        {
+            _columnPrefetchPending = false;
+
+            var again = _columnPrefetchAgain;
+            _columnPrefetchAgain = false;
+
+            // Superseded by a pass that is still walking rows, or with no band to work from: that pass re-requests
+            // on completion, so nothing to do here. Superseded by a generation bump with nothing in flight — i.e. a
+            // request arrived while this walk was queued — is the one case to retry now, or the request is lost.
+            if (again && !_realizeInFlight && _lastRealizedRange.First >= 0)
+            {
+                RequestColumnPrefetch();
+            }
+
+            return;
+        }
+
+        // Scrolling resumed since the pump started — every settle and every recycle counts as a request. Stop, and
+        // let the debounce restart it once things are quiet. This is what keeps an increment out of the middle of
+        // a drag whatever the dispatcher thinks "idle" means: with heavy cells one tick can outlast the debounce
+        // window, and a Low-priority callback slipping into that gap measured as a WORSE first scroll than no
+        // prefetch at all.
+        if (IsColumnPrefetchActivityRecent)
+        {
+            _columnPrefetchPending = false;
+            _columnPrefetchAgain = false;
+            ArmColumnPrefetchTimer(); // re-arm only: stamping here would make the yield self-perpetuating
+            return;
+        }
+
+        ColumnPrefetchIncrements++; // past every yield: this increment is about to do work
+
+        var band = _lastRealizedRange;
+        var wide = GetVisibleScrollableRange(ColumnCacheLength + ColumnPrefetchLength, ColumnPrefetchMaxBufferColumns);
+
+        if (wide.First >= 0)
+        {
+            // Time-budgeted, not row-counted: a Button-templated cell costs milliseconds to create and measure, so
+            // eight rows of margin in one callback would be hundreds of them. Each increment stops after a couple of
+            // milliseconds — mid-row if need be — and the next one picks up where it left off.
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var row = start;
+
+            while (row < rows.Length)
+            {
+                if (!PrefetchRowCells(rows[row], band, wide, started))
+                {
+                    var resumeAt = row;
+                    DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => PrefetchChunk(rows, resumeAt, generation));
+                    return;
+                }
+
+                _columnPrefetchColumnCursor = 0;
+                row++;
+            }
+        }
+
+        _columnPrefetchPending = false;
+
+        if (_columnPrefetchAgain)
+        {
+            _columnPrefetchAgain = false;
+            RequestColumnPrefetch(); // rows recycled while this walk ran; one more pass picks them up
+        }
+    }
+
+    /// <summary>
+    /// Creates content for a row's cells in the prefetch margin — inside the wide range, outside the band —
+    /// resuming from the column cursor and stopping once the increment's time budget is spent.
+    /// </summary>
+    /// <returns>Whether the row was finished; <see langword="false"/> means the cursor marks where to resume.</returns>
+    private bool PrefetchRowCells(TableViewRow row, (int First, int Last) band, (int First, int Last) wide, long started)
+    {
+        if (row.RowPresenter is not { } presenter)
+        {
+            return true;
+        }
+
+        var scrollable = Columns.VisibleScrollableColumns;
+        var first = Math.Max(0, wide.First);
+        var last = Math.Min(wide.Last, scrollable.Count - 1);
+
+        for (var i = Math.Max(first, _columnPrefetchColumnCursor); i <= last; i++)
+        {
+            if (i >= band.First && i <= band.Last)
+            {
+                continue; // in band: the realize pass owns it
+            }
+
+            if (presenter.GetCellForColumn(scrollable[i])?.PrefetchContent() is true)
+            {
+                ColumnPrefetchedCells++;
+            }
+
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds >= ColumnPrefetchBudgetMs)
+            {
+                _columnPrefetchColumnCursor = i + 1;
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal void RealizeRowCells(TableViewRow row, (int First, int Last) band, (int First, int Last) keep)
     {
         if (row.RowPresenter is not { } presenter)
         {
             return;
         }
 
-        // Frozen columns are always within view.
-        foreach (var column in Columns.VisibleFrozenColumns)
+        var oldBand = row.AppliedBand;
+        var oldKeep = row.AppliedKeep;
+
+        if (oldBand == band && oldKeep == keep)
         {
-            if (presenter.GetCellForColumn(column) is { } cell)
-            {
-                cell.SetInViewport(true);
-                cell.EnsureContent();
-            }
+            return; // this row is already flagged for exactly this band — the common case on a recycle
         }
 
-        // Flag every scrollable cell in/out of the viewport. Off-screen cells then skip their (expensive) content
-        // measure even if their content was already realized (e.g. by idle prefetch) — this is what actually
-        // virtualizes the measure cost. Content is realized only for the cells in view.
         var scrollable = Columns.VisibleScrollableColumns;
-        for (var i = 0; i < scrollable.Count; i++)
-        {
-            if (presenter.GetCellForColumn(scrollable[i]) is { } cell)
-            {
-                var inView = range.First >= 0 && i >= range.First && i <= range.Last;
-                cell.SetInViewport(inView);
+        var count = scrollable.Count;
 
-                if (inView)
+        // A row that has never been flagged, or one whose band has jumped clear of where it was (a scrollbar
+        // throw, a column-set change), has no small delta to apply and must be walked in full.
+        if (oldBand.First < 0 || oldKeep.First < 0 || !Intersects(oldBand, band) || !Intersects(oldKeep, keep))
+        {
+            // Frozen columns are always within view.
+            foreach (var column in Columns.VisibleFrozenColumns)
+            {
+                if (presenter.GetCellForColumn(column) is { } frozenCell)
                 {
-                    cell.EnsureContent();
+                    frozenCell.SetInViewport(true);
+                    frozenCell.EnsureContent();
                 }
             }
+
+            for (var i = 0; i < count; i++)
+            {
+                ApplyCellBandState(presenter, scrollable, i, band, keep);
+            }
+        }
+        else
+        {
+            // Only the columns that actually crossed an edge of either range. Each pair of old/new edges yields one
+            // contiguous span, and the four spans may overlap — applying a cell's state twice is a no-op, so there
+            // is no need to de-duplicate. A one-column scroll touches two cells here instead of every column.
+            ApplyBandEdgeSpan(presenter, scrollable, oldBand.First, band.First, leading: true, band, keep);
+            ApplyBandEdgeSpan(presenter, scrollable, oldBand.Last, band.Last, leading: false, band, keep);
+            ApplyBandEdgeSpan(presenter, scrollable, oldKeep.First, keep.First, leading: true, band, keep);
+            ApplyBandEdgeSpan(presenter, scrollable, oldKeep.Last, keep.Last, leading: false, band, keep);
+        }
+
+        row.AppliedBand = band;
+        row.AppliedKeep = keep;
+    }
+
+    /// <summary>Whether two inclusive index ranges have any column in common.</summary>
+    private static bool Intersects((int First, int Last) a, (int First, int Last) b)
+    {
+        return a.First <= b.Last && b.First <= a.Last;
+    }
+
+    /// <summary>
+    /// Applies the band state to the columns between an old and a new range edge. <paramref name="leading"/> marks
+    /// a First edge, whose span excludes the higher of the two indices (that column is inside both ranges);
+    /// a Last edge excludes the lower one for the same reason.
+    /// </summary>
+    private void ApplyBandEdgeSpan(
+        TableViewRowPresenter presenter,
+        IList<TableViewColumn> scrollable,
+        int from,
+        int to,
+        bool leading,
+        (int First, int Last) band,
+        (int First, int Last) keep,
+        bool allowRelease = true)
+    {
+        if (from == to)
+        {
+            return;
+        }
+
+        var first = leading ? Math.Min(from, to) : Math.Min(from, to) + 1;
+        var last = leading ? Math.Max(from, to) - 1 : Math.Max(from, to);
+
+        first = Math.Max(first, 0);
+        last = Math.Min(last, scrollable.Count - 1);
+
+        for (var i = first; i <= last; i++)
+        {
+            ApplyCellBandState(presenter, scrollable, i, band, keep, allowRelease);
+        }
+    }
+
+    /// <summary>
+    /// Flags one scrollable cell in or out of the viewport, and realizes or releases its content.
+    /// </summary>
+    /// <remarks>
+    /// Three nested ranges, not two. Inside <paramref name="band"/> the cell is visible and its content is built —
+    /// off-band cells are collapsed so they skip their (expensive) content measure even when the content already
+    /// exists, which is what virtualizes the measure cost. Outside <paramref name="keep"/> the content is released
+    /// as well, which is what stops an invisible column going on evaluating its bindings for a live data feed.
+    /// Between the two the cell keeps what it has: that gap is the hysteresis the prefetch pump fills.
+    /// </remarks>
+    private void ApplyCellBandState(
+        TableViewRowPresenter presenter,
+        IList<TableViewColumn> scrollable,
+        int index,
+        (int First, int Last) band,
+        (int First, int Last) keep,
+        bool allowRelease = true)
+    {
+        ColumnBandCellVisits++;
+
+        if (presenter.GetCellForColumn(scrollable[index]) is not { } cell)
+        {
+            return;
+        }
+
+        var inView = band.First >= 0 && index >= band.First && index <= band.Last;
+        cell.SetInViewport(inView);
+
+        if (inView)
+        {
+            cell.EnsureContent();
+        }
+        else if (allowRelease && (keep.First < 0 || index < keep.First || index > keep.Last))
+        {
+            // Only ever from the settled pass. Releasing while the user is still scrolling turns a drag into a
+            // treadmill: the column behind you is torn down at the same rate the column in front of you is built,
+            // and the idle prefetch pump that exists to absorb that cost is, by construction, switched off while
+            // anything is moving.
+            cell.ReleaseContent();
         }
     }
 
@@ -1159,9 +2301,24 @@ public partial class TableView : ListView
     /// </summary>
     private void RealizeAllCells()
     {
-        foreach (var row in _rows)
+        _lastRevealedRange = (-2, -2); // every cell is about to be shown; the reveal memo describes nothing
+
+        // Chunked like the band realize: this touches every cell of every realized row, which at 80 columns is
+        // thousands of content generations, and running it in one go blocks the frame it lands on.
+        RealizeAllCellsChunk([.. _rows], 0);
+    }
+
+    private void RealizeAllCellsChunk(TableViewRow[] rows, int start)
+    {
+        var end = Math.Min(start + RealizeRowChunkSize, rows.Length);
+
+        for (var i = start; i < end; i++)
         {
-            if (row.RowPresenter is { } presenter)
+            // Virtualization is off for these rows, so the per-row band memo no longer describes them; drop it or
+            // turning virtualization back on would find rows that believe they are already flagged correctly.
+            rows[i].InvalidateAppliedBand();
+
+            if (rows[i].RowPresenter is { } presenter)
             {
                 foreach (var cell in presenter.Cells)
                 {
@@ -1169,6 +2326,11 @@ public partial class TableView : ListView
                     cell.EnsureContent();
                 }
             }
+        }
+
+        if (end < rows.Length)
+        {
+            DispatcherQueue.TryEnqueue(() => RealizeAllCellsChunk(rows, end));
         }
     }
 
@@ -1180,26 +2342,48 @@ public partial class TableView : ListView
     internal double[] ScrollableColumnOffsets => (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
 
     /// <summary>
-    /// The horizontal-scroll clip rect shared (by value) across every row's scrollable cells panel, recomputed once
-    /// per offset change in <see cref="UpdateCellsClipRect"/>. Null when not scrolled or when the row height isn't
-    /// fixed (rows then compute their own clip from their panel). See <see cref="TableViewRowPresenter.ApplyHorizontalScroll"/>.
+    /// The one scalar every panned visual reads. Rows, their pinned chrome and the header all bind expression
+    /// animations to it, so a scroll tick is a single write from the UI thread and the compositor moves everything.
     /// </summary>
-    internal Rect? CellsClipRect { get; private set; }
+    /// <remarks>
+    /// Measured: panning N row panels individually costs ~0.75ms per row per frame in the XAML render walk (~19ms
+    /// a frame at 80 columns), while panning ONE ancestor holding the same content costs ~3.7ms total. The cost
+    /// tracks how many visuals move, not how many pixels do — so everything moves as one visual and the chrome
+    /// that must stay put is counter-translated instead.
+    /// </remarks>
+    internal CompositionPropertySet PanPropertySet
+    {
+        get
+        {
+            if (_panPropertySet is null)
+            {
+                _panPropertySet = ElementCompositionPreview.GetElementVisual(this).Compositor.CreatePropertySet();
+                _panPropertySet.InsertScalar(PanOffsetKey, (float)Math.Round(HorizontalOffset)); // whole pixels, see OnHorizontalOffsetChanged
+            }
+
+            return _panPropertySet;
+        }
+    }
 
     /// <summary>
-    /// Recomputes <see cref="CellsClipRect"/> from the current horizontal offset. Rows are uniform (same scrollable
-    /// width and row height), so the clip is identical for all of them and need only be built once per offset change
-    /// rather than per row. Only precomputed for a fixed RowHeight; otherwise rows fall back to per-row computation.
+    /// Binds an element's composition Translation to the shared pan offset, so it moves without the UI thread
+    /// touching it again.
     /// </summary>
-    private void UpdateCellsClipRect()
+    /// <param name="element">The element to move.</param>
+    /// <param name="pinned">
+    /// <see langword="true"/> for chrome that must stay put while its ancestor pans (row headers, the grid line,
+    /// frozen cells): it gets the opposite offset, cancelling the ancestor's.
+    /// </param>
+    internal void BindToPan(UIElement element, bool pinned)
     {
-        var h = HorizontalOffset;
-        var offsets = ScrollableColumnOffsets;
-        var width = offsets.Length > 0 ? offsets[^1] : 0d;
+        var visual = ElementCompositionPreview.GetElementVisual(element);
+        var expression = visual.Compositor.CreateExpressionAnimation(
+            pinned ? $"Vector3(pan.{PanOffsetKey}, 0, 0)" : $"Vector3(-pan.{PanOffsetKey}, 0, 0)");
 
-        CellsClipRect = h > 0 && width > h && !double.IsNaN(RowHeight)
-            ? new Rect(h, 0, width - h, RowHeight)
-            : null;
+        expression.SetReferenceParameter("pan", PanPropertySet);
+
+        ElementCompositionPreview.SetIsTranslationEnabled(element, true);
+        visual.StartAnimation("Translation", expression);
     }
 
     /// <summary>
@@ -1207,7 +2391,17 @@ public partial class TableView : ListView
     /// horizontal offset and viewport width. Returns (-1, -1) when the range cannot be determined yet (e.g. before
     /// column widths are known), in which case only frozen columns should be realized.
     /// </summary>
-    internal (int First, int Last) GetVisibleScrollableRange(double bufferViewports)
+    /// <param name="bufferViewports">
+    /// How far beyond the visible window to reach, as a multiple of the viewport width.
+    /// </param>
+    /// <param name="maxBufferColumns">
+    /// A second, harder limit on the same buffer, expressed in columns each side; the smaller of the two wins.
+    /// A buffer measured in viewports is a pixel measure, so with many narrow columns it swallows most of the grid
+    /// — at seventy 90px columns in a 1180px viewport, one viewport each side reaches about fifty-two of them,
+    /// which is not virtualization at all. Capping it in columns is what stops the realized set growing with the
+    /// number of columns the consumer happens to have defined.
+    /// </param>
+    internal (int First, int Last) GetVisibleScrollableRange(double bufferViewports, int maxBufferColumns = int.MaxValue)
     {
         if (_scrollViewer is null || _scrollViewer.ViewportWidth <= 0)
         {
@@ -1250,6 +2444,25 @@ public partial class TableView : ListView
         }
 
         var last = Math.Min(UpperBound(offsets, end), offsets.Length - 1);
+
+        if (last < first)
+        {
+            return (-1, -1);
+        }
+
+        // Apply the column cap: re-find the unbuffered visible window and clamp the buffered one to a fixed number
+        // of columns either side of it. Two extra binary searches over a cached array, only when a cap is asked for.
+        if (maxBufferColumns is not int.MaxValue)
+        {
+            var visibleFirst = LowerBound(offsets, HorizontalOffset);
+            var visibleLast = Math.Min(UpperBound(offsets, HorizontalOffset + viewport), offsets.Length - 1);
+
+            if (visibleFirst < offsets.Length && visibleLast >= visibleFirst)
+            {
+                first = Math.Max(first, visibleFirst - maxBufferColumns);
+                last = Math.Min(last, visibleLast + maxBufferColumns);
+            }
+        }
 
         return last < first ? (-1, -1) : (first, last);
     }
@@ -1366,6 +2579,18 @@ public partial class TableView : ListView
     /// </summary>
     private void ApplyEffectiveItemsSource(IEnumerable? source)
     {
+        // Remember what the consumer actually bound, so toggling grouping can re-project it, and swap in the
+        // grouped projection when GroupByPath is set. Grouping produces a tree adapter, which the ListView must
+        // virtualize over directly.
+        _ungroupedSource = source;
+        source = BuildGroupedSource(source);
+
+        if (source is TreeTableViewSource && UseCollectionView)
+        {
+            UseCollectionView = false; // re-enters here with grouping already built
+            return;
+        }
+
         if (UseCollectionView)
         {
             DetachDirectSource();
@@ -1482,7 +2707,7 @@ public partial class TableView : ListView
         {
             e.Handled = true;
             var mouseWheelDelta = isShiftButton ? -pointerPoint.Properties.MouseWheelDelta : pointerPoint.Properties.MouseWheelDelta;
-            var xOffset = HorizontalOffset + (mouseWheelDelta / 4.0);
+            var xOffset = HorizontalOffset + (mouseWheelDelta / HorizontalWheelDivisor);
             SetValue(HorizontalOffsetProperty, Math.Clamp(xOffset, 0, _scrollViewer.ScrollableWidth));
         }
     }
@@ -1963,6 +3188,116 @@ public partial class TableView : ListView
     }
 
     /// <summary>
+    /// Reports the ways the current <see cref="ColumnGroups"/> cannot be rendered — a group split across
+    /// non-adjacent columns, one straddling the frozen boundary, a duplicate or missing name, or a column naming
+    /// a group that does not exist.
+    /// </summary>
+    /// <returns>One message per problem; empty when the groups are sound.</returns>
+    public IReadOnlyList<string> ValidateColumnGroups()
+        => (Columns as TableViewColumnsCollection)?.ValidateColumnGroups(ColumnGroups) ?? [];
+
+    /// <summary>
+    /// Brings the rest of a column's group with it when its frozen state changes.
+    /// </summary>
+    /// <remarks>
+    /// The frozen headers do not pan and the scrollable ones do, so a banner cannot cover both. Rather than let
+    /// the user create that state and then report it, freezing any member freezes the whole group.
+    /// </remarks>
+    internal void SyncColumnGroupFrozenState(TableViewColumn column)
+    {
+        if (_syncingGroupFrozenState
+            || column.GroupName is not { Length: > 0 } name
+            || !ColumnGroups.Any(group => group.Name == name))
+        {
+            return;
+        }
+
+        // Set synchronously so the members we are about to change cannot re-enter, but APPLY on the dispatcher:
+        // this runs from the header row's own property-changed handler, which is midway through moving headers
+        // between the frozen and scrollable panels, and changing more columns underneath it corrupts its indexes.
+        _syncingGroupFrozenState = true;
+        var frozen = column.IsFrozen;
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                foreach (var member in Columns.OfType<TableViewColumn>())
+                {
+                    if (member.GroupName == name && member.IsFrozen != frozen)
+                    {
+                        member.IsFrozen = frozen;
+                    }
+                }
+            }
+            finally
+            {
+                _syncingGroupFrozenState = false;
+            }
+        });
+    }
+
+    /// <summary>
+    /// Collapses a column group down to its anchor column, or expands it again.
+    /// </summary>
+    /// <remarks>
+    /// Collapsing hides every member except <see cref="TableViewColumnGroup.CollapsedColumn"/> (defaulting to the
+    /// group's first column), remembering what each column's visibility was. Expanding restores exactly that,
+    /// rather than showing everything — a column the app had deliberately hidden must not reappear because a
+    /// neighbour's group was expanded.
+    /// </remarks>
+    /// <param name="group">The group to collapse or expand.</param>
+    /// <param name="collapse"><see langword="true"/> to collapse; <see langword="false"/> to expand.</param>
+    public void SetColumnGroupCollapsed(TableViewColumnGroup group, bool collapse)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+
+        if (group.IsCollapsed == collapse)
+        {
+            return;
+        }
+
+        var members = Columns
+            .OfType<TableViewColumn>()
+            .Where(column => column.GroupName == group.Name)
+            .OrderBy(column => column.Order ?? 0)
+            .ToList();
+
+        if (members.Count == 0)
+        {
+            group.IsCollapsed = collapse;
+            return;
+        }
+
+        if (collapse)
+        {
+            var anchor = group.CollapsedColumn is { } chosen && members.Contains(chosen) ? chosen : members[0];
+
+            foreach (var column in members)
+            {
+                _collapsedGroupVisibility[column] = column.Visibility;
+
+                if (!ReferenceEquals(column, anchor))
+                {
+                    column.Visibility = Visibility.Collapsed;
+                }
+            }
+        }
+        else
+        {
+            foreach (var column in members)
+            {
+                if (_collapsedGroupVisibility.Remove(column, out var previous))
+                {
+                    column.Visibility = previous;
+                }
+            }
+        }
+
+        group.IsCollapsed = collapse;
+    }
+
+    /// <summary>
     /// Drops every cached column layout and forces all realized rows and the header to rebuild from the CURRENT
     /// column set. Call after replacing the columns imperatively (e.g. <c>Columns.Clear()</c> followed by adds);
     /// assigning <see cref="ColumnsSource"/> does it automatically.
@@ -2228,6 +3563,11 @@ public partial class TableView : ListView
 
                 for (var row = 0; row < Items.Count; row++)
                 {
+                    if (!IsSelectableItem(row))
+                    {
+                        continue; // a group header or other banner row has no cells to select
+                    }
+
                     for (var column = 0; column < Columns.VisibleColumns.Count; column++)
                     {
                         selectionRange.Add(new TableViewCellSlot(row, column));
@@ -2278,6 +3618,40 @@ public partial class TableView : ListView
         SelectedCellRanges.Clear();
         OnCellSelectionChanged();
         CurrentCellSlot = null;
+    }
+
+    /// <summary>
+    /// Whether the item at a flat index can take part in selection. Banner rows
+    /// (<see cref="ITableViewBannerItem"/>) occupy an index but are not data, so they are excluded.
+    /// </summary>
+    /// <remarks>
+    /// One predicate consulted by every entry point, rather than a guard scattered through each — which is how
+    /// upstream's grouping attempt still let its header rows leak into select-all, copy and export.
+    /// </remarks>
+    /// <param name="index">The flat row index.</param>
+    /// <returns><see langword="false"/> for a row that is not data.</returns>
+    internal bool IsSelectableItem(int index)
+        => index < 0 || index >= Items.Count || Items[index] is not ITableViewBannerItem;
+
+    /// <summary>
+    /// Walks past banner rows in the given direction, so navigation lands on a row that actually has cells.
+    /// </summary>
+    /// <param name="row">The candidate row index.</param>
+    /// <param name="step">-1 to search upwards, 1 downwards.</param>
+    /// <returns>
+    /// The first selectable row at or beyond the candidate; the candidate itself when the search runs off the
+    /// end, so callers keep their existing clamping behaviour.
+    /// </returns>
+    internal int SkipUnselectableRows(int row, int step)
+    {
+        var candidate = row;
+
+        while (candidate >= 0 && candidate < Items.Count && !IsSelectableItem(candidate))
+        {
+            candidate += step;
+        }
+
+        return candidate >= 0 && candidate < Items.Count ? candidate : row;
     }
 
     /// <summary>
@@ -2335,7 +3709,7 @@ public partial class TableView : ListView
     /// </summary>
     internal void MakeSelection(TableViewCellSlot slot, bool shiftKey, bool ctrlKey = false)
     {
-        if (!slot.IsValidRow(this))
+        if (!slot.IsValidRow(this) || !IsSelectableItem(slot.Row))
         {
             return;
         }
@@ -2562,15 +3936,41 @@ public partial class TableView : ListView
             return;
         }
 
+        // Each navigation supersedes the one before it. ScrollCellIntoView yields, and may wait on a scroll to
+        // settle; without this, holding an arrow key leaves a queue of suspended navigations that all resume, each
+        // scrolling to ITS row and focusing ITS cell in whatever order they wake - overlapping ChangeView calls
+        // fighting, and focus landing on cells the user left long ago.
+        var generation = ++_currentCellGeneration;
+
+        // Let the SetValue that got us here unwind first. This runs from CurrentCellSlot's property-changed
+        // callback, i.e. synchronously inside that SetValue; driving ScrollIntoView and layout re-entrantly from
+        // there can fail natively, where .NET cannot catch it. (Lifted from upstream be2aa5d.) It also does the
+        // generation guard's job earlier: everything queued by a held arrow key yields here, and all but the
+        // latest bail below before touching the scroll machinery at all.
+        await Task.Yield();
+
         if (oldSlot.HasValue)
         {
+            // Unconditional: clearing the old cell's current state is right even if this navigation has been
+            // superseded, since that cell is not current either way.
             var cell = GetCellFromSlot(oldSlot.Value);
             cell?.ApplyCurrentCellState();
         }
 
         if (newSlot.HasValue)
         {
+            if (generation != _currentCellGeneration)
+            {
+                return; // superseded during the yield; skip the scroll entirely
+            }
+
             var cell = await ScrollCellIntoView(newSlot.Value);
+
+            if (generation != _currentCellGeneration)
+            {
+                return; // superseded while scrolling; the newer navigation owns focus now
+            }
+
             cell?.ApplyCurrentCellState();
             cell?.Focus(FocusState.Programmatic);
         }
@@ -2607,6 +4007,18 @@ public partial class TableView : ListView
         _cellStateDispatchPending = false;
         if (_pendingCellStateRows.Count is 0) return;
 
+        // With no cell selection anywhere, every one of these transitions is a no-op, and there are as many of them
+        // as there are columns in every recycled row. The pass exists to scrub a recycled container's inherited
+        // selection visuals (the "I selected four rows, paged down, and four more look selected" bug), so it is
+        // needed exactly while a selection exists — or has existed since the last time this ran clean.
+        if (SelectedCells.Count is 0 && SelectedCellRanges.Count is 0 && !_anyCellSelectionApplied)
+        {
+            _pendingCellStateRows.Clear();
+            return;
+        }
+
+        _anyCellSelectionApplied = SelectedCells.Count > 0 || SelectedCellRanges.Count > 0;
+
         foreach (var row in _rows)
         {
             if (_pendingCellStateRows.Contains(row.Index))
@@ -2633,6 +4045,14 @@ public partial class TableView : ListView
         }
 
         IsDragSelecting = true;
+
+        // Rows only refresh Position while a drag is in progress (see TableViewRow.ArrangeOverride), so seed every
+        // realized row's value once here, as the drag begins.
+        foreach (var row in _rows)
+        {
+            row.UpdatePosition();
+        }
+
         _lastDragCanvasPoint = startPoint;
         _dragStartVerticalOffset = _scrollViewer?.VerticalOffset ?? 0;
         _dragStartHorizontalOffset = HorizontalOffset;
@@ -3083,7 +4503,12 @@ public partial class TableView : ListView
                         _scrollViewer.ViewChanged += ViewChanged;
                         // null horizontal: selecting a row must never reset the horizontal scroll position.
                         _scrollViewer.ChangeView(null, yOffset, null, true);
-                        await tcs.Task;
+
+                        // Bounded. ViewChanged fires only if the view actually moves; when the target equals the
+                        // current offset (or clamps to it) it never comes, and an unbounded await would sit here
+                        // subscribed until some unrelated later scroll settled - then resume and focus a cell the
+                        // user selected minutes ago.
+                        await Task.WhenAny(tcs.Task, Task.Delay(ScrollSettleTimeoutMs));
                     }
                     finally
                     {
@@ -3126,6 +4551,7 @@ public partial class TableView : ListView
 
         foreach (var row in _rows)
         {
+            row.UpdatePosition(); // on demand: only drag-selection reads Position, so it is no longer refreshed for every realized row on every scroll event
             var rowTop = row.Position.Y;
             var rowBottom = rowTop + row.ActualHeight;
 
@@ -3234,7 +4660,7 @@ public partial class TableView : ListView
         {
             row.EnsureLayout();
             row.RowPresenter?.SetRowHeaderVisibility();
-
+            row.RowPresenter?.ApplyRootPanelMargin(); // the multi-select shift lives in the margin now
         }
 
         _shouldThrowSelectionModeChangedException = false;
@@ -3446,6 +4872,8 @@ public partial class TableView : ListView
     {
         if (_scrollViewer is null) return;
 
+        // VisibleFrozenColumns is the cached set; filtering VisibleColumns by IsFrozen allocates an enumerator
+        // per call for the same answer.
         var offset = CellsHorizontalOffset + Columns.VisibleFrozenColumns.Sum(c => c.ActualWidth);
         AttachedPropertiesHelper.SetFrozenColumnScrollBarSpace(_scrollViewer, offset);
     }

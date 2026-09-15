@@ -50,7 +50,14 @@ public partial class TableViewRowHeader : ContentControl
             element?.Measure(availableSize: new Size(double.PositiveInfinity, double.PositiveInfinity));
 
             var desiredWidth = GetContentDesiredWidth(element);
-            TableView?.SetValue(TableView.RowHeaderActualWidthProperty, desiredWidth);
+
+            // A property write into the shared grid, from inside every row header's measure, on every pass; and
+            // the presenter above forces this measure on every pass. Reading first turns twenty-five writes a pass
+            // into twenty-five reads. The value only ever ratchets up, so it is almost always unchanged.
+            if (TableView is not null && TableView.RowHeaderActualWidth != desiredWidth)
+            {
+                TableView.SetValue(TableView.RowHeaderActualWidthProperty, desiredWidth);
+            }
 
             #region TEMP_FIX_FOR_ISSUE https://github.com/microsoft/microsoft-ui-xaml/issues/9860
             var contentWidth = GetContentWidth(desiredWidth, element);

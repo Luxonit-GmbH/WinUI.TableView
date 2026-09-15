@@ -109,20 +109,16 @@ public class TableViewColumnSetSwapTests
     }
 
     [UITestMethod]
-    [Ignore("KNOWN FAILING — executable repro. Instrumentation proved TableViewHeaderRow's CollectionChanged " +
-            "handler NEVER FIRES: after a Clear()+Add() swap there is no ClearHeaders, no AddHeaders and no " +
-            "CalculateHeaderWidths, even though TableView._headerRow is present AND the ROWS receive the very same " +
-            "Columns.CollectionChanged event correctly (their cells rebuild). The swapped-in columns therefore " +
-            "never get sized headers, column.ActualWidth stays 0, GetVisibleScrollableRange returns (-1,-1) and " +
-            "every cell stays collapsed — the row renders with columns missing. NEXT STEP: determine why the " +
-            "header row's subscription is inert while the rows' works — prime suspect is that the subscribing " +
-            "header row instance is not the one in the live visual tree (a second instance), so the fix is likely " +
-            "in how TableViewHeaderRow.TableView is assigned. Remove [Ignore] when fixing.")]
-    public async Task ColumnSwap_WithColumnVirtualization_NewCellsAreVisibleNotCollapsed()
+public async Task ColumnSwap_WithColumnVirtualization_NewCellsAreVisibleNotCollapsed()
     {
         // The likely real-world repro: with column virtualization the realized BAND is cached by index range. A
         // swapped column set can produce the same numeric range for different columns, so without invalidation the
         // realize pass is skipped and the new cells stay collapsed — the row renders fewer columns than it has.
+        //
+        // Was [Ignore]d as a known failure: the header row's own Columns.CollectionChanged subscription does not
+        // fire in every hosting arrangement, so the swapped-in columns never got sized headers and every cell
+        // stayed collapsed. Fixed by TableViewHeaderRow.InvalidateHeaders, which TableView drives centrally
+        // instead of relying on that subscription. Kept as the regression guard for it.
         var tableView = await LoadAsync(columnCount: 4, virtualize: true);
 
         AssertVisibleCellsMatchColumns(tableView, 4);

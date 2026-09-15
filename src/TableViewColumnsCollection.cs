@@ -50,6 +50,7 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
         _visibleScrollableColumnsCached = null;
         _visibleScrollableColumnsMapCached = null;
         _visibleScrollableColumnOffsetsCached = null;
+        ColumnLayoutVersion++;
 
         if (_movingColumn) return; // Skip processing if it's a move action
 
@@ -128,15 +129,35 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
         _visibleScrollableColumnsCached = null;
         _visibleScrollableColumnsMapCached = null;
         _visibleScrollableColumnOffsetsCached = null;
+        ColumnLayoutVersion++;
 
         UpdateFrozenColumns();
     }
 
     internal void UpdateFrozenColumns()
     {
+        var frozenCount = TableView?.FrozenColumnCount ?? 0;
+
+        // With nothing frozen there is nothing to decide, and the walk is not free: VisibleColumnIndex consults a
+        // cache that the IsFrozen setter itself invalidates, so each iteration rebuilds the visible-column
+        // projection and its index map — quadratic in the column count, once per column added. A grid built by
+        // adding columns one at a time pays that for every one of them.
+        if (frozenCount is 0)
+        {
+            foreach (var column in this.OfType<TableViewColumn>())
+            {
+                if (column.IsFrozen)
+                {
+                    column.IsFrozen = false; // only writes when the value really changes
+                }
+            }
+
+            return;
+        }
+
         foreach (var column in this.OfType<TableViewColumn>())
         {
-            column.IsFrozen = VisibleColumnIndex(column) < (TableView?.FrozenColumnCount ?? 0);
+            column.IsFrozen = VisibleColumnIndex(column) < frozenCount;
         }
     }
 
@@ -147,7 +168,8 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     {
         if (propertyName is nameof(TableViewColumn.Visibility)
             or nameof(TableViewColumn.Order)
-            or nameof(TableViewColumn.IsFrozen))
+            or nameof(TableViewColumn.IsFrozen)
+            or nameof(TableViewColumn.GroupName))
         {
             // Membership or order of the visible column sets changed; every derived cache is stale, not just the
             // offsets (a hidden column must disappear from VisibleColumns immediately).
@@ -158,12 +180,14 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
             _visibleScrollableColumnsCached = null;
             _visibleScrollableColumnsMapCached = null;
             _visibleScrollableColumnOffsetsCached = null;
+            ColumnLayoutVersion++;
         }
         else if (propertyName is nameof(TableViewColumn.ActualWidth))
         {
             // Width changes keep membership/order intact; only the cumulative offsets used by horizontal
             // virtualization depend on it.
             _visibleScrollableColumnOffsetsCached = null;
+            ColumnLayoutVersion++;
         }
 
         // A batch operation refreshes frozen state wholesale and raises a single CollectionChanged at the end, so
@@ -176,6 +200,22 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
             ColumnPropertyChanged?.Invoke(this, new TableViewColumnPropertyChangedEventArgs(column, propertyName, index));
         }
     }
+
+    /// <summary>
+    /// Bumped whenever anything a cell's width or position depends on changes: a column's actual width, its
+    /// visibility, its order, or whether it is frozen.
+    /// </summary>
+    /// <remarks>
+    /// A recycled row has to make sure its cells still match their columns' widths, and doing that by comparing
+    /// every cell's width against its column's is two projected property reads per column per recycled row — the
+    /// single largest item on the vertical scroll path. Recording the version a row last synced against turns that
+    /// into one integer compare.
+    /// <para>It is bumped HERE, beside the cache invalidation, and deliberately not where the change notification
+    /// is raised. A batched column change suppresses the notification and a column move skips it, yet both really
+    /// do change widths — a counter that moved only with the event would let rows believe they were in sync and
+    /// leave their cells misaligned with the headers.</para>
+    /// </remarks>
+    internal int ColumnLayoutVersion { get; private set; }
 
     /// <inheritdoc/>
     public TableView? TableView { get; }
@@ -207,6 +247,228 @@ public partial class TableViewColumnsCollection : DependencyObjectCollection, IT
     /// </summary>
     public IList<TableViewColumn> VisibleScrollableColumns =>
         _visibleScrollableColumnsCached ??= VisibleColumns.Where(x => !x.IsFrozen).ToList();
+
+    /// <summary>
+    /// Resolves the second header level: the run of visible columns each banner covers, plus the gaps between
+    /// them, walked in display order so the header can lay the row out in one pass.
+    /// </summary>
+    /// <remarks>
+    /// <para>Frozen and scrollable columns are walked separately because they live in different panels — only one
+    /// of which pans — so a banner can never straddle the two. A group whose columns fall on both sides therefore
+    /// yields two spans; <see cref="ValidateColumnGroups"/> is what reports that as a mistake.</para>
+    /// <para>Runs are built from adjacency in the visible order, so a group split by a foreign column also yields
+    /// more than one span rather than silently swallowing the intruder.</para>
+    /// </remarks>
+    /// <param name="groups">The defined groups; columns whose GroupName matches none of them are treated as ungrouped.</param>
+    /// <returns>Spans in display order: frozen first, then scrollable.</returns>
+    internal IReadOnlyList<TableViewColumnGroupSpan> GetColumnGroupSpans(IEnumerable<TableViewColumnGroup>? groups)
+    {
+        var byName = new Dictionary<string, TableViewColumnGroup>();
+
+        foreach (var group in groups ?? [])
+        {
+            if (!string.IsNullOrEmpty(group.Name))
+            {
+                byName[group.Name] = group;
+            }
+        }
+
+        List<TableViewColumnGroupSpan> spans = [];
+        AppendSpans(spans, VisibleFrozenColumns, byName, isFrozen: true);
+        AppendSpans(spans, VisibleScrollableColumns, byName, isFrozen: false);
+        return spans;
+    }
+
+    private static void AppendSpans(
+        List<TableViewColumnGroupSpan> spans,
+        IList<TableViewColumn> columns,
+        Dictionary<string, TableViewColumnGroup> byName,
+        bool isFrozen)
+    {
+        var index = 0;
+
+        while (index < columns.Count)
+        {
+            var group = ResolveGroup(columns[index], byName);
+            var end = index + 1;
+
+            // Extend while the neighbours resolve to the SAME group instance. Ungrouped columns resolve to null
+            // and each stand alone, so an ungrouped run does not become one giant empty banner.
+            if (group is not null)
+            {
+                while (end < columns.Count && ReferenceEquals(ResolveGroup(columns[end], byName), group))
+                {
+                    end++;
+                }
+            }
+
+            spans.Add(new TableViewColumnGroupSpan(
+                group,
+                [.. columns.Skip(index).Take(end - index)],
+                index,
+                isFrozen));
+            index = end;
+        }
+    }
+
+    private static TableViewColumnGroup? ResolveGroup(
+        TableViewColumn column,
+        Dictionary<string, TableViewColumnGroup> byName)
+        => column.GroupName is { Length: > 0 } name && byName.TryGetValue(name, out var group) ? group : null;
+
+    /// <summary>
+    /// Adjusts a drag-reorder drop so column groups survive it: a banner spans ONE run of columns, so a member
+    /// may not leave its run and an outsider may not land inside one.
+    /// </summary>
+    /// <remarks>
+    /// Constraining the drop is what keeps the invariant, rather than validating afterwards and reporting a
+    /// tree the user has already broken. Ungrouped drops that land mid-run snap to the nearer edge of it, so the
+    /// gesture still does something predictable instead of being refused.
+    /// </remarks>
+    /// <param name="groups">The defined groups.</param>
+    /// <param name="column">The column being dragged.</param>
+    /// <param name="dropIndex">The requested index within the visible columns.</param>
+    /// <returns>An index that leaves every group contiguous.</returns>
+    internal int ConstrainDropIndex(IEnumerable<TableViewColumnGroup>? groups, TableViewColumn column, int dropIndex)
+    {
+        var visible = VisibleColumns;
+
+        if (visible.Count == 0)
+        {
+            return dropIndex;
+        }
+
+        var byName = new Dictionary<string, TableViewColumnGroup>();
+
+        foreach (var group in groups ?? [])
+        {
+            if (!string.IsNullOrEmpty(group.Name))
+            {
+                byName[group.Name] = group;
+            }
+        }
+
+        if (byName.Count == 0)
+        {
+            return dropIndex;
+        }
+
+        if (ResolveGroup(column, byName) is { } dragged)
+        {
+            // A member stays inside its own run, so the banner above it keeps covering exactly its columns.
+            var first = -1;
+            var last = -1;
+
+            for (var i = 0; i < visible.Count; i++)
+            {
+                if (ReferenceEquals(ResolveGroup(visible[i], byName), dragged))
+                {
+                    if (first < 0)
+                    {
+                        first = i;
+                    }
+
+                    last = i;
+                }
+            }
+
+            return first < 0 ? dropIndex : Math.Clamp(dropIndex, first, last);
+        }
+
+        // An ungrouped column dropped between two members of the SAME group would split it in two.
+        if (dropIndex > 0 && dropIndex < visible.Count)
+        {
+            var before = ResolveGroup(visible[dropIndex - 1], byName);
+
+            if (before is not null && ReferenceEquals(before, ResolveGroup(visible[dropIndex], byName)))
+            {
+                var first = dropIndex;
+                while (first > 0 && ReferenceEquals(ResolveGroup(visible[first - 1], byName), before))
+                {
+                    first--;
+                }
+
+                var last = dropIndex;
+                while (last < visible.Count - 1 && ReferenceEquals(ResolveGroup(visible[last + 1], byName), before))
+                {
+                    last++;
+                }
+
+                return dropIndex - first <= last + 1 - dropIndex ? first : last + 1;
+            }
+        }
+
+        return dropIndex;
+    }
+
+    /// <summary>
+    /// Reports the ways a set of column groups cannot be rendered, so the mistake surfaces as a message rather
+    /// than as a banner drawn in the wrong place.
+    /// </summary>
+    /// <remarks>
+    /// Checks whole columns, not just visible ones: a group split by a hidden column is still a latent bug that
+    /// appears the moment that column is shown.
+    /// </remarks>
+    /// <param name="groups">The defined groups.</param>
+    /// <returns>One message per problem; empty when the groups are sound.</returns>
+    internal IReadOnlyList<string> ValidateColumnGroups(IEnumerable<TableViewColumnGroup>? groups)
+    {
+        List<string> problems = [];
+        var defined = new HashSet<string>();
+
+        foreach (var group in groups ?? [])
+        {
+            if (string.IsNullOrEmpty(group.Name))
+            {
+                problems.Add($"A {nameof(TableViewColumnGroup)} has no {nameof(TableViewColumnGroup.Name)}, so no column can join it.");
+            }
+            else if (!defined.Add(group.Name))
+            {
+                problems.Add($"More than one {nameof(TableViewColumnGroup)} is named '{group.Name}'.");
+            }
+        }
+
+        var ordered = this.OfType<TableViewColumn>().OrderBy(column => column.Order ?? 0).ToList();
+        var seen = new Dictionary<string, (int Last, bool IsFrozen)>();
+
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            if (ordered[i].GroupName is not { Length: > 0 } name)
+            {
+                continue;
+            }
+
+            if (!defined.Contains(name))
+            {
+                problems.Add($"Column '{Describe(ordered[i])}' names group '{name}', which is not defined.");
+                continue;
+            }
+
+            if (seen.TryGetValue(name, out var previous))
+            {
+                if (previous.Last != i - 1)
+                {
+                    problems.Add(
+                        $"Group '{name}' is not contiguous: a banner spans one run of columns, but '{Describe(ordered[i])}' " +
+                        "is separated from the rest of its group.");
+                }
+
+                if (previous.IsFrozen != ordered[i].IsFrozen)
+                {
+                    problems.Add(
+                        $"Group '{name}' spans both frozen and scrollable columns. The frozen headers do not pan " +
+                        "with the scrollable ones, so one banner cannot cover both.");
+                }
+            }
+
+            seen[name] = (i, ordered[i].IsFrozen);
+        }
+
+        return problems;
+    }
+
+    private static string Describe(TableViewColumn column)
+        => column.Header?.ToString() is { Length: > 0 } header ? header : column.GetType().Name;
 
     /// <summary>
     /// Gets the cumulative right-edge offset (running sum of <see cref="TableViewColumn.ActualWidth"/>) of each

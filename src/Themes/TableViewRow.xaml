@@ -576,11 +576,10 @@
                                 CornerRadius="{ThemeResource TableViewRowCornerRadius}"
                                 Control.IsTemplateFocusTarget="True" />
 
+                        <!-- Height, MinHeight and MaxHeight are set in code (TableViewRow.ApplyHeaderGridHeights):
+                             the row's effective values, where an explicit RowHeight caps RowMinHeight. -->
                         <Grid x:Name="HeaderGrid"
-                              VerticalAlignment="Top"
-                              Height="{Binding TableView.RowHeight, RelativeSource={RelativeSource TemplatedParent}}"
-                              MinHeight="{Binding TableView.RowMinHeight, RelativeSource={RelativeSource TemplatedParent}}"
-                              MaxHeight="{Binding TableView.RowMaxHeight, RelativeSource={RelativeSource TemplatedParent}}">
+                              VerticalAlignment="Top">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition x:Name="SelectionIndicatorColumn"
                                                   Width="Auto" />

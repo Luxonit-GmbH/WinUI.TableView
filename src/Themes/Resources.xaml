@@ -10,6 +10,7 @@
         <ResourceDictionary x:Key="Light">
             <x:String x:Key="SortIconAscending">&#xf0ad;</x:String>
             <x:String x:Key="SortIconDescending">&#xf0ae;</x:String>
+            <x:String x:Key="SortIconUnsorted">&#xe8cb;</x:String>
             <x:String x:Key="FilterIcon">&#xe71c;</x:String>
             <x:String x:Key="OptionsButtonIcon">&#xe712;</x:String>
             <x:String x:Key="SelectAllButtonIcon">&#xE936;</x:String>
@@ -35,6 +36,10 @@
             <StaticResource x:Key="TableViewCellBackgroundSelected" ResourceKey="SubtleFillColorSecondaryBrush" />
             <StaticResource x:Key="TableViewHeaderForeground" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TableViewHeaderRowBackground" ResourceKey="SubtleFillColorSecondaryBrush" />
+            <StaticResource x:Key="TableViewColumnGroupHeaderBackground" ResourceKey="SubtleFillColorTertiaryBrush" />
+            <StaticResource x:Key="TableViewColumnGroupHeaderStroke" ResourceKey="DividerStrokeColorDefaultBrush" />
+            <StaticResource x:Key="TableViewBannerRowBackground" ResourceKey="SubtleFillColorTertiaryBrush" />
+            <Thickness x:Key="TableViewBannerRowPadding">12,0,12,0</Thickness>
             <StaticResource x:Key="TableViewRowBackground" ResourceKey="SubtleFillColorTransparentBrush" />
             <StaticResource x:Key="TableViewRowBackgroundPointerOver" ResourceKey="SubtleFillColorSecondaryBrush" />
             <StaticResource x:Key="TableViewRowBackgroundPressed" ResourceKey="SubtleFillColorTertiaryBrush" />
@@ -82,6 +87,7 @@
         <ResourceDictionary x:Key="Dark">
             <x:String x:Key="SortIconAscending">&#xf0ad;</x:String>
             <x:String x:Key="SortIconDescending">&#xf0ae;</x:String>
+            <x:String x:Key="SortIconUnsorted">&#xe8cb;</x:String>
             <x:String x:Key="FilterIcon">&#xe71c;</x:String>
             <x:String x:Key="OptionsButtonIcon">&#xe712;</x:String>
             <x:String x:Key="SelectAllButtonIcon">&#xE936;</x:String>
@@ -107,6 +113,10 @@
             <StaticResource x:Key="TableViewCellBackgroundSelected" ResourceKey="SubtleFillColorSecondaryBrush" />
             <StaticResource x:Key="TableViewHeaderForeground" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TableViewHeaderRowBackground" ResourceKey="SubtleFillColorSecondaryBrush" />
+            <StaticResource x:Key="TableViewColumnGroupHeaderBackground" ResourceKey="SubtleFillColorTertiaryBrush" />
+            <StaticResource x:Key="TableViewColumnGroupHeaderStroke" ResourceKey="DividerStrokeColorDefaultBrush" />
+            <StaticResource x:Key="TableViewBannerRowBackground" ResourceKey="SubtleFillColorTertiaryBrush" />
+            <Thickness x:Key="TableViewBannerRowPadding">12,0,12,0</Thickness>
             <StaticResource x:Key="TableViewRowBackground" ResourceKey="SubtleFillColorTransparentBrush" />
             <StaticResource x:Key="TableViewRowBackgroundPointerOver" ResourceKey="SubtleFillColorSecondaryBrush" />
             <StaticResource x:Key="TableViewRowBackgroundPressed" ResourceKey="SubtleFillColorTertiaryBrush" />
@@ -154,6 +164,7 @@
         <ResourceDictionary x:Key="HighContrast">
             <x:String x:Key="SortIconAscending">&#xf0ad;</x:String>
             <x:String x:Key="SortIconDescending">&#xf0ae;</x:String>
+            <x:String x:Key="SortIconUnsorted">&#xe8cb;</x:String>
             <x:String x:Key="FilterIcon">&#xe71c;</x:String>
             <x:String x:Key="OptionsButtonIcon">&#xe712;</x:String>
             <x:String x:Key="SelectAllButtonIcon">&#xE936;</x:String>
@@ -179,6 +190,10 @@
             <SolidColorBrush x:Key="TableViewCellBackgroundSelected" Color="{ThemeResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="TableViewHeaderForeground" Color="{ThemeResource SystemColorButtonTextColor}" />
             <SolidColorBrush x:Key="TableViewHeaderRowBackground" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="TableViewColumnGroupHeaderBackground" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="TableViewColumnGroupHeaderStroke" Color="{ThemeResource SystemColorButtonTextColor}" />
+            <SolidColorBrush x:Key="TableViewBannerRowBackground" Color="{ThemeResource SystemColorHighlightColor}" />
+            <Thickness x:Key="TableViewBannerRowPadding">12,0,12,0</Thickness>
             <SolidColorBrush x:Key="TableViewRowBackground" Color="{ThemeResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="TableViewRowBackgroundPointerOver" Color="{ThemeResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="TableViewRowBackgroundPressed" Color="{ThemeResource SystemColorHighlightColor}" />

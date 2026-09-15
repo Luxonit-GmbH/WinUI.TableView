@@ -73,8 +73,10 @@ public sealed partial class MainWindow : Window
                 "Data Export" => typeof(ExportPage),
                 "Large Dataset" => typeof(LargeDataPage),
                 "Tree" => typeof(TreePage),
+                "Grouping" => typeof(GroupingPage),
                 "Conditional Cell Styling" => typeof(ConditionalStylingPage),
                 "Column Sizing" => typeof(ColumnSizingPage),
+                "Performance Test" => typeof(PerformanceTestPage),
                 _ => typeof(BlankPage)
             };
 

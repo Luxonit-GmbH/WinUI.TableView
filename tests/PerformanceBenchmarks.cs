@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
 using System;
@@ -57,6 +58,205 @@ public class PerformanceBenchmarks
                 tableView.Columns.Add(column);
             }
         }, warmup: 2, iterations: 10));
+    }
+
+    /// <summary>
+    /// Grouping 10k rows into 50 groups: the projection cost the consumer pays on a GroupByPath change.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grouping_Project_10kRows_50Groups()
+    {
+        var tableView = await LoadGroupingGridAsync();
+
+        Report(Measure(
+            () =>
+            {
+                tableView.GroupByPath = null;
+                tableView.GroupByPath = "Bucket"; // 50 groups over 10k rows
+                tableView.UpdateLayout();
+            },
+            warmup: 1,
+            iterations: 3),
+            "Grouping_Project_10kRows_50Groups");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// Collapsing and re-expanding one 200-row group on a live grid — the gesture a user repeats most.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grouping_CollapseExpandOneGroup_10kRows()
+    {
+        var tableView = await LoadGroupingGridAsync();
+        tableView.GroupByPath = "Bucket";
+        tableView.UpdateLayout();
+
+        var group = tableView.Groups[0];
+
+        Report(Measure(
+            () =>
+            {
+                tableView.SetGroupExpanded(group, false);
+                tableView.UpdateLayout();
+                tableView.SetGroupExpanded(group, true);
+                tableView.UpdateLayout();
+            },
+            warmup: 1,
+            iterations: 5),
+            "Grouping_CollapseExpandOneGroup_10kRows");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// The reported shape: many groups, ~75k rows, collapse "takes forever" while expand is fast. The adapter alone
+    /// collapses AND re-expands a 100k-child branch in ~58ms (Tree_CollapseThenExpand_100kChildBranch), so the
+    /// asymmetry has to live downstream of the Reset. This splits the two directions and varies the two things
+    /// that only a removal touches: a live selection over the removed rows, and the CollectionView's rebuild.
+    /// Direct binding (UseCollectionView=false) is the consuming app's mode at scale.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grouping_Collapse_vs_Expand_75kRows()
+    {
+        const int rows = 75_000;
+
+        // Direct binding, no selection: collapse and expand timed separately.
+        var tableView = await LoadGroupingGridAsync(rows, useCollectionView: false);
+        tableView.GroupByPath = "Bucket";
+        tableView.UpdateLayout();
+        var group = tableView.Groups[0];
+
+        Report(Measure(
+            () => { tableView.SetGroupExpanded(group, false); tableView.UpdateLayout(); },
+            warmup: 1, iterations: 3,
+            reset: () => { tableView.SetGroupExpanded(group, true); tableView.UpdateLayout(); }),
+            "Grouping_Collapse_1500RowGroup_75k_Direct");
+
+        Report(Measure(
+            () => { tableView.SetGroupExpanded(group, true); tableView.UpdateLayout(); },
+            warmup: 1, iterations: 3,
+            reset: () => { tableView.SetGroupExpanded(group, false); tableView.UpdateLayout(); }),
+            "Grouping_Expand_1500RowGroup_75k_Direct");
+
+        // Same, with every row selected first: a collapse now removes selected rows, an expand adds unselected
+        // ones — the one thing that is structurally asymmetric between the two.
+        tableView.SelectAll();
+        tableView.UpdateLayout();
+
+        Report(Measure(
+            () => { tableView.SetGroupExpanded(group, false); tableView.UpdateLayout(); },
+            warmup: 1, iterations: 3,
+            reset: () => { tableView.SetGroupExpanded(group, true); tableView.UpdateLayout(); }),
+            "Grouping_Collapse_1500RowGroup_75k_Direct_SelectAll");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+
+        // CollectionView path, no selection: a Reset makes it rebuild its view copy.
+        tableView = await LoadGroupingGridAsync(rows, useCollectionView: true);
+        tableView.GroupByPath = "Bucket";
+        tableView.UpdateLayout();
+        group = tableView.Groups[0];
+
+        Report(Measure(
+            () => { tableView.SetGroupExpanded(group, false); tableView.UpdateLayout(); },
+            warmup: 1, iterations: 3,
+            reset: () => { tableView.SetGroupExpanded(group, true); tableView.UpdateLayout(); }),
+            "Grouping_Collapse_1500RowGroup_75k_CollectionView");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// The cost grouping adds to an ordinary scroll: the same horizontal pan, but over a grouped source.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grouping_HorizontalPan_100Ticks_Grouped()
+    {
+        var tableView = await LoadGroupingGridAsync();
+        tableView.GroupByPath = "Bucket";
+        tableView.UpdateLayout();
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 0; i < 100; i++)
+                {
+                    tableView.SetValue(TableView.HorizontalOffsetProperty, (double)(i * 20));
+                }
+            },
+            warmup: 2,
+            iterations: 10),
+            "Grouping_HorizontalPan_100Ticks_Grouped");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// Column grouping's cost on the header: banners must be resolved and re-measured on every width pass.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task ColumnGrouping_HeaderWidthPass_50Cols_x20()
+    {
+        var tableView = await LoadGridAsync();
+
+        for (var i = 0; i < 10; i++)
+        {
+            tableView.ColumnGroups.Add(new TableViewColumnGroup { Name = $"G{i}", Header = $"G{i}" });
+        }
+
+        for (var i = 0; i < tableView.Columns.Count; i++)
+        {
+            tableView.Columns[i].GroupName = $"G{i / 5}"; // 5 columns per banner, contiguous
+        }
+
+        tableView.UpdateLayout();
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 0; i < 20; i++)
+                {
+                    tableView.HeaderRow?.InvalidateHeaderWidths();
+                    tableView.UpdateLayout();
+                }
+            },
+            warmup: 1,
+            iterations: 5),
+            "ColumnGrouping_HeaderWidthPass_50Cols_x20");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    private static async Task<TableView> LoadGroupingGridAsync(int rows = RowCount, bool useCollectionView = true)
+    {
+        var items = new ObservableCollection<BenchItem>(Enumerable.Range(0, rows).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
+
+        var tableView = new TableView
+        {
+            AutoGenerateColumns = false,
+            RowHeight = 32,
+            Width = 1200,
+            Height = 600,
+            UseCollectionView = useCollectionView, // must precede ItemsSource: it decides which path binds it
+        };
+
+        foreach (var column in CreateColumns(ColumnCount))
+        {
+            tableView.Columns.Add(column);
+        }
+
+        tableView.ItemsSource = items;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(tableView);
+        tableView.UpdateLayout();
+
+        return tableView;
     }
 
     [UITestMethod]
@@ -147,6 +347,17 @@ public class PerformanceBenchmarks
         Report(result);
     }
 
+    /// <summary>
+    /// The dependency-property half of a horizontal scroll tick, and ONLY that half: the OnHorizontalOffsetChanged
+    /// callback (shared clip recompute, header pan, the per-row transform/clip loop, realize scheduling).
+    ///
+    /// Read this number as an isolation, never as "horizontal scrolling costs X". It EXCLUDES everything the real
+    /// gesture pays between ticks: no measure, no arrange, no render, and — because each tick restarts the 50ms
+    /// settle timer — no column realization either. A tight loop of 100 property writes returns before the first
+    /// frame would have been drawn, which is why this benchmark stayed flat while users reported an unusable
+    /// 80-column pan. The benchmarks in the "Horizontal scroll at blotter width" section below add those layers
+    /// back one at a time.
+    /// </summary>
     [UITestMethod]
     [TestCategory("Benchmark")]
     public async Task Grid_HorizontalPan_100Ticks()
@@ -230,6 +441,986 @@ public class PerformanceBenchmarks
         }, warmup: 2, iterations: 5));
 
         await UnloadAsync(tableView);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Horizontal scroll at blotter width — the "80 columns pans badly, vertical is fine" report
+    //
+    // The two axes do not share a code path, which is the whole reason the report is lopsided. The control
+    // template pins the ScrollViewer's HorizontalScrollMode to Disabled and TableView pans the cells itself from
+    // its own HorizontalOffset dependency property; vertical scrolling is the real platform ScrollViewer with its
+    // ItemsStackPanel recycling underneath. So a cost that both axes pay cannot explain the asymmetry, and only
+    // the differential between a horizontal and a vertical benchmark over the SAME grid is evidence.
+    //
+    // Each benchmark drives the same 100 offset ticks. They differ in how much of a real frame a tick pays for,
+    // which is what makes them bisectable:
+    //   *_100Ticks   dependency-property write only          (see Grid_HorizontalPan_100Ticks)
+    //   *_WithLayout + a synchronous measure/arrange pass
+    //   *_Rendered   + a real composition frame — the pixels the user, and a Citrix session, actually waits for
+    //
+    // Two further benchmarks split the tick's own work into its two suspects: the per-row transform/clip loop
+    // (Grid_HorizontalPan_80Cols_RowTransformClipOnly_100Ticks) and the settle-time column realization
+    // (Grid_ColumnRealizeBand_AllRows_80Cols_x20). Nothing here asserts; they report so the shape can be read.
+    // ---------------------------------------------------------------------------------------------------------
+
+    /// <summary>The reported-slow blotter width. Kept separate from <see cref="ColumnCount"/> on purpose.</summary>
+    private const int WideColumnCount = 80;
+
+    /// <summary>Offset ticks per pan — about the number of moves in one unhurried scrollbar drag.</summary>
+    private const int PanTicks = 100;
+
+    /// <summary>Pixels per tick. 100 x 20px = 2000px of travel, well inside the range at 80 x 100px columns.</summary>
+    private const double PanStep = 20;
+
+    /// <summary>
+    /// Pixels per tick for the column sweep. Smaller than <see cref="PanStep"/> because the sweep's narrowest grid
+    /// (20 x 100px columns against a 1200px viewport) only has ~800px of scroll range, and every point on the curve
+    /// must perform the identical gesture or the curve measures travel distance instead of column count.
+    /// </summary>
+    private const double SweepPanStep = 8;
+
+    /// <summary>
+    /// Long enough for the 50ms realize settle timer to fire and for its 8-rows-per-dispatcher-turn chunking to
+    /// drain. Only ever awaited during setup, never inside a stopwatch.
+    /// </summary>
+    private const int RealizeSettleWaitMs = 300;
+
+    /// <summary>
+    /// The reported gesture, with layout in the number: a horizontal drag across 80 columns where every tick is
+    /// followed by a synchronous measure/arrange. Compare against <see cref="Grid_HorizontalPan_80Cols_100Ticks"/>
+    /// (same grid, property write only) to see what layout adds, and against
+    /// <see cref="Grid_VerticalPan_80Cols_100Ticks_WithLayout"/> to see whether the axes really differ.
+    ///
+    /// The 50ms settle timer is restarted by every tick, so a tight drag never realizes columns mid-pan. That is
+    /// the control's design, and it means this number is the cost of the drag itself; the realization it defers is
+    /// measured by <see cref="Grid_ColumnRealizeBand_AllRows_80Cols_x20"/>.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_100Ticks_WithLayout()
+        => await HorizontalPanWithLayoutAsync(WideColumnCount, columnVirtualization: true, "Grid_HorizontalPan_80Cols_100Ticks_WithLayout");
+
+    /// <summary>
+    /// The same drag with column virtualization OFF — which is the control's DEFAULT
+    /// (<see cref="TableView.IsColumnVirtualizationEnabled"/> is false), so this is what a consumer that never
+    /// opted in is living with. Off, every cell of every realized row stays Visible and inside the panned+clipped
+    /// panel, so the visual the clip change dirties each tick contains 80 columns of live content rather than the
+    /// ~24 the band would leave. If this is far worse than the virtualization-on run, the fix is a default change,
+    /// not a scrolling rewrite.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_100Ticks_WithLayout_NoColumnVirtualization()
+        => await HorizontalPanWithLayoutAsync(WideColumnCount, columnVirtualization: false, "Grid_HorizontalPan_80Cols_100Ticks_WithLayout_NoColumnVirtualization");
+
+    /// <summary>
+    /// The property-write-only rung of the ladder at 80 columns, so the WithLayout and Rendered numbers above and
+    /// below can be attributed. Everything <see cref="Grid_HorizontalPan_100Ticks"/> excludes, this excludes too —
+    /// it exists only to be subtracted.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_100Ticks()
+    {
+        var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true);
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    tableView.SetValue(TableView.HorizontalOffsetProperty, i * PanStep);
+                }
+            },
+            warmup: 2,
+            iterations: 5,
+            reset: () => tableView.SetValue(TableView.HorizontalOffsetProperty, 0d)));
+
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// The control for the whole section. Same grid, same 80 columns, same 100 ticks of the same 20px — but down
+    /// the platform ScrollViewer instead of TableView's own offset property. The report is "vertical is fine", so
+    /// this number must come out well below its horizontal twin. If it does not, the problem is the sheer cell
+    /// count at 80 columns and our model of a horizontal-specific defect is wrong.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalPan_80Cols_100Ticks_WithLayout()
+        => await VerticalPanWithLayoutAsync(WideColumnCount, columnVirtualization: true, "Grid_VerticalPan_80Cols_100Ticks_WithLayout");
+
+    /// <summary>
+    /// The vertical control in the default (virtualization off) world, so the horizontal/vertical asymmetry can be
+    /// read in both worlds. Vertical scrolling realizes and measures whole rows, so if turning virtualization off
+    /// hurts vertical as much as it hurts horizontal, the cost is per-cell measure and not the pan path.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalPan_80Cols_100Ticks_WithLayout_NoColumnVirtualization()
+        => await VerticalPanWithLayoutAsync(WideColumnCount, columnVirtualization: false, "Grid_VerticalPan_80Cols_100Ticks_WithLayout_NoColumnVirtualization");
+
+    /// <summary>
+    /// The horizontal drag with a real composition frame awaited per tick. This is the closest thing here to what
+    /// the user experiences, because a scroll is judged in frames, and on Citrix the frame — not the UI-thread
+    /// callback — is what has to cross the wire. Subtract
+    /// <see cref="Grid_Idle_100Frames_RenderBaseline"/> and divide by 100 for the added cost per frame.
+    ///
+    /// This is also the only benchmark that can catch the pathological case: if one tick's work exceeds the 50ms
+    /// settle window, the realize timer fires DURING the pan, which realizes a band, which makes the next frame
+    /// slower still. A tight loop can never reproduce that feedback; a frame-paced one can.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_100Frames_Rendered()
+        => await RenderedPanAsync(WideColumnCount, columnVirtualization: true, horizontal: true, "Grid_HorizontalPan_80Cols_100Frames_Rendered");
+
+    /// <summary>
+    /// The frame-paced drag at 20 / 50 / 80 / 120 columns. The layout-only sweep is flat in column count, so this
+    /// is what decides whether "it got slow when we went to 80 columns" is really about the column count at all.
+    /// With column virtualization on, the live cells per row are bounded by the viewport band rather than by the
+    /// total, so a flat curve here means the lag is inherent to horizontal panning and more columns merely force
+    /// more of it — a materially different conclusion, and a different fix.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_ColumnSweep_100Frames_Rendered()
+    {
+        foreach (var columnCount in (int[])[20, 50, 80, 120])
+        {
+            await RenderedPanAsync(columnCount, columnVirtualization: true, horizontal: true,
+                $"Grid_HorizontalPan_Sweep_{columnCount}Cols_100Frames_Rendered");
+        }
+    }
+
+    /// <summary>
+    /// The frame-paced drag in the default (virtualization off) world. With every cell visible, each tick's clip
+    /// and transform change dirties a visual holding 80 columns x every realized row of live content, and the
+    /// render cost of that is invisible to any benchmark that does not wait for a frame.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_100Frames_Rendered_NoColumnVirtualization()
+        => await RenderedPanAsync(WideColumnCount, columnVirtualization: false, horizontal: true, "Grid_HorizontalPan_80Cols_100Frames_Rendered_NoColumnVirtualization");
+
+    /// <summary>
+    /// The frame-paced vertical control. Vertical scrolling hands the pan to the ScrollViewer, so the per-frame
+    /// delta over the idle baseline should be close to the cost of recycling the rows that crossed the viewport
+    /// edge and nothing else.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalPan_80Cols_100Frames_Rendered()
+        => await RenderedPanAsync(WideColumnCount, columnVirtualization: true, horizontal: false, "Grid_VerticalPan_80Cols_100Frames_Rendered");
+
+    /// <summary>
+    /// The floor the *_Rendered benchmarks stand on: 100 composition frames with the grid loaded and nothing
+    /// touching it. Without this number a rendered pan is unreadable, because ~100 x the frame interval of it is
+    /// just the display cadence.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_Idle_100Frames_RenderBaseline()
+    {
+        var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true);
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                for (var i = 0; i < PanTicks; i++)
+                {
+                    await WaitForRenderAsync();
+                }
+            },
+            warmup: 1,
+            iterations: 3);
+
+        Report(result);
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// Suspect (a) in isolation: the per-row pan bookkeeping. OnHorizontalOffsetChanged loops every realized row
+    /// and calls ApplyHorizontalScroll(useCachedClip: true), which per row writes TranslateTransform.X, writes
+    /// RectangleGeometry.Rect and assigns UIElement.Clip — three dependency-property sets across the XAML interop
+    /// boundary, each also dirtying that row's visual for the next render, plus a HorizontalOffset read and a
+    /// details-panel Visibility read. At 80 columns and ~30 realized rows that is roughly 150 property operations
+    /// and 30 dirtied visuals per tick, none of which the vertical path performs.
+    ///
+    /// Calling the loop directly excludes the header pan, the shared clip recompute and the realize scheduling, so
+    /// what remains is only this. Divide by (100 x the realized row count written to the test output) for the
+    /// per-row-per-tick cost, then compare with <see cref="Grid_ColumnRealizeBand_AllRows_80Cols_x20"/> to see
+    /// which of the two suspects is actually large.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_RowTransformClipOnly_100Ticks()
+    {
+        var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true);
+
+        // A non-zero offset is mandatory: at h <= 0 ApplyHorizontalScroll takes the "Clip = null" branch and would
+        // measure a state the user is only ever in before they start scrolling.
+        tableView.SetValue(TableView.HorizontalOffsetProperty, 1_000d);
+        tableView.UpdateLayout();
+        await Task.Delay(RealizeSettleWaitMs);
+
+        // Snapshotted outside the stopwatch: TableView.Rows allocates and sorts on every read, which the real loop
+        // (over the raw row list) does not do.
+        var rows = tableView.Rows;
+        TestContext.WriteLine($"realized rows: {rows.Count}, columns: {WideColumnCount}");
+
+        Report(Measure(
+            () =>
+            {
+                for (var tick = 0; tick < PanTicks; tick++)
+                {
+                    foreach (var row in rows)
+                    {
+                        row.RowPresenter?.ApplyHorizontalScroll();
+                    }
+                }
+            },
+            warmup: 2,
+            iterations: 5));
+
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// Suspect (b) in isolation: what the settle timer runs 50ms after the drag stops. RealizeRowCells walks EVERY
+    /// visible scrollable column of a row — not just the band — doing a dictionary lookup plus a SetInViewport per
+    /// cell, and SetInViewport reads (and sometimes writes) the cell's Visibility. At 80 columns and ~30 realized
+    /// rows that is ~2400 lookups and ~2400 Visibility reads per pass, and the control runs one pass per settled
+    /// scroll, chunked 8 rows to a dispatcher turn.
+    ///
+    /// Content generation happens once per cell, so the steady-state number here is the flag sweep alone. A large
+    /// value points at making the sweep band-relative instead of all-columns; a small one exonerates realization
+    /// and leaves the per-row transform/clip loop and the render cost as the remaining explanations.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_ColumnRealizeBand_AllRows_80Cols_x20()
+    {
+        var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true);
+        var rows = tableView.Rows;
+        TestContext.WriteLine($"realized rows: {rows.Count}, columns: {WideColumnCount}");
+
+        Report(Measure(
+            () =>
+            {
+                for (var pass = 0; pass < 20; pass++)
+                {
+                    foreach (var row in rows)
+                    {
+                        tableView.RealizeRowCells(row);
+                    }
+                }
+            },
+            warmup: 2,
+            iterations: 5));
+
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// The single most diagnostic shape in this file: the same drag at 20 / 50 / 80 / 120 columns over the same
+    /// 10k rows. Linear growth means a per-column constant that more columns simply multiply, and the answer is to
+    /// shrink the constant. Super-linear growth means something in the tick is touching all columns for all rows,
+    /// and the answer is to stop doing that — a very different fix. Reported as four separate rows so the CSV
+    /// carries the curve.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_ColumnSweep_WithLayout()
+        => await ColumnSweepAsync(columnVirtualization: true, nameSuffix: "");
+
+    /// <summary>
+    /// The same curve in the control's default world. Virtualization on is meant to make the curve flat past the
+    /// point where the band stops growing (the band is viewport-sized, not column-count-sized); off, there is
+    /// nothing to flatten it. The gap between the two curves is the value of the virtualization opt-in.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_ColumnSweep_WithLayout_NoColumnVirtualization()
+        => await ColumnSweepAsync(columnVirtualization: false, nameSuffix: "_NoColumnVirtualization");
+
+    private async Task ColumnSweepAsync(bool columnVirtualization, string nameSuffix)
+    {
+        int[] columnCounts = [20, 50, 80, 120];
+
+        foreach (var columnCount in columnCounts)
+        {
+            await HorizontalPanWithLayoutAsync(
+                columnCount,
+                columnVirtualization,
+                $"Grid_HorizontalPan_Sweep_{columnCount}Cols_100Ticks_WithLayout{nameSuffix}",
+                step: SweepPanStep);
+        }
+    }
+
+    /// <summary>
+    /// Drives <see cref="PanTicks"/> horizontal offset changes, forcing a synchronous layout pass between each so
+    /// measure and arrange land inside the measurement.
+    /// </summary>
+    private async Task HorizontalPanWithLayoutAsync(int columnCount, bool columnVirtualization, string benchmarkName, double step = PanStep)
+    {
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    tableView.SetValue(TableView.HorizontalOffsetProperty, i * step);
+                    tableView.UpdateLayout();
+                }
+            },
+            warmup: 2,
+            iterations: 5,
+            reset: () =>
+            {
+                tableView.SetValue(TableView.HorizontalOffsetProperty, 0d);
+                tableView.UpdateLayout();
+            }),
+            benchmarkName);
+
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// The vertical mirror of <see cref="HorizontalPanWithLayoutAsync"/>: identical tick count and identical pixel
+    /// step, but moved through the ScrollViewer so the platform's own virtualization path runs.
+    /// </summary>
+    private async Task VerticalPanWithLayoutAsync(int columnCount, bool columnVirtualization, string benchmarkName)
+    {
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+        var scrollViewer = GetScrollViewer(tableView);
+
+        Report(Measure(
+            () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    scrollViewer.ChangeView(null, i * PanStep, null, true);
+                    tableView.UpdateLayout();
+                }
+            },
+            warmup: 2,
+            iterations: 5,
+            reset: () =>
+            {
+                scrollViewer.ChangeView(null, 0d, null, true);
+                tableView.UpdateLayout();
+            }),
+            benchmarkName);
+
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// Drives <see cref="PanTicks"/> ticks along one axis, waiting for a real composition frame after each. Must
+    /// use <see cref="MeasureAsync"/>, never <see cref="Measure"/>: blocking the UI thread on a frame it is itself
+    /// responsible for producing would deadlock.
+    /// </summary>
+    /// <summary>
+    /// A scrollbar drag, which is a different gesture from a wheel pan and the one users complain about.
+    /// </summary>
+    /// <remarks>
+    /// <para>The existing pan benchmarks step 20px a tick, so over a hundred ticks the realized band moves about
+    /// five times and the virtualization machinery barely runs. Dragging the thumb sweeps the WHOLE extent in the
+    /// same number of frames — the band moves every tick — and that is the regime where column virtualization has
+    /// historically cost more than it saved. A benchmark that cannot reproduce the complaint cannot verify a fix
+    /// for it.</para>
+    /// <para>The warm-up iteration performs the first sweep, which is the one that creates content; the measured
+    /// iterations are therefore the steady state, i.e. what a user feels on the second and every later drag. Pair
+    /// it with the NoColumnVirtualization twin: the gap between them is the price of the feature.</para>
+    /// </remarks>
+    private async Task ScrollbarSweepAsync(int columnCount, bool columnVirtualization, string benchmarkName)
+    {
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+
+        // The full scrollable width, swept in PanTicks steps.
+        var extent = Math.Max(0d, (columnCount * 100d) - 1200d);
+        var step = extent / PanTicks;
+
+        // What each sweep did, not only how long it took. The measure counters say whether the cells that did not
+        // change visibility were re-measured at all (they should not be: WinUI skips a clean element offered the
+        // same size), and how many cell templates the sweep itself had to apply — the first-reveal cost the idle
+        // prefetch exists to take off the scroll path. The first line is the warm-up sweep.
+        var sweeps = new List<string>();
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                var cellMeasures = tableView.CellMeasures;
+                var templates = tableView.CellTemplateApplications;
+                var prefetched = tableView.CellTemplatesPrefetched;
+                var panelMeasures = tableView.CellsPanelMeasures;
+                var visits = tableView.ColumnBandCellVisits;
+
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    tableView.SetValue(TableView.HorizontalOffsetProperty, i * step);
+                    tableView.UpdateLayout();
+                    await WaitForRenderAsync();
+                }
+
+                sweeps.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"cell measures {tableView.CellMeasures - cellMeasures}, band cell visits {tableView.ColumnBandCellVisits - visits}, cells panel measures {tableView.CellsPanelMeasures - panelMeasures}, cell templates applied {tableView.CellTemplateApplications - templates} of which by prefetch {tableView.CellTemplatesPrefetched - prefetched}"));
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                tableView.SetValue(TableView.HorizontalOffsetProperty, 0d);
+                tableView.UpdateLayout();
+            });
+
+        TestContext.WriteLine($"{benchmarkName}: {columnCount} columns, step {step:N0}px, realized rows {tableView.Rows.Count}");
+
+        for (var i = 0; i < sweeps.Count; i++)
+        {
+            TestContext.WriteLine($"{benchmarkName} sweep {i}{(i == 0 ? " (warm-up)" : string.Empty)}: {sweeps[i]}");
+        }
+
+        Report(result, benchmarkName);
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// The vertical equivalent: throwing the scrollbar, where every realized container is recycled onto a distant
+    /// item on every frame. The ordinary vertical pan moves a row or two a tick and never exercises that.
+    /// </summary>
+    private async Task ScrollbarThrowAsync(int columnCount, bool columnVirtualization, string benchmarkName)
+    {
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+        var scrollViewer = GetScrollViewer(tableView);
+
+        // Far enough each tick that nothing on screen survives: ~100 rows at a row height of 32.
+        const double ThrowStep = 3200d;
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    scrollViewer.ChangeView(null, i * ThrowStep, null, true);
+                    tableView.UpdateLayout();
+                    await WaitForRenderAsync();
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                scrollViewer.ChangeView(null, 0d, null, true);
+                tableView.UpdateLayout();
+            });
+
+        Report(result, benchmarkName);
+        await UnloadAsync(tableView);
+    }
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalScrollbarSweep_80Cols_Rendered()
+        => await ScrollbarSweepAsync(WideColumnCount, columnVirtualization: true, "Grid_HorizontalScrollbarSweep_80Cols_Rendered");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalScrollbarSweep_80Cols_Rendered_NoColumnVirtualization()
+        => await ScrollbarSweepAsync(WideColumnCount, columnVirtualization: false, "Grid_HorizontalScrollbarSweep_80Cols_Rendered_NoColumnVirtualization");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalScrollbarThrow_80Cols_Rendered()
+        => await ScrollbarThrowAsync(WideColumnCount, columnVirtualization: true, "Grid_VerticalScrollbarThrow_80Cols_Rendered");
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalScrollbarThrow_80Cols_Rendered_NoColumnVirtualization()
+        => await ScrollbarThrowAsync(WideColumnCount, columnVirtualization: false, "Grid_VerticalScrollbarThrow_80Cols_Rendered_NoColumnVirtualization");
+
+    private async Task RenderedPanAsync(int columnCount, bool columnVirtualization, bool horizontal, string benchmarkName)
+    {
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+        ScrollViewer? scrollViewer = horizontal ? null : GetScrollViewer(tableView);
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    if (horizontal)
+                    {
+                        tableView.SetValue(TableView.HorizontalOffsetProperty, i * PanStep);
+                    }
+                    else
+                    {
+                        scrollViewer!.ChangeView(null, i * PanStep, null, true);
+                    }
+
+                    tableView.UpdateLayout();
+                    await WaitForRenderAsync();
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                tableView.SetValue(TableView.HorizontalOffsetProperty, 0d);
+                scrollViewer?.ChangeView(null, 0d, null, true);
+                tableView.UpdateLayout();
+            });
+
+        Report(result, benchmarkName);
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// Columns whose cell element builds its whole visual tree in its CONSTRUCTOR — the shape of a UserControl
+    /// with InitializeComponent, which is what the consuming app's cells are and where its profiler put the
+    /// per-cell cost. The proxy matters: a templated Control (a Button) pays on first Measure instead, which a
+    /// collapsed prefetch could not reach, and measured as no benefit at all. A TextBlock pays nothing anywhere.
+    /// </summary>
+    private static IEnumerable<TableViewColumn> CreateHeavyColumns(int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            yield return new CtorHeavyColumn
+            {
+                Header = $"Col {i}",
+                Width = new GridLength(100),
+                Binding = new Binding { Path = new PropertyPath(nameof(BenchItem.Name)) },
+            };
+        }
+    }
+
+    private sealed class CtorHeavyColumn : TableViewTextColumn
+    {
+        public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem) => new CtorHeavyCell(Binding);
+    }
+
+    /// <summary>
+    /// A cell that does its work up front, like InitializeComponent does: a small tree of a border, a panel and
+    /// three text blocks, one of them bound, all created and styled in the constructor.
+    /// </summary>
+    private sealed class CtorHeavyCell : UserControl
+    {
+        public CtorHeavyCell(Binding? binding)
+        {
+            var value = new TextBlock { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+
+            if (binding is not null)
+            {
+                value.SetBinding(TextBlock.TextProperty, binding);
+            }
+
+            var panel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            panel.Children.Add(new TextBlock { Text = "▲", Opacity = 0.6 });
+            panel.Children.Add(value);
+            panel.Children.Add(new TextBlock { Text = "bp", Opacity = 0.6 });
+
+            Content = new Border
+            {
+                Padding = new Thickness(6, 2, 6, 2),
+                CornerRadius = new CornerRadius(3),
+                BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+                Child = panel,
+            };
+        }
+    }
+
+    /// <summary>
+    /// A blotter-shaped grid: <paramref name="columnCount"/> fixed 100px columns over <see cref="RowCount"/> rows
+    /// in a 1200x800 viewport. Column virtualization is a parameter rather than a constant because it is the
+    /// biggest fork in the horizontal path, and because the control ships with it off.
+    /// </summary>
+    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization, int frozenColumns = 0, double prefetchLength = 1d, bool heavyCells = false)
+    {
+        var items = new ObservableCollection<BenchItem>(
+            Enumerable.Range(0, RowCount).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
+
+        var tableView = new TableView
+        {
+            AutoGenerateColumns = false,
+            IsColumnVirtualizationEnabled = columnVirtualization,
+            RowHeight = 32,
+            Width = 1200,
+            Height = 800,
+            SelectionMode = ListViewSelectionMode.Extended,
+            FrozenColumnCount = frozenColumns,
+            ColumnPrefetchLength = prefetchLength, // set before load: the pump runs during the settle wait below
+            RowHeaderWidth = frozenColumns > 0 ? 40 : double.NaN,
+        };
+
+        tableView.Columns.AddRange(heavyCells ? CreateHeavyColumns(columnCount) : CreateColumns(columnCount));
+        tableView.ItemsSource = items;
+
+        return LoadAsync(tableView);
+
+        static async Task<TableView> LoadAsync(TableView tableView)
+        {
+            await UnitTestApp.Current.MainWindow.LoadTestContentAsync(tableView);
+            tableView.UpdateLayout();
+
+            // A freshly loaded grid is still generating cell content: realization is debounced and then chunked
+            // across dispatcher turns. Draining it here keeps that one-off out of every stopwatch below, so the
+            // pan benchmarks measure the steady state a user scrolls in rather than first-render.
+            await Task.Delay(RealizeSettleWaitMs);
+            tableView.UpdateLayout();
+
+            return tableView;
+        }
+    }
+
+    /// <summary>
+    /// The pan with FROZEN COLUMNS and a row header — the shape a real blotter has, and the one the other pan
+    /// benchmarks miss entirely by leaving FrozenColumnCount at its default of 0.
+    ///
+    /// It matters because the two configurations exercise different halves of the fix. With nothing frozen the
+    /// grid pans as a single visual and there is nothing to hold back. With frozen columns every realized row
+    /// carries counter-translated chrome — the row-header group, the grid line, the frozen cells panel — so the
+    /// per-row work the fix was meant to remove partly returns, as compositor expression evaluations rather than
+    /// UI-thread writes. If this number is materially worse than its unfrozen twin, that is where it went.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_Frozen_100Frames_Rendered()
+    {
+        var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true, frozenColumns: 3);
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                for (var i = 1; i <= PanTicks; i++)
+                {
+                    tableView.SetValue(TableView.HorizontalOffsetProperty, i * PanStep);
+                    tableView.UpdateLayout();
+                    await WaitForRenderAsync();
+                }
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                tableView.SetValue(TableView.HorizontalOffsetProperty, 0d);
+                tableView.UpdateLayout();
+            });
+
+        Report(result, "Grid_HorizontalPan_80Cols_Frozen_100Frames_Rendered");
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// The FIRST horizontal scroll on a fresh grid — the one that has to create content for every column it
+    /// reveals — with idle prefetch off and on. Every other pan benchmark here measures the SECOND scroll: their
+    /// warmup pass realizes the columns, and the timed passes glide over content that already exists, which is
+    /// exactly why "lags on the first scroll" never showed up in them. This one loads a fresh grid per iteration
+    /// so creation stays inside the stopwatch. Both arms are given the same idle time before the pan; only the
+    /// prefetch arm has anything to do with it. The gap between the two rows is what the user's first drag gains.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOff()
+        => await FirstScrollAsync(heavyCells: false, "Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOff", prefetch: 0, stopPumpBeforePan: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn()
+        => await FirstScrollAsync(heavyCells: false, "Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn", prefetch: 1, stopPumpBeforePan: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn_PumpStoppedBeforePan()
+        => await FirstScrollAsync(heavyCells: false, "Grid_HorizontalPan_80Cols_FirstScroll_Rendered_PrefetchOn_PumpStoppedBeforePan", prefetch: 1, stopPumpBeforePan: true);
+
+    /// <summary>
+    /// The same first scroll over Button cells (see <see cref="CreateHeavyColumns"/>). This is the one that can
+    /// show what prefetch is for: a Control's template is applied on its first Measure, so with prefetch off that
+    /// cost lands inside the scroll, and with it on it has already been paid at idle. The plain-cell twin above is
+    /// the control for the mechanism's overhead; this is the measurement of its benefit.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOff()
+        => await FirstScrollAsync(heavyCells: true, "Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOff", prefetch: 0, stopPumpBeforePan: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOn()
+        => await FirstScrollAsync(heavyCells: true, "Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOn", prefetch: 1, stopPumpBeforePan: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOn_PumpStoppedBeforePan()
+        => await FirstScrollAsync(heavyCells: true, "Grid_HorizontalPan_80Cols_FirstScroll_HeavyCells_Rendered_PrefetchOn_PumpStoppedBeforePan", prefetch: 1, stopPumpBeforePan: true);
+
+    /// <summary>
+    /// One arm of the first-scroll measurement. Run each arm in its OWN test host: arms measured in sequence
+    /// inherit whatever the earlier ones left behind — composition and DirectX state the collector cannot see —
+    /// and whichever arm runs first is the fastest regardless of which it is. Swapping two arms moved the gap with
+    /// them. Separate hosts (one vstest invocation per test) are the only clean comparison.
+    /// </summary>
+    /// <param name="stopPumpBeforePan">
+    /// Keep the content the pump created during the idle wait but switch the pump off before panning. Separates
+    /// what the pan pays to reveal prefetched cells from what the pump costs if it runs during the pan.
+    /// </param>
+    private async Task FirstScrollAsync(bool heavyCells, string name, double prefetch, bool stopPumpBeforePan)
+    {
+        var samples = new List<double>();
+
+        for (var iteration = 0; iteration < 3; iteration++)
+        {
+            var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true, prefetchLength: prefetch, heavyCells: heavyCells);
+
+            // Idle time for the pump; a no-op when prefetch is off. Heavy cells cost the pump ~5ms each against a
+            // 2ms increment budget, so 300 margin cells need well over a second — give them enough to finish, or
+            // the "prefetched" arm is only partly prefetched and the comparison is unfair.
+            await Task.Delay(heavyCells ? 4000 : 1000);
+
+            if (stopPumpBeforePan)
+            {
+                tableView.ColumnPrefetchLength = 0; // content created so far stays; nothing more is created
+            }
+
+            tableView.UpdateLayout();
+
+            var incrementsBefore = tableView.ColumnPrefetchIncrements;
+            var cellsBefore = tableView.ColumnPrefetchedCells;
+            var stopwatch = Stopwatch.StartNew();
+            var worstTick = 0d;
+            var worstIndex = 0;
+            var lastElapsed = 0d;
+
+            for (var i = 1; i <= PanTicks; i++)
+            {
+                tableView.SetValue(TableView.HorizontalOffsetProperty, i * PanStep);
+                tableView.UpdateLayout();
+                await WaitForRenderAsync();
+
+                // Per-tick timing tells a stall apart from spread work: one 3000ms tick is a pause (GC,
+                // finalization, a layout cycle); a hundred 30ms ticks is the pan genuinely costing more.
+                var now = stopwatch.Elapsed.TotalMilliseconds;
+
+                if (now - lastElapsed > worstTick)
+                {
+                    worstTick = now - lastElapsed;
+                    worstIndex = i;
+                }
+
+                lastElapsed = now;
+            }
+
+            stopwatch.Stop();
+            samples.Add(stopwatch.Elapsed.TotalMilliseconds);
+
+            TestContext.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"{name} #{iteration}: {stopwatch.Elapsed.TotalMilliseconds:F0} ms total, worst tick {worstTick:F0} ms at tick {worstIndex}, prefetched cells before pan: {cellsBefore}, increments before pan: {incrementsBefore}, during pan: {tableView.ColumnPrefetchIncrements - incrementsBefore}"));
+
+            await UnloadAsync(tableView);
+
+            // A fresh 10k-row grid per iteration leaves a lot behind, and a collection landing inside the NEXT
+            // iteration's pan shows up as a multi-second tick unrelated to what is being measured.
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        samples.Sort();
+        Report(new BenchResult(samples[1], samples[0], samples[2], samples.Count), name);
+    }
+
+    /// <summary>
+    /// The TableView's own template ScrollViewer — the element that owns VERTICAL scrolling, and the one the
+    /// horizontal path deliberately bypasses (the template sets HorizontalScrollMode to Disabled).
+    /// </summary>
+    private static ScrollViewer GetScrollViewer(TableView tableView)
+    {
+        var scrollViewer = FindByName(tableView);
+
+        // A structural precondition, not a timing one: if the template stops exposing it, a vertical benchmark
+        // that silently measured nothing would be worse than a failing one.
+        Assert.IsNotNull(scrollViewer, "The TableView template no longer contains a ScrollViewer named \"ScrollViewer\".");
+
+        return scrollViewer!;
+
+        static ScrollViewer? FindByName(DependencyObject element)
+        {
+            var count = VisualTreeHelper.GetChildrenCount(element);
+
+            for (var i = 0; i < count; i++)
+            {
+                var child = VisualTreeHelper.GetChild(element, i);
+
+                if (child is ScrollViewer { Name: "ScrollViewer" } found)
+                {
+                    return found;
+                }
+
+                if (FindByName(child) is { } descendant)
+                {
+                    return descendant;
+                }
+            }
+
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Waits for one composition frame. UpdateLayout forces measure and arrange but NOT a render, and a scroll is
+    /// judged in frames — on a remote session the rendered pixels are the expensive part and the only part that
+    /// crosses the wire. A benchmark that never waits for a frame cannot see any of it.
+    /// </summary>
+    private static async Task WaitForRenderAsync()
+    {
+        var taskCompletionSource = new TaskCompletionSource<object?>();
+
+        void Callback(object? sender, object args)
+        {
+            CompositionTarget.Rendering -= Callback;
+            taskCompletionSource.SetResult(null);
+        }
+
+        CompositionTarget.Rendering += Callback;
+
+        await taskCompletionSource.Task;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Dispatcher latency — what "laggy" actually is
+    // ---------------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Elapsed time over a pan says what the gesture cost in total. It does not say whether the UI thread ever
+    /// stopped answering, and that is what a user calls lag. It is also quantised by the display interval: a 7ms
+    /// block and a 12ms block both round up to the same wait, so the frame-paced benchmarks can only see cost in
+    /// whole frames.
+    ///
+    /// This measures the thing directly. A low-priority heartbeat re-enqueues itself continuously; the GAP
+    /// between consecutive runs is how long the DispatcherQueue refused to pick up the next work item — i.e. how
+    /// long input would have sat unhandled. On an idle thread that gap is a frame or less.
+    ///
+    /// The tail is the number that matters: one 40ms gap is a visible hitch, forty 1ms gaps are not. Median, p95
+    /// and max are all reported, and the p95/max rows are the ones to watch for a regression.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_HorizontalPan_80Cols_DispatcherGap()
+        => await DispatcherGapAsync(horizontal: true, "Grid_HorizontalPan_80Cols_DispatcherGap");
+
+    /// <summary>
+    /// The control. Same grid, same tick count, down the platform ScrollViewer. "Vertical is fine" should mean
+    /// the thread keeps answering while it scrolls; if this tail is as bad as the horizontal one, lag is not what
+    /// distinguishes the two axes and the diagnosis needs rethinking.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalPan_80Cols_DispatcherGap()
+        => await DispatcherGapAsync(horizontal: false, "Grid_VerticalPan_80Cols_DispatcherGap");
+
+    /// <summary>
+    /// The floor: the same heartbeat with nothing scrolling. Everything above is only meaningful against this.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_Idle_DispatcherGap()
+        => await DispatcherGapAsync(horizontal: true, "Grid_Idle_DispatcherGap", pan: false);
+
+    /// <summary>A gap longer than one frame is a dropped frame; anything under it is just scheduling.</summary>
+    private const double FrameMs = 16.7;
+
+    private async Task DispatcherGapAsync(bool horizontal, string benchmarkName, bool pan = true)
+    {
+        var tableView = await LoadPanGridAsync(WideColumnCount, columnVirtualization: true);
+        var scrollViewer = horizontal ? null : GetScrollViewer(tableView);
+        var queue = tableView.DispatcherQueue;
+        var gaps = new List<double>();
+
+        for (var iteration = 0; iteration < 4; iteration++)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var last = 0d;
+            var beating = true;
+            var collected = iteration > 0 ? gaps : []; // iteration 0 is warmup; its gaps are discarded
+
+            void Beat()
+            {
+                var now = stopwatch.Elapsed.TotalMilliseconds;
+                collected.Add(now - last);
+                last = now;
+
+                if (beating)
+                {
+                    queue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, Beat);
+                }
+            }
+
+            queue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, Beat);
+
+            // Ticks are applied at frame cadence, the way a drag delivers them, rather than in a tight loop that
+            // would never give the heartbeat a chance to run at all.
+            for (var i = 1; i <= PanTicks; i++)
+            {
+                if (pan)
+                {
+                    if (horizontal)
+                    {
+                        tableView.SetValue(TableView.HorizontalOffsetProperty, i * PanStep);
+                    }
+                    else
+                    {
+                        scrollViewer!.ChangeView(null, i * PanStep, null, true);
+                    }
+                }
+
+                await WaitForRenderAsync();
+            }
+
+            beating = false;
+
+            tableView.SetValue(TableView.HorizontalOffsetProperty, 0d);
+            scrollViewer?.ChangeView(null, 0d, null, true);
+            tableView.UpdateLayout();
+        }
+
+        // Total time the thread was unavailable, counting only gaps longer than a frame. THIS is the number to
+        // gate on. The pickup count and the percentiles are only meaningful once the thread is responsive enough
+        // to be scheduled often: while it is saturated the heartbeat runs a handful of times, so those statistics
+        // are computed over 3-5 samples and swing wildly between identical runs (3, 0, 39 have all been observed).
+        // Blocked time does not care how many samples there were — it measures the thing the user feels.
+        var blockedMs = gaps.Where(gap => gap > FrameMs).Sum();
+
+        gaps.Sort();
+
+        var median = Percentile(gaps, 0.50);
+        var p95 = Percentile(gaps, 0.95);
+        var max = gaps.Count > 0 ? gaps[^1] : 0d;
+
+        TestContext.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"{benchmarkName}: BLOCKED {blockedMs:F0} ms total | {gaps.Count} gaps, median {median:F2} ms, p95 {p95:F2} ms, max {max:F2} ms"));
+
+        Report(new BenchResult(blockedMs, blockedMs, blockedMs, gaps.Count), $"{benchmarkName}_BlockedMs");
+        Report(new BenchResult(median, Percentile(gaps, 0.05), max, gaps.Count), benchmarkName);
+        Report(new BenchResult(p95, p95, p95, gaps.Count), $"{benchmarkName}_P95");
+
+        await UnloadAsync(tableView);
+    }
+
+    /// <summary>
+    /// Nearest-rank percentile over an already-sorted list.
+    /// </summary>
+    private static double Percentile(List<double> sorted, double fraction)
+    {
+        if (sorted.Count == 0)
+        {
+            return 0d;
+        }
+
+        var index = (int)Math.Ceiling(fraction * sorted.Count) - 1;
+        return sorted[Math.Clamp(index, 0, sorted.Count - 1)];
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -1363,6 +2554,9 @@ public class PerformanceBenchmarks
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public string Name { get; set; } = string.Empty;
+
+        /// <summary>A low-cardinality key, so grouping produces ~50 groups rather than one per row.</summary>
+        public string Bucket => $"Bucket {(int)_value % 50:D2}";
 
         public double Value
         {

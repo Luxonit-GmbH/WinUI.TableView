@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Data;
@@ -69,6 +69,11 @@ public partial class TableView
     public static readonly DependencyProperty ColumnCacheLengthProperty = DependencyProperty.Register(nameof(ColumnCacheLength), typeof(double), typeof(TableView), new PropertyMetadata(0.5d, OnColumnCacheLengthChanged));
 
     /// <summary>
+    /// Identifies the <see cref="ColumnPrefetchLength"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ColumnPrefetchLengthProperty = DependencyProperty.Register(nameof(ColumnPrefetchLength), typeof(double), typeof(TableView), new PropertyMetadata(1d, OnColumnPrefetchLengthChanged));
+
+    /// <summary>
     /// Identifies the UseCollectionView dependency property.
     /// </summary>
     public static readonly DependencyProperty UseCollectionViewProperty = DependencyProperty.Register(nameof(UseCollectionView), typeof(bool), typeof(TableView), new PropertyMetadata(true, OnUseCollectionViewChanged));
@@ -111,12 +116,17 @@ public partial class TableView
     /// <summary>
     /// Identifies the CanSortColumns dependency property.
     /// </summary>
-    public static readonly DependencyProperty CanSortColumnsProperty = DependencyProperty.Register(nameof(CanSortColumns), typeof(bool), typeof(TableView), new PropertyMetadata(true));
+    public static readonly DependencyProperty CanSortColumnsProperty = DependencyProperty.Register(nameof(CanSortColumns), typeof(bool), typeof(TableView), new PropertyMetadata(true, OnCanSortColumnsChanged));
 
     /// <summary>
     /// Identifies the CanFilterColumns dependency property.
     /// </summary>
     public static readonly DependencyProperty CanFilterColumnsProperty = DependencyProperty.Register(nameof(CanFilterColumns), typeof(bool), typeof(TableView), new PropertyMetadata(true, OnCanFilterColumnsChanged));
+
+    /// <summary>
+    /// Identifies the ShowSortableColumnIcon dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ShowSortableColumnIconProperty = DependencyProperty.Register(nameof(ShowSortableColumnIcon), typeof(bool), typeof(TableView), new PropertyMetadata(false, OnShowSortableColumnIconChanged));
 
     /// <summary>
     /// Identifies the MinColumnWidth dependency property.
@@ -253,6 +263,11 @@ public partial class TableView
     public static readonly DependencyProperty ColumnAutoWidthModeProperty = DependencyProperty.Register(nameof(ColumnAutoWidthMode), typeof(TableViewColumnAutoWidthMode), typeof(TableView), new PropertyMetadata(TableViewColumnAutoWidthMode.Both, OnColumnAutoWidthModeChanged));
 
     /// <summary>
+    /// Identifies the ColumnResizeMode dependency property.
+    /// </summary>
+    public static readonly DependencyProperty ColumnResizeModeProperty = DependencyProperty.Register(nameof(ColumnResizeMode), typeof(TableViewColumnResizeMode), typeof(TableView), new PropertyMetadata(TableViewColumnResizeMode.Live));
+
+    /// <summary>
     /// Identifies the FrozenColumnCount dependency property.
     /// </summary>
     public static readonly DependencyProperty FrozenColumnCountProperty = DependencyProperty.Register(nameof(FrozenColumnCount), typeof(int), typeof(TableView), new PropertyMetadata(0, OnFrozenColumnCountChanged));
@@ -297,6 +312,36 @@ public partial class TableView
     /// </summary>
     public static readonly DependencyProperty ShowFilterItemsCountProperty = DependencyProperty.Register(nameof(ShowFilterItemsCount), typeof(bool), typeof(TableView), new PropertyMetadata(false));
 
+
+    /// <summary>
+    /// Identifies the <see cref="BannerRowTemplate"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty BannerRowTemplateProperty = DependencyProperty.Register(nameof(BannerRowTemplate), typeof(DataTemplate), typeof(TableView), new PropertyMetadata(null));
+
+    /// <summary>
+    /// Gets or sets the template for rows that render as a full-width banner rather than cells — items
+    /// implementing <see cref="ITableViewBannerItem"/>.
+    /// </summary>
+    public DataTemplate? BannerRowTemplate
+    {
+        get => (DataTemplate?)GetValue(BannerRowTemplateProperty);
+        set => SetValue(BannerRowTemplateProperty, value);
+    }
+
+    /// <summary>
+    /// Gets the second header level: banners spanning runs of columns, matched to columns by
+    /// <see cref="TableViewColumn.GroupName"/>.
+    /// </summary>
+    /// <remarks>
+    /// A group's columns must be contiguous in <see cref="TableViewColumn.Order"/> and must not straddle the
+    /// frozen/scrollable boundary — see <see cref="ValidateColumnGroups"/>.
+    /// </remarks>
+    public ObservableCollection<TableViewColumnGroup> ColumnGroups { get; } = [];
+
+    /// <summary>
+    /// Identifies the <see cref="UseListViewHotkeys"/> dependency property.
+    /// </summary>
+    public static readonly DependencyProperty UseListViewHotkeysProperty = DependencyProperty.Register(nameof(UseListViewHotkeys), typeof(bool), typeof(TableView), new PropertyMetadata(false));
 
     /// <summary>
     /// Identifies the <see cref="ForceRowOrCellSelectionOnContextRequested"/> dependency property.
@@ -459,6 +504,30 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets whether row keyboarding follows ListView conventions rather than the grid's. Defaults to
+    /// <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>Applies only to row interaction (<see cref="SelectionUnit"/> is Row, or the last interaction was
+    /// row-based) in <see cref="ListViewSelectionMode.Multiple"/>/<see cref="ListViewSelectionMode.Extended"/>,
+    /// and never while editing. It changes three keys:</para>
+    /// <list type="bullet">
+    /// <item>Up/Down move the current row WITHOUT changing the selection, so you can travel to a row and then
+    /// decide.</item>
+    /// <item>Enter toggles the current row's selection.</item>
+    /// <item>Shift+Up/Down extend from the anchor, and shrink again when the direction reverses, leaving
+    /// selections made elsewhere alone.</item>
+    /// </list>
+    /// <para>Everything else keeps the grid's behaviour on purpose — in particular Home/End stay COLUMN
+    /// navigation, which a wide grid depends on, and Ctrl+Up/Down still jump to the first/last row.</para>
+    /// </remarks>
+    public bool UseListViewHotkeys
+    {
+        get => (bool)GetValue(UseListViewHotkeysProperty);
+        set => SetValue(UseListViewHotkeysProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets whether right-clicking selects the row or cell under the pointer (per <see cref="SelectionUnit"/>)
     /// before its context flyout opens. Defaults to <see langword="true"/>.
     /// </summary>
@@ -535,7 +604,10 @@ public partial class TableView
             {
                 for (var index = Math.Max(0, range.FirstIndex); index <= range.LastIndex && index < Items.Count; index++)
                 {
-                    if (Items[index] is { } item)
+                    // Banner rows occupy an index but are not data. A platform SelectAll sweeps them into the
+                    // ranges regardless, so they are filtered out where the ranges are READ — one place that
+                    // covers copy, export and anything else built on this.
+                    if (Items[index] is { } item && IsSelectableItem(index))
                     {
                         selected.Add(item);
                     }
@@ -570,7 +642,10 @@ public partial class TableView
                 {
                     for (var index = Math.Max(0, range.FirstIndex); index <= range.LastIndex && index < Items.Count; index++)
                     {
-                        yield return Items[index];
+                        if (IsSelectableItem(index)) // group headers are not data
+                        {
+                            yield return Items[index];
+                        }
                     }
                 }
 
@@ -585,7 +660,7 @@ public partial class TableView
 
             foreach (var index in rowIndexes)
             {
-                if (index >= 0 && index < Items.Count)
+                if (index >= 0 && index < Items.Count && IsSelectableItem(index))
                 {
                     yield return Items[index];
                 }
@@ -773,6 +848,21 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets how far beyond the realized band, in viewports, cell content is created while the thread is
+    /// idle. Defaults to 1; 0 turns idle prefetch off. Only meaningful with <see cref="IsColumnVirtualizationEnabled"/>.
+    /// </summary>
+    /// <remarks>
+    /// The realized band (<see cref="ColumnCacheLength"/>) is what is measured and drawn. The prefetch margin is
+    /// created but stays collapsed, so it costs idle time and memory, never a frame — and the first scroll into it
+    /// finds content rather than generating it. Size it to how far a user typically scrolls before pausing.
+    /// </remarks>
+    public double ColumnPrefetchLength
+    {
+        get => (double)GetValue(ColumnPrefetchLengthProperty);
+        set => SetValue(ColumnPrefetchLengthProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets whether the items source is projected through the internal collection view (which provides
     /// sorting, filtering and grouping but keeps a full in-memory copy of the source). Set to <see langword="false"/>
     /// to bind the source <b>directly</b> to the underlying list: no copy is made, so the control virtualizes straight
@@ -878,6 +968,15 @@ public partial class TableView
     {
         get => (bool)GetValue(CanFilterColumnsProperty);
         set => SetValue(CanFilterColumnsProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether a subtle icon is shown on sortable columns that are not currently sorted.
+    /// </summary>
+    public bool ShowSortableColumnIcon
+    {
+        get => (bool)GetValue(ShowSortableColumnIconProperty);
+        set => SetValue(ShowSortableColumnIconProperty, value);
     }
 
     /// <summary>
@@ -1094,6 +1193,16 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Gets or sets how a column behaves while the user drags to resize it — a real-time resize where
+    /// every visible row's cell relayouts every frame (default), or a fast composition-only preview.
+    /// </summary>
+    public TableViewColumnResizeMode ColumnResizeMode
+    {
+        get => (TableViewColumnResizeMode)GetValue(ColumnResizeModeProperty);
+        set => SetValue(ColumnResizeModeProperty, value);
+    }
+
+    /// <summary>
     /// Gets or sets the number of columns that stays in view on horizontal scroll.
     /// </summary>
     public int FrozenColumnCount
@@ -1209,6 +1318,18 @@ public partial class TableView
     /// <summary>
     /// Handles changes to the ColumnCacheLength property by forcing the realized column band to be recomputed.
     /// </summary>
+    /// <summary>
+    /// Handles changes to the ColumnPrefetchLength property: a wider margin is worth filling now, a narrower one
+    /// simply stops growing.
+    /// </summary>
+    private static void OnColumnPrefetchLengthChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView)
+        {
+            tableView.RequestColumnPrefetch();
+        }
+    }
+
     private static void OnColumnCacheLengthChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is TableView tableView)
@@ -1237,6 +1358,8 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.RowHeaderLayoutVersion++;
+
             foreach (var row in tableView._rows)
             {
                 row.ApplyCellHeights();
@@ -1377,6 +1500,34 @@ public partial class TableView
     }
 
     /// <summary>
+    /// Handles changes to the CanSortColumns property.
+    /// </summary>
+    private static void OnCanSortColumnsChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView && tableView._headerRow is not null)
+        {
+            foreach (var header in tableView._headerRow.Headers)
+            {
+                header.OnSortDirectionChanged();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Handles changes to the ShowSortableColumnIcon property.
+    /// </summary>
+    private static void OnShowSortableColumnIconChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is TableView tableView && tableView._headerRow is not null)
+        {
+            foreach (var header in tableView._headerRow.Headers)
+            {
+                header.OnSortDirectionChanged();
+            }
+        }
+    }
+
+    /// <summary>
     /// Handles changes to the ColumnAutoWidthMode property.
     /// </summary>
     private static void OnColumnAutoWidthModeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -1506,13 +1657,17 @@ public partial class TableView
 
             // Pan via RenderTransform instead of re-running layout on the header + every row each tick. The clip is
             // identical for all uniform rows, so compute it once here and let each row reuse the value.
-            tableView.UpdateCellsClipRect();
+            // One write. Every row, and the chrome pinned against them, is bound to this by an expression
+            // animation, so the compositor does the moving and the UI thread stays out of it. The old per-row loop
+            // cost ~0.75ms per row per frame in the render walk; this costs a scalar.
+            //
+            // Whole pixels. A scrollbar drag makes the offset an arbitrary fraction, and a translation of 1234.37
+            // renders every glyph and every one-pixel grid line at a sub-pixel phase that changes each tick — the
+            // half-pixel shimmer of a dragged grid. Everything pans from this one scalar, the pinned chrome by its
+            // negation, so rounding it here keeps all of it on the same pixel grid. The range computations keep
+            // the unrounded offset; this is a rendering choice and layout never sees it.
+            tableView.PanPropertySet.InsertScalar(PanOffsetKey, (float)Math.Round(tableView.HorizontalOffset));
             tableView._headerRow?.ApplyHorizontalScroll();
-
-            foreach (var row in tableView._rows)
-            {
-                row?.RowPresenter?.ApplyHorizontalScroll(useCachedClip: true);
-            }
 
             tableView.RealizeVisibleCells();
         }
@@ -1525,6 +1680,8 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.RowHeaderLayoutVersion++;
+
             await Task.Yield();
 
             foreach (var row in tableView._rows)
@@ -1541,6 +1698,7 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.RowHeaderLayoutVersion++;
             tableView.SetHeadersVisibility();
             tableView.UpdateHorizontalScrollBarMargin();
         }
@@ -1553,6 +1711,7 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.RowHeaderLayoutVersion++;
             tableView.SetValue(RowHeaderActualWidthProperty, 0d);
 
             foreach (var row in tableView._rows)

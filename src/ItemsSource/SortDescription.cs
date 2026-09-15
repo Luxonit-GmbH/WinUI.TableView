@@ -10,6 +10,8 @@ namespace WinUI.TableView;
 /// </summary>
 public class SortDescription
 {
+    private readonly Dictionary<Type, Func<object, object?>?> _compiledValueGetters = [];
+    private Type? _compiledValueGetterType;
     private Func<object, object?>? _compiledValueGetter;
 
     /// <summary>
@@ -42,9 +44,24 @@ public class SortDescription
         
         if (ValueDelegate is not null) return ValueDelegate(item);
         
-        if (_compiledValueGetter is null && !string.IsNullOrWhiteSpace(PropertyName))
-            _compiledValueGetter = item.GetCompiledValueGetter(PropertyName!);
-            
+        if (string.IsNullOrWhiteSpace(PropertyName)) return null;
+
+        // Keyed by runtime type: a compiled getter casts to the type it was built for, so one cached delegate
+        // throws InvalidCastException as soon as the source mixes types — group rows beside data rows, say.
+        var type = item.GetType();
+
+        if (!ReferenceEquals(type, _compiledValueGetterType))
+        {
+            if (!_compiledValueGetters.TryGetValue(type, out var byType))
+            {
+                byType = item.GetCompiledValueGetter(PropertyName!);
+                _compiledValueGetters[type] = byType;
+            }
+
+            _compiledValueGetterType = type;
+            _compiledValueGetter = byType;
+        }
+
         return _compiledValueGetter?.Invoke(item);
 }
 

@@ -90,9 +90,26 @@ tableView.RefreshFilter();
 
 > **Tip**: Prefer `ObservableCollection<T>` with `INotifyPropertyChanged` models over manual refresh calls whenever possible, as it is more efficient and requires less code.
 
+## Column resize drag performance
+
+By default, dragging a column divider ([`ColumnResizeMode="Live"`](xref:WinUI.TableView.TableView.ColumnResizeMode)) relayouts every visible row's cells on every pointer-move frame. On grids with many visible rows this can make the drag itself feel less smooth, even though the final committed width is unaffected. Set `ColumnResizeMode="Preview"` to use a lightweight visual preview during the drag instead — no row layout runs until the pointer is released, so the drag stays smooth regardless of row count. See [Column sizing](column-sizing.md#columnresizemode).
+
+## Row height
+
+Set `RowHeight` on a grid that scrolls a lot. With a fixed row height the grid finds the rows on screen arithmetically instead of by walking the visual tree, and each cell's content constraint stays the same from one scroll to the next, so the cells are not re-measured.
+
+`RowHeight` wins over `RowMinHeight`. The default minimum is 40, and a `RowHeight` below it, say 28, gives 28px rows: the explicit height is the more specific setting, so it caps the minimum. Leave `RowHeight` unset and the minimum is the row height.
+
 ## Horizontal scrolling and column count
 
-Unlike rows, columns are not virtualized — all column headers are instantiated regardless of whether they are visible. A very large number of columns (100+) may affect horizontal scroll performance. In practice, most data grids have far fewer columns than rows.
+Set `IsColumnVirtualizationEnabled` to `true` on a grid with many columns. Cells outside a band around the visible columns are collapsed, so they are never measured, and cells further out have their content released entirely, so they stop evaluating their bindings. Without it every column of every realized row is built, measured and kept live — which on a grid with a frequently updating source means the columns you cannot see cost as much as the ones you can.
+
+Two properties tune the band, both multiples of the viewport width and both capped internally in columns so that a grid of many narrow columns does not end up realizing most of itself:
+
+- `ColumnCacheLength` (default `0.5`) sizes the realized band either side of the visible columns. Raise it to avoid blank columns during a fast drag; lower it to make each band change cheaper.
+- `ColumnPrefetchLength` (default `1`) sizes a margin beyond the band whose content is built during idle time and left collapsed, so the first scroll into it reveals content rather than generating it. Set it to `0` to turn idle prefetch off.
+
+Column headers are not virtualized: one is instantiated per column whether or not it is visible. That is a fixed cost at load, not a per-scroll one.
 
 ## Uno Platform
 

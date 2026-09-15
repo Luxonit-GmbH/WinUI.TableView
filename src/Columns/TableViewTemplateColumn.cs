@@ -61,6 +61,9 @@ public partial class TableViewTemplateColumn : TableViewColumn
     }
 
     /// <inheritdoc/>
+    protected internal override bool NeedsRefreshOnRecycle => true;
+
+    /// <inheritdoc/>
     public override void RefreshElement(TableViewCell cell, object? dataItem)
     {
         cell.Content = GenerateElement(cell, dataItem);

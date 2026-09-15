@@ -101,6 +101,33 @@ public class TableViewContextSelectionTests
     }
 
     [UITestMethod]
+    public async Task RightClick_OnACell_InCellOrRowMode_SelectsTheCellAndNoRow()
+    {
+        var tableView = await CreateAsync(TableViewSelectionUnit.CellOrRow);
+
+        // ContextRequested bubbles cell -> row, so the CELL claims the click and MakeSelection routes by
+        // SelectionUnit. In CellOrRow with a valid column that means cell selection — and DeselectAllItems drops
+        // any row selection on the way. A RowContextFlyout then opens over zero selected rows.
+        tableView.ApplyContextRequestSelection(new TableViewCellSlot(2, 1), isAlreadySelected: false, false, false);
+        await Task.Yield();
+
+        Assert.AreEqual(0, SelectedRowIndexes(tableView).Length, "no row is selected");
+        Assert.IsTrue(tableView.SelectedCells.Contains(new TableViewCellSlot(2, 1)), "the cell is");
+    }
+
+    [UITestMethod]
+    public async Task RightClick_OnACell_InRowMode_SelectsTheOwningRow()
+    {
+        var tableView = await CreateAsync(TableViewSelectionUnit.Row);
+
+        tableView.ApplyContextRequestSelection(new TableViewCellSlot(2, 1), isAlreadySelected: false, false, false);
+        await Task.Yield();
+
+        CollectionAssert.AreEqual(new[] { 2 }, SelectedRowIndexes(tableView),
+            "with SelectionUnit=Row the same gesture selects the owning row");
+    }
+
+    [UITestMethod]
     public async Task RightClick_IsClaimedOnce_WhenTheEventBubblesCellToRow()
     {
         var tableView = await CreateAsync(TableViewSelectionUnit.Row);
