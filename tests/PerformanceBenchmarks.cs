@@ -843,15 +843,30 @@ public class PerformanceBenchmarks
         var extent = Math.Max(0d, (columnCount * 100d) - 1200d);
         var step = extent / PanTicks;
 
+        // What each sweep did, not only how long it took. The measure counters say whether the cells that did not
+        // change visibility were re-measured at all (they should not be: WinUI skips a clean element offered the
+        // same size), and how many cell templates the sweep itself had to apply — the first-reveal cost the idle
+        // prefetch exists to take off the scroll path. The first line is the warm-up sweep.
+        var sweeps = new List<string>();
+
         var result = await MeasureAsync(
             async () =>
             {
+                var cellMeasures = tableView.CellMeasures;
+                var templates = tableView.CellTemplateApplications;
+                var prefetched = tableView.CellTemplatesPrefetched;
+                var panelMeasures = tableView.CellsPanelMeasures;
+                var visits = tableView.ColumnBandCellVisits;
+
                 for (var i = 1; i <= PanTicks; i++)
                 {
                     tableView.SetValue(TableView.HorizontalOffsetProperty, i * step);
                     tableView.UpdateLayout();
                     await WaitForRenderAsync();
                 }
+
+                sweeps.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"cell measures {tableView.CellMeasures - cellMeasures}, band cell visits {tableView.ColumnBandCellVisits - visits}, cells panel measures {tableView.CellsPanelMeasures - panelMeasures}, cell templates applied {tableView.CellTemplateApplications - templates} of which by prefetch {tableView.CellTemplatesPrefetched - prefetched}"));
             },
             warmup: 1,
             iterations: 3,
@@ -862,6 +877,12 @@ public class PerformanceBenchmarks
             });
 
         TestContext.WriteLine($"{benchmarkName}: {columnCount} columns, step {step:N0}px, realized rows {tableView.Rows.Count}");
+
+        for (var i = 0; i < sweeps.Count; i++)
+        {
+            TestContext.WriteLine($"{benchmarkName} sweep {i}{(i == 0 ? " (warm-up)" : string.Empty)}: {sweeps[i]}");
+        }
+
         Report(result, benchmarkName);
         await UnloadAsync(tableView);
     }

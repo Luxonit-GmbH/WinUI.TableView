@@ -406,3 +406,132 @@ Horizontal scrolling with virtualization on now costs about 1.5 times what it co
 from 2.3 at the start of this round and about 3 at the start of the previous one. The remaining gap is
 the layout pass that revealing a column forces on the visible rows, and the profile puts a quarter of
 the thread there. Vertical is unchanged and is not a column-virtualization problem.
+
+---
+
+# Round four: the vibration, and whether the cells re-measure (2026-09-15)
+
+Two questions: does the half-pixel vibration during a scrollbar drag mean the columns keep
+re-measuring, and can the cell measure be cached. They have separate answers, and the second one was
+settled by tracing every place a layout output feeds back into a layout input, then counting.
+
+## The vibration is rendering, not layout
+
+`HorizontalOffset` is two-way bound to the scrollbar, so a thumb drag makes it an arbitrary fraction.
+That fraction was written straight into the composition property set every panned visual reads, and a
+translation of 1234.37 renders every glyph and every one-pixel grid line at a sub-pixel phase that
+changes each tick, with the pinned chrome resampling differently again because it takes the negation.
+No layout runs for a pan, so this could not have been a re-measure, and fixing it does not touch the
+profile. The scalar is now rounded to whole pixels at the one place it is written; the range
+computations keep the unrounded offset. Wheel scrolling already moved in whole pixels, which is why it
+never shimmered.
+
+## The cells do not re-measure, and here is the number
+
+WinUI skips a clean element that is offered the same size it was offered last time before the managed
+override is reached, so "cache the cell measure" reduces to "does anything defeat that cache". Every
+constraint on the path was traced and is stable: the column's `ActualWidth` is the header's requested
+width, never a rounded layout size; the cells panel hands each child the difference of two entries in
+a cached cumulative array of integer widths; the offered height is infinity all the way down; and
+WinUI resolves a cell's explicit `Width`, `Height`, `MinHeight` and `MaxHeight` before the override
+runs, so the template sees the same constraint on every pass regardless of what the panel passed.
+
+The sweep benchmark now reports the counters per sweep, so this is measured rather than argued. Steady
+state, the third and fourth sweeps of the same grid, 46 realized rows, 100 ticks of 68px:
+
+| per horizontal sweep | |
+|---|---|
+| cells panel measures (one per row a tick dirtied) | 1225 to 1263 |
+| cell measures (managed override reached) | 1252 to 1273 |
+| band cell visits (cells whose viewport flag was set) | 2880 to 2998 |
+| cell templates applied | 0 |
+
+One cell measure per dirtied row per tick. A tick moves the band by two thirds of a column, so on each
+of the twelve or so visible rows one cell becomes visible and is measured, and the twenty-odd cells
+beside it that did not change are skipped by WinUI before the override is reached, exactly as the trace
+said. The warm-up sweep applied 1860 cell templates and the second 462, the first time those cells were
+ever revealed; from then on a sweep applies none, so there is nothing left in a repeated sweep for
+prefetch to take off the path. What a sweep pays is the layout pass itself on the dozen dirtied rows,
+each with its chain of row, presenter, grid and cells panel, plus the settle passes.
+
+Three ideas were dropped on this evidence and are recorded so they are not retried. Normalising the
+offered size inside the cell is a no-op, since WinUI has already done it, and would offer the template
+`RowHeight` while arrange delivers `MinHeight` where the two differ. Taking the width from the column
+instead of the offsets array is a property read per child per pass for a bit-identical value. Skipping
+the base measure when "nothing changed" is unsafe: WinUI re-measures a dirty child from the layout loop
+or from `Arrange` with its previous constraint, so skipping only moves the work later and risks a
+layout cycle, while saving nothing on a clean child that was never reached.
+
+## What the trace found instead
+
+**Prefetch built the content but not the cell.** The idle pump created a cell's content and applied
+the content's template, but never the cell's own. A never-revealed cell had no content presenter, so
+the constraint step returned early and the content was measured unconstrained; the scroll that revealed
+it then instantiated the cell's seven-element template and measured the content again under the real
+width. That is the first-reveal cost the pump exists to move off the scroll path, still on it. The pump
+now applies the cell's template before constraining, and the counters above say how many templates a
+sweep still applies itself.
+
+**`RowMinHeight` beat `RowHeight`.** The two map onto `MinHeight` and `Height`, and the minimum wins in
+WinUI. With the default minimum of 40, `RowHeight="28"` produced 40px rows, while everything that
+reasons about the row height, the visible row range, the cells' content constraint, the page size and
+the sample page's own feed, divided by 28. The reveal path was dirtying rows below the fold on every
+band change. An explicit `RowHeight` now caps the minimum, applied in one place for the cells, the row
+header and the selection chrome in the row's template, which also drops six bindings per row. The
+benchmarks moved because of this, not because anything got faster: 28px rows realize more containers
+per viewport than 40px ones.
+
+**The focus rectangle drifted left on every recycle.** The row captured its focus margin from the
+already-shifted property on every `Loaded`, and `Loaded` fires again on every recycle, so each recycle
+added a corner radius to it. Captured once now.
+
+**The content constraint used a stale grid-line width.** It read the vertical grid line's
+`ActualWidth`, which is 0 until the line's first arrange, and the constraint cache is keyed on the
+column width and row height alone, so the 0 latched for the life of the cell and the content was a
+pixel wider than its column. It reads the configured width now, which is also right at prefetch time.
+
+**Every dirty row re-measured its header.** The presenter invalidated the row header's measure on every
+pass it took part in. The header lays out from a handful of grid properties and its own content, and
+those invalidate it themselves; the presenter now invalidates it only when a version the grid bumps in
+those property handlers has moved.
+
+**Two latent flicker sources, dormant at 100% scaling.** The cells' horizontal offset was published from
+an `ActualOffset` walk up from the vertical grid line by whichever row first claimed the layout pass,
+and a row whose line was collapsed or not yet arranged published 0, which the header row's corner panel
+took as its width. It is computed from the inputs that place it now. And the header row re-arranged
+its scrollable headers panel at a rect rebuilt from arrange outputs, the pattern removed from the rows
+in round three; a fractional first column would have doubled the arrange of every header on every pass.
+Removed; the grid's own arrange is the only one.
+
+## Numbers
+
+Each benchmark in its own host, Release x64, the 30% noise floor from earlier rounds still applies.
+
+| benchmark, ms per 100 ticks | round three | this round | virtualization off (round three) |
+|---|---|---|---|
+| horizontal scrollbar sweep | 872 to 947 | 882 to 886 | 599 |
+| vertical scrollbar throw | ~9965 | 10730 | 30357 |
+| first scroll into fresh columns, prefetch on | 1198 | 1262 | |
+| first scroll into fresh columns, prefetch off | 1240 | 1572 | |
+
+All four are a new baseline rather than a comparison: the benchmark grid sets `RowHeight` 32 under the
+default minimum of 40, so its rows are 32px now, and an 800px viewport with a one-viewport cache
+realizes 46 of them where it realized 38. The sweep did not move on eight more rows, and the throw,
+which recycles every realized container on every tick, is up by about the row count and inside the
+noise floor.
+
+The first-scroll pair is the one the prefetch change was aimed at, and the round-three column was
+measured for it on the round-three commit in the same session. Prefetch off rose by about the extra
+rows; prefetch on rose by a fifth of that. That is the direction the change predicts, but single
+iterations of this benchmark swing between 800 and 1800 ms on this machine, one iteration's pump did
+not run at all in its idle second, and three iterations cannot resolve a difference this size. The
+evidence that the change does what it says is the counter (templates applied by the pump is non-zero
+and the sweep applies none itself) and the test that a prefetched, still-collapsed cell has its
+template applied before anything scrolls.
+
+## Where it stands
+
+The half-pixel vibration is gone by construction. The cells do not re-measure, by count. What a
+horizontal sweep pays with virtualization on is the layout chain of the dozen rows a band change
+dirties, about one real cell measure per row, and the settle passes; that is the 1.5x over
+virtualization off, and the remaining lever is fewer dirtied rows per tick, not cheaper measures.

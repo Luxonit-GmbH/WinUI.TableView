@@ -118,17 +118,14 @@ public partial class TableViewHeaderRow : Control
     {
         finalSize = base.ArrangeOverride(finalSize);
 
+        // The scrollable headers panel is placed by the grid (ScrollableHeadersPanelColumn, after the frozen
+        // headers) and the pan is a composition translation that layout never sees, so there is nothing left for
+        // this override to position. It used to re-arrange the panel here at a rect rebuilt from the frozen panel's
+        // arrange output: the same rect while the first column is integral, and a second arrange of every header on
+        // every pass the moment it is not, because the base pass resets the rect each time and the two never
+        // converge. The rows had the same pattern and lost it for the same reason.
         if (_scrollableHeadersPanel is not null && _frozenHeadersPanel is not null && TableView is not null && _scrollableHeadersPanel.ActualWidth > 0)
         {
-            // Arrange at the un-scrolled position; horizontal scroll is applied via RenderTransform in
-            // ApplyHorizontalScroll so scrolling does not re-run a layout pass.
-            //
-            // The Y is the banner row's height, NOT zero: this manual Arrange overrides the Grid's row placement,
-            // so hardcoding 0 pulls the headers up over the banners and leaves their own row empty below.
-            var frozenOffset = _frozenHeadersPanel.ActualOffset.X + _frozenHeadersPanel.ActualWidth;
-            var top = _scrollableSpannersPanel?.ActualHeight ?? 0;
-            _scrollableHeadersPanel.Arrange(new Rect(frozenOffset, top, _scrollableHeadersPanel.ActualWidth, _scrollableHeadersPanel.ActualHeight));
-
             ApplyHorizontalScroll();
         }
 

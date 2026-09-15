@@ -120,6 +120,8 @@ public partial class TableViewCell : ContentControl
         _rootBorder = GetTemplateChild("RootBorder") as Border;
         _v_gridLine = GetTemplateChild("VerticalGridLine") as Rectangle;
 
+        TableView?.NoteCellTemplateApplied();
+
         EnsureGridLines();
         EnsureStyle(Row?.Content);
 
@@ -164,6 +166,8 @@ public partial class TableViewCell : ContentControl
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
+        TableView?.NoteCellMeasure();
+
         // Horizontal measure-virtualization: when the cell's column is outside the viewport (set by
         // RealizeVisibleCells), collapse the content presenter so its subtree is NOT measured — this is the
         // expensive part, and it's skipped even when the content has already been realized (e.g. by prefetch).
@@ -296,10 +300,23 @@ public partial class TableViewCell : ContentControl
         desiredWidth += BorderThickness.Right;
         desiredWidth += _selectionBorder?.BorderThickness.Right ?? 0;
         desiredWidth += _selectionBorder?.BorderThickness.Left ?? 0;
-        desiredWidth += _v_gridLine?.ActualWidth ?? 0d;
+        desiredWidth += GridLineWidth;
 
         return desiredWidth;
     }
+
+    /// <summary>
+    /// The width the vertical grid line takes out of the content's room: its configured width, when it is shown.
+    /// </summary>
+    /// <remarks>
+    /// Not its <c>ActualWidth</c>. That is 0 until the line's first arrange, and the constraint cache in
+    /// <see cref="ConstrainContent"/> is keyed on the column width and the row height alone, so a cell constrained
+    /// before that arrange — every cell, on its first measure — kept the 0 for its life and gave the content one
+    /// pixel more than the column has. The configured width is what <see cref="EnsureGridLines"/> writes into the
+    /// line, and it is right before anything has been laid out, which is also when the idle prefetch constrains.
+    /// </remarks>
+    private double GridLineWidth
+        => _v_gridLine is { Visibility: Visibility.Visible } line && !double.IsNaN(line.Width) ? line.Width : 0d;
 
     /// <summary>
     /// Invalidates the cached content desired width so the next auto-size measure re-measures the content.
@@ -356,7 +373,7 @@ public partial class TableViewCell : ContentControl
         contentWidth -= BorderThickness.Right;
         contentWidth -= _selectionBorder?.BorderThickness.Left ?? 0;
         contentWidth -= _selectionBorder?.BorderThickness.Right ?? 0;
-        contentWidth -= _v_gridLine?.ActualWidth ?? 0d;
+        contentWidth -= GridLineWidth;
 
         // rowHeight bounds the content height: when no explicit RowHeight is set the cells panel would otherwise let
         // the content do an unbounded vertical layout (it's inside a vertically-scrolling ItemsStackPanel, so the
@@ -463,7 +480,7 @@ public partial class TableViewCell : ContentControl
                 desiredWidth += BorderThickness.Right;
                 desiredWidth += _selectionBorder?.BorderThickness.Left ?? 0;
                 desiredWidth += _selectionBorder?.BorderThickness.Right ?? 0;
-                desiredWidth += _v_gridLine?.ActualWidth ?? 0d;
+                desiredWidth += GridLineWidth;
 
                 _resizePreviewWidth = Math.Min(maxPreviewWidth, Math.Max(ActualWidth, desiredWidth));
             }
@@ -969,6 +986,16 @@ public partial class TableViewCell : ContentControl
         }
 
         PinContentDataContext(pin: true);
+
+        // The cell's own template first. A collapsed cell is never measured, so layout never applies it, and until
+        // it is applied there is no content presenter for ConstrainContent to work against: the content below was
+        // measured unconstrained, and the scroll that revealed the cell then instantiated the cell's template AND
+        // measured the content again under the real width — the first-reveal cost this pump exists to move off
+        // the scroll path, still on it. Applying it here is the same work a moment earlier, at idle.
+        if (ApplyTemplate())
+        {
+            TableView?.NoteCellTemplatePrefetched();
+        }
 
         // Creation reaches a constructor-built element's cost (a UserControl's InitializeComponent). A templated
         // Control pays instead when its template is applied — normally on first Measure, which does not happen

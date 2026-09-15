@@ -41,6 +41,7 @@ public partial class TableViewRowPresenter : Control
     private ToggleButton? _detailsToggleButton;
     private ListViewItemPresenter? _itemPresenter;
     private long? _detailsPanelVisibilityCallbackToken;
+    private int _rowHeaderLayoutVersion = -1; // TableView.RowHeaderLayoutVersion the header was last invalidated for
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TableViewRowPresenter"/> class.
@@ -104,7 +105,7 @@ public partial class TableViewRowPresenter : Control
 
         TableViewRow?.EnsureCells();
         EnsureGridLines();
-        SetRowHeaderBindings();
+        SetRowHeaderHeights();
         SetRowHeaderVisibility();
         SetRowHeaderTemplate();
         SetRowHeaderWidth();
@@ -190,12 +191,16 @@ public partial class TableViewRowPresenter : Control
     /// <inheritdoc/>
     protected override Size MeasureOverride(Size availableSize)
     {
-        // The row header's size never depends on a data column's width, but this presenter still
-        // measures every visible row every frame during a Live-mode resize drag (a cell's width
-        // really did change), so forcing this remeasure here too is pure per-frame waste during a drag.
-        if (TableView?.IsColumnResizing != true)
+        // The row header lays out from a handful of grid properties (its width settings, the headers' visibility,
+        // the row heights, its template) and from its own content, and a change to any of those invalidates it by
+        // itself — the content through the normal child-to-parent propagation, the properties through the version
+        // the grid bumps in their handlers. It used to be invalidated here unconditionally, so every row a band
+        // change dirtied re-measured its header for nothing. Now only when something it depends on has changed
+        // since this presenter last looked.
+        if (TableView is { } tableView && !tableView.IsColumnResizing && _rowHeaderLayoutVersion != tableView.RowHeaderLayoutVersion)
         {
-            _rowHeader?.InvalidateMeasure(); // The row header does not measure every time.
+            _rowHeaderLayoutVersion = tableView.RowHeaderLayoutVersion;
+            _rowHeader?.InvalidateMeasure();
         }
 
         return base.MeasureOverride(availableSize);
@@ -293,28 +298,25 @@ public partial class TableViewRowPresenter : Control
             // depends on any data column's width and is safe to skip recomputing during a resize drag.
             //
             // It is also uniform across rows, so even when it IS recomputed only the first row to arrange in a
-            // given layout pass does the TransformToVisual walk; the rest read the published value. The two
-            // conditions are independent: one skips the work for a whole gesture, the other de-duplicates it
-            // within a single pass.
-            if (!TableView.IsColumnResizing && _v_gridLine is not null && TableView.TryClaimCellsOffsetUpdate())
+            // given layout pass computes it; the rest read the published value. The two conditions are
+            // independent: one skips the work for a whole gesture, the other de-duplicates it within a single pass.
+            if (!TableView.IsColumnResizing && _rootPanel is not null && _pinnedHeaderPanel is not null && TableView.TryClaimCellsOffsetUpdate())
             {
+                // From the inputs that place the boundary, not from where something ended up. The root panel's
+                // left margin is the presenter's padding plus the corner shift (ApplyRootPanelMargin), the pinned
+                // header panel is the whole of the column before the cells, and both are arrange-current here,
+                // after the base pass. This used to be an ActualOffset walk up from the vertical grid line, and
+                // whichever row claimed the pass first published what its walk found: 0 from a row whose line was
+                // collapsed or not yet arranged, and the header row's corner panel took that as its width.
+                //
                 // Layout positions only — NOT TransformToVisual. This value is a layout boundary (where the cells
-                // start), and TransformToVisual mixes in composition state: it reports the grid line's
+                // start), and TransformToVisual mixes in composition state: it reports the chrome's
                 // counter-translation once the compositor has committed it, and not before. In the synchronous
                 // layout pass right after a scroll it has not, so subtracting HorizontalOffset from it went
                 // negative, clamped to 0, and the header's corner panel collapsed — every header slid 16px (the
                 // row header width) left of its cells, intermittently, depending on whether a later re-arrange
-                // happened to run after the commit. ActualOffset is arrange output and carries no transform.
-                var offset = 0d;
-
-                if (_v_gridLine.Visibility is Visibility.Visible)
-                {
-                    for (DependencyObject? element = _v_gridLine; element is UIElement ui && !ReferenceEquals(ui, this); element = VisualTreeHelper.GetParent(ui))
-                    {
-                        offset += ui.ActualOffset.X;
-                    }
-                }
-
+                // happened to run after the commit.
+                var offset = _rootPanel.Margin.Left + _pinnedHeaderPanel.ActualWidth;
                 offset -= Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
 
                 TableView.SetValue(TableView.CellsHorizontalOffsetProperty, Math.Max(0, offset));
@@ -494,25 +496,22 @@ public partial class TableViewRowPresenter : Control
         }
     }
 
-    internal void SetRowHeaderBindings()
+    /// <summary>
+    /// Sizes the row header to the row: the same effective heights the cells get, where an explicit RowHeight caps
+    /// RowMinHeight. Set directly rather than bound — the grid re-applies them from its row height handler through
+    /// <see cref="TableViewRow.ApplyCellHeights"/>, which is also what keeps the cells current — so three bindings
+    /// per row go away, and the header can no longer disagree with the cells about the minimum.
+    /// </summary>
+    internal void SetRowHeaderHeights()
     {
-        _rowHeader?.SetBinding(HeightProperty, new Binding
+        if (_rowHeader is null || TableView is null)
         {
-            Path = new PropertyPath($"{nameof(TableViewRowHeader.TableView)}.{nameof(TableView.RowHeight)}"),
-            RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-        });
+            return;
+        }
 
-        _rowHeader?.SetBinding(MaxHeightProperty, new Binding
-        {
-            Path = new PropertyPath($"{nameof(TableViewRowHeader.TableView)}.{nameof(TableView.RowMaxHeight)}"),
-            RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-        });
-
-        _rowHeader?.SetBinding(MinHeightProperty, new Binding
-        {
-            Path = new PropertyPath($"{nameof(TableViewRowHeader.TableView)}.{nameof(TableView.RowMinHeight)}"),
-            RelativeSource = new RelativeSource { Mode = RelativeSourceMode.Self }
-        });
+        _rowHeader.Height = TableView.RowHeight;
+        _rowHeader.MaxHeight = TableView.RowMaxHeight;
+        _rowHeader.MinHeight = TableView.EffectiveRowMinHeight;
     }
 
     /// <summary>

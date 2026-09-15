@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
 using System.Collections.ObjectModel;
@@ -71,6 +72,41 @@ public class TableViewColumnPrefetchTests
 
         Assert.AreEqual(Visibility.Visible, cell.Visibility, "the cell should now be in the band and visible");
         Assert.AreSame(created, cell.Content, "the element created at idle is the one shown; nothing was regenerated");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// Prefetch has to build the cell, not only its content. A collapsed cell is never measured, so layout never
+    /// applies its template; without it there is no content presenter to constrain the content against, and the
+    /// scroll that reveals the cell instantiates the template and measures the content again under the real width
+    /// — on the scroll path, which is the cost prefetch exists to move off it.
+    /// </summary>
+    [UITestMethod]
+    public async Task IdlePrefetch_AppliesTheCellsOwnTemplate_WhileItStaysCollapsed()
+    {
+        var tableView = await LoadAsync(prefetchLength: 1);
+        var row = tableView.Rows.First();
+
+        var prefetched = CellFor(row, tableView.Columns[PrefetchedColumn]);
+        var far = CellFor(row, tableView.Columns[FarColumn]);
+
+        Assert.IsNotNull(prefetched.Content);
+        Assert.AreEqual(Visibility.Collapsed, prefetched.Visibility);
+        Assert.IsTrue(VisualTreeHelper.GetChildrenCount(prefetched) > 0, "a prefetched cell must have its own template applied, so the reveal has nothing left to build");
+        Assert.AreEqual(0, VisualTreeHelper.GetChildrenCount(far), "a cell beyond the prefetch margin must not have been built");
+        Assert.IsTrue(tableView.CellTemplatesPrefetched > 0, "the pump must report the templates it applied");
+
+        var content = prefetched.Content;
+
+        tableView.SetValue(TableView.HorizontalOffsetProperty, PrefetchedColumn * 100d - 200d);
+        tableView.UpdateLayout();
+        await Task.Delay(300);
+        tableView.UpdateLayout();
+
+        Assert.AreEqual(Visibility.Visible, prefetched.Visibility);
+        Assert.AreSame(content, prefetched.Content, "the reveal shows what was built at idle; nothing is regenerated");
+        Assert.AreEqual(0, VisualTreeHelper.GetChildrenCount(far), "the far column is still beyond the margin, so it is still not built");
 
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
     }

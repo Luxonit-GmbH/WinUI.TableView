@@ -71,6 +71,63 @@ public partial class TableView : ListView
     /// the two apart from the outside.
     /// </summary>
     internal int ColumnBandCellVisits { get; private set; }
+
+    /// <summary>
+    /// How many times a cell's managed measure has run. Diagnostic: WinUI skips a clean element that is offered the
+    /// size it was offered last time before the managed override is ever reached, so on a scroll that changes no
+    /// cell's constraint this should track the band's cell visits — the cells that changed visibility — and not the
+    /// number of cells on the realized rows.
+    /// </summary>
+    internal int CellMeasures { get; private set; }
+
+    /// <summary>
+    /// How many cell templates have been applied. Diagnostic: applying the template is the expensive half of a
+    /// cell's first measure, and the idle prefetch exists to move it off the scroll path, so during a sweep this
+    /// should stay close to <see cref="CellTemplatesPrefetched"/>.
+    /// </summary>
+    internal int CellTemplateApplications { get; private set; }
+
+    /// <summary>
+    /// How many of <see cref="CellTemplateApplications"/> the idle prefetch pump did, rather than layout.
+    /// </summary>
+    internal int CellTemplatesPrefetched { get; private set; }
+
+    /// <summary>
+    /// How many times a row's cells panel has measured. Diagnostic: one per row that a pass dirtied.
+    /// </summary>
+    internal int CellsPanelMeasures { get; private set; }
+
+    internal void NoteCellMeasure() => CellMeasures++;
+    internal void NoteCellTemplateApplied() => CellTemplateApplications++;
+    internal void NoteCellTemplatePrefetched() => CellTemplatesPrefetched++;
+    internal void NoteCellsPanelMeasure() => CellsPanelMeasures++;
+
+    /// <summary>
+    /// Bumped whenever a property the row headers lay out from changes, so a row presenter can tell whether its
+    /// header needs re-measuring without invalidating it on every pass.
+    /// </summary>
+    internal int RowHeaderLayoutVersion { get; private set; }
+
+    /// <summary>
+    /// The minimum height actually applied to rows: <see cref="RowMinHeight"/>, capped at <see cref="RowHeight"/>
+    /// when one is set.
+    /// </summary>
+    /// <remarks>
+    /// The two map straight onto MinHeight and Height, and MinHeight wins in WinUI — so with the default minimum of
+    /// 40 a grid that asked for 28px rows got 40px ones, while everything in here that reasons about the row height
+    /// (which rows are on screen, the cells' content constraint, the page size) took the 28 at its word. An explicit
+    /// RowHeight is the more specific setting, so it wins.
+    /// </remarks>
+    internal double EffectiveRowMinHeight
+    {
+        get
+        {
+            var rowHeight = RowHeight;
+            var rowMinHeight = RowMinHeight;
+            return double.IsNaN(rowHeight) ? rowMinHeight : Math.Min(rowMinHeight, rowHeight);
+        }
+    }
+
     // Whether the last queued cell-state apply ran against a non-empty selection. It keeps the pass running for one
     // more round after the selection is cleared, so the cells that carried the Selected state are scrubbed.
     private bool _anyCellSelectionApplied;
@@ -2301,7 +2358,7 @@ public partial class TableView : ListView
             if (_panPropertySet is null)
             {
                 _panPropertySet = ElementCompositionPreview.GetElementVisual(this).Compositor.CreatePropertySet();
-                _panPropertySet.InsertScalar(PanOffsetKey, (float)HorizontalOffset);
+                _panPropertySet.InsertScalar(PanOffsetKey, (float)Math.Round(HorizontalOffset)); // whole pixels, see OnHorizontalOffsetChanged
             }
 
             return _panPropertySet;

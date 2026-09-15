@@ -30,7 +30,11 @@ public partial class TableViewRow : ListViewItem
     private const string Selection_Background = "SelectionBackground";
     private const double Selection_IndicatorHeight = 16d;
     private const string Check_Mark = "\uE73E";
-    private Thickness _focusVisualMargin = new(1);
+    // The template's own focus margin, captured once before EnsureLayout adds the corner shift to it. It used to be
+    // re-captured from the already-shifted property on every Loaded, and Loaded fires again on every recycle, so
+    // each recycle pushed the focus rectangle another corner radius to the left.
+    private Thickness? _focusVisualMargin;
+    private FrameworkElement? _headerGrid;
     private readonly Thickness _selectionBackgroundMargin = new(4, 2, 4, 2);
     private readonly Thickness _selectionIndicatorMargin = new(4, 0, 0, 0);
     private ListViewItemPresenter? _itemPresenter;
@@ -140,7 +144,7 @@ public partial class TableViewRow : ListViewItem
     /// </summary>
     private void TableViewRow_Loaded(object sender, RoutedEventArgs e)
     {
-        _focusVisualMargin = FocusVisualMargin;
+        _focusVisualMargin ??= FocusVisualMargin;
 
         // No EnsureGridLines() here. WinUI raises Loaded again every time a recycled container is re-attached, so
         // this was a walk over every cell of the row on every vertical scroll step, re-writing values that cannot
@@ -157,6 +161,8 @@ public partial class TableViewRow : ListViewItem
         _cellPresenterBackground = Background;
         _cellPresenterForeground = Foreground;
         _itemPresenter = GetTemplateChild("Root") as ListViewItemPresenter;
+        _headerGrid = GetTemplateChild("HeaderGrid") as FrameworkElement;
+        ApplyHeaderGridHeights();
 
         // The presenter hangs its rounded left corner off the edge so it is not drawn; the row presenter shifts
         // its root panel back by the same amount so the cells stay put. Both used to be done by re-arranging the
@@ -470,7 +476,7 @@ public partial class TableViewRow : ListViewItem
                     // re-applied via ApplyCellHeights on change). Avoids 3 bindings per cell.
                     Height = TableView.RowHeight,
                     MaxHeight = TableView.RowMaxHeight,
-                    MinHeight = TableView.RowMinHeight
+                    MinHeight = TableView.EffectiveRowMinHeight
                 };
 
                 RowPresenter.InsertCell(cell);
@@ -479,8 +485,9 @@ public partial class TableViewRow : ListViewItem
     }
 
     /// <summary>
-    /// Applies the TableView's row height values to all cells. Called when cells are created and whenever
-    /// <see cref="TableView.RowHeight"/>, <see cref="TableView.RowMinHeight"/> or <see cref="TableView.RowMaxHeight"/> change.
+    /// Applies the TableView's row height values to all cells, the row header and the selection chrome. Called
+    /// when cells are created and whenever <see cref="TableView.RowHeight"/>, <see cref="TableView.RowMinHeight"/>
+    /// or <see cref="TableView.RowMaxHeight"/> change.
     /// </summary>
     internal void ApplyCellHeights()
     {
@@ -489,12 +496,36 @@ public partial class TableViewRow : ListViewItem
             return;
         }
 
+        var height = TableView.RowHeight;
+        var maxHeight = TableView.RowMaxHeight;
+        var minHeight = TableView.EffectiveRowMinHeight;
+
         foreach (var cell in Cells)
         {
-            cell.Height = TableView.RowHeight;
-            cell.MaxHeight = TableView.RowMaxHeight;
-            cell.MinHeight = TableView.RowMinHeight;
+            cell.Height = height;
+            cell.MaxHeight = maxHeight;
+            cell.MinHeight = minHeight;
         }
+
+        RowPresenter?.SetRowHeaderHeights();
+        ApplyHeaderGridHeights();
+    }
+
+    /// <summary>
+    /// Sizes the selection-chrome grid in the row's own template to the row. It sat beside the presenter with its
+    /// heights bound to the raw properties, so its minimum alone kept a 28px row at 40; now it takes the same
+    /// effective values as the cells, and three bindings per container go with it.
+    /// </summary>
+    private void ApplyHeaderGridHeights()
+    {
+        if (_headerGrid is null || TableView is null)
+        {
+            return;
+        }
+
+        _headerGrid.Height = TableView.RowHeight;
+        _headerGrid.MaxHeight = TableView.RowMaxHeight;
+        _headerGrid.MinHeight = TableView.EffectiveRowMinHeight;
     }
 
     /// <summary>
@@ -685,11 +716,13 @@ public partial class TableViewRow : ListViewItem
                                                     .FirstOrDefault(x => x.Name is not Selection_Background && x.Margin == _selectionBackgroundMargin);
         }
 
+        var focusVisualMargin = _focusVisualMargin ??= FocusVisualMargin;
+
         FocusVisualMargin = new Thickness(
-            _focusVisualMargin.Left + left,
-            _focusVisualMargin.Top,
-            _focusVisualMargin.Right,
-            _focusVisualMargin.Bottom + GetHorizontalGridlineHeight());
+            focusVisualMargin.Left + left,
+            focusVisualMargin.Top,
+            focusVisualMargin.Right,
+            focusVisualMargin.Bottom + GetHorizontalGridlineHeight());
 
         EnsureSelectionIndicatorPosition(detailsHeight, selectionIndicator);
 #endif

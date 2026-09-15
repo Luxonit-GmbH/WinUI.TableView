@@ -94,6 +94,12 @@ tableView.RefreshFilter();
 
 By default, dragging a column divider ([`ColumnResizeMode="Live"`](xref:WinUI.TableView.TableView.ColumnResizeMode)) relayouts every visible row's cells on every pointer-move frame. On grids with many visible rows this can make the drag itself feel less smooth, even though the final committed width is unaffected. Set `ColumnResizeMode="Preview"` to use a lightweight visual preview during the drag instead — no row layout runs until the pointer is released, so the drag stays smooth regardless of row count. See [Column sizing](column-sizing.md#columnresizemode).
 
+## Row height
+
+Set `RowHeight` on a grid that scrolls a lot. With a fixed row height the grid finds the rows on screen arithmetically instead of by walking the visual tree, and each cell's content constraint stays the same from one scroll to the next, so the cells are not re-measured.
+
+`RowHeight` wins over `RowMinHeight`. The default minimum is 40, and a `RowHeight` below it, say 28, gives 28px rows: the explicit height is the more specific setting, so it caps the minimum. Leave `RowHeight` unset and the minimum is the row height.
+
 ## Horizontal scrolling and column count
 
 Set `IsColumnVirtualizationEnabled` to `true` on a grid with many columns. Cells outside a band around the visible columns are collapsed, so they are never measured, and cells further out have their content released entirely, so they stop evaluating their bindings. Without it every column of every realized row is built, measured and kept live — which on a grid with a frequently updating source means the columns you cannot see cost as much as the ones you can.

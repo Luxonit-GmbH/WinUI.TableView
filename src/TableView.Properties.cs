@@ -1358,6 +1358,8 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.RowHeaderLayoutVersion++;
+
             foreach (var row in tableView._rows)
             {
                 row.ApplyCellHeights();
@@ -1658,7 +1660,13 @@ public partial class TableView
             // One write. Every row, and the chrome pinned against them, is bound to this by an expression
             // animation, so the compositor does the moving and the UI thread stays out of it. The old per-row loop
             // cost ~0.75ms per row per frame in the render walk; this costs a scalar.
-            tableView.PanPropertySet.InsertScalar(PanOffsetKey, (float)tableView.HorizontalOffset);
+            //
+            // Whole pixels. A scrollbar drag makes the offset an arbitrary fraction, and a translation of 1234.37
+            // renders every glyph and every one-pixel grid line at a sub-pixel phase that changes each tick — the
+            // half-pixel shimmer of a dragged grid. Everything pans from this one scalar, the pinned chrome by its
+            // negation, so rounding it here keeps all of it on the same pixel grid. The range computations keep
+            // the unrounded offset; this is a rendering choice and layout never sees it.
+            tableView.PanPropertySet.InsertScalar(PanOffsetKey, (float)Math.Round(tableView.HorizontalOffset));
             tableView._headerRow?.ApplyHorizontalScroll();
 
             tableView.RealizeVisibleCells();
@@ -1672,6 +1680,8 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.RowHeaderLayoutVersion++;
+
             await Task.Yield();
 
             foreach (var row in tableView._rows)
@@ -1688,6 +1698,7 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.RowHeaderLayoutVersion++;
             tableView.SetHeadersVisibility();
             tableView.UpdateHorizontalScrollBarMargin();
         }
@@ -1700,6 +1711,7 @@ public partial class TableView
     {
         if (d is TableView tableView)
         {
+            tableView.RowHeaderLayoutVersion++;
             tableView.SetValue(RowHeaderActualWidthProperty, 0d);
 
             foreach (var row in tableView._rows)

@@ -113,6 +113,7 @@ public partial class TableViewCellsPanel : Panel
         var children = GetChildSnapshot(collection, count);
 
         var tableView = OwningTableView;
+        tableView?.NoteCellsPanelMeasure();
         var offsets = tableView?.ScrollableColumnOffsets ?? [];
         var availableHeight = availableSize.Height;
 
