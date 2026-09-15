@@ -48,6 +48,7 @@ public partial class TableViewRowPresenter : Control
     public TableViewRowPresenter()
     {
         DefaultStyleKey = typeof(TableViewRowPresenter);
+        RegisterPropertyChangedCallback(PaddingProperty, delegate { ApplyRootPanelMargin(); });
     }
 
     /// <inheritdoc/>
@@ -86,6 +87,8 @@ public partial class TableViewRowPresenter : Control
         _rowHeader?.TableView = TableView;
         _rowHeader?.TableViewRow = TableViewRow;
 
+        ApplyRootPanelMargin();
+
         _detailsToggleButton?.Tapped += OnDetailsToggleButtonTapped;
 
         if (_detailsPanel is not null)
@@ -109,6 +112,35 @@ public partial class TableViewRowPresenter : Control
         SetRowDetailsTemplate();
 
         PinChromeToPan();
+    }
+
+    /// <summary>
+    /// Positions the root panel: the presenter's own padding, plus the shift that keeps the cells in place while
+    /// the item presenter hangs its rounded corner off the left edge (or, in multi-select, clears the check box).
+    /// </summary>
+    /// <remarks>
+    /// This replaces an explicit re-arrange of the panel at a shifted origin after every base arrange, which cost
+    /// the grid a second full column and row resolution per row per layout pass. The right margin is the negative
+    /// of the left one so the panel keeps its full width and overhangs on the right, exactly as the explicit
+    /// arrange left it. Re-applied when the padding or the selection mode changes.
+    /// </remarks>
+    internal void ApplyRootPanelMargin()
+    {
+        if (_rootPanel is null)
+        {
+            return;
+        }
+
+        var cornerRadius = _itemPresenter?.CornerRadius ?? new CornerRadius(0);
+        var isMultiSelection = TableView is ListView { SelectionMode: ListViewSelectionMode.Multiple };
+        var left = isMultiSelection ? 44 : Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
+        var padding = Padding;
+        var margin = new Thickness(padding.Left + left, padding.Top, padding.Right - left, padding.Bottom);
+
+        if (_rootPanel.Margin != margin)
+        {
+            _rootPanel.Margin = margin;
+        }
     }
 
     /// <summary>
@@ -240,24 +272,18 @@ public partial class TableViewRowPresenter : Control
         if (TableView is not null)
         {
             var cornerRadius = _itemPresenter?.CornerRadius ?? new CornerRadius(0);
-            var isMultiSelection = TableView is ListView { SelectionMode: ListViewSelectionMode.Multiple };
-            var left = isMultiSelection ? 44 : Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
 
-            _rootPanel?.Arrange(new(left, 0, Math.Max(0, _rootPanel.ActualWidth), _rootPanel.ActualHeight));
-
-            // Arrange the scrollable panels at their un-scrolled positions; the horizontal scroll offset is applied
-            // via RenderTransform in ApplyHorizontalScroll so that scrolling does not re-run a layout pass.
+            // RootPanel is no longer re-arranged here: its shift is a margin (see ApplyRootPanelMargin). Arranging
+            // it a second time at a shifted origin re-ran the grid's whole column and row resolution on every pass,
+            // and the row above did the same one level up at a shifted SIZE, which cascaded down through this
+            // presenter and the cells panel. The scrollable cells panel needs no explicit arrange either: the grid
+            // already places it exactly where the old call put it, and the per-row transform that call was written
+            // for no longer exists, since the items panel pans as one visual.
             if (_detailsPanel?.Visibility is Visibility.Visible && _v_gridLine is not null)
             {
                 var x = _v_gridLine.ActualOffset.X + _v_gridLine.ActualWidth;
                 var y = _scrollableCellsPanel?.ActualHeight ?? _v_gridLine.ActualOffset.Y;
                 _detailsPanel.Arrange(new(x, y, _detailsPanel.ActualWidth, _detailsPanel.ActualHeight));
-            }
-
-            if (_scrollableCellsPanel?.ActualWidth > 0 && _frozenCellsPanel is not null)
-            {
-                var frozenRight = _frozenCellsPanel.ActualOffset.X + _frozenCellsPanel.ActualWidth;
-                _scrollableCellsPanel.Arrange(new(frozenRight, 0, _scrollableCellsPanel.ActualWidth, _scrollableCellsPanel.ActualHeight));
             }
 
             ApplyHorizontalScroll();

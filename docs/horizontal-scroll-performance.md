@@ -330,3 +330,79 @@ two axes and not a free win, which is why it is written down here rather than si
   column changes suppress the event while really changing widths.
 - `ReleaseContent` now refuses a cell that is visible, not merely one whose flag says it is out of band.
   The two can disagree after virtualization is toggled, and the consequence was a blanked cell.
+
+---
+
+# Round three: profiling instead of reasoning (2026-09-15)
+
+Two more code-derived causes were implemented and measured, one turned out to be a regression, and the
+change that actually helped was a bug the profile pointed at rather than any of the planned items.
+
+## What the profile said
+
+`dotnet-trace` attached to the test host during `Grid_HorizontalScrollbarSweep_80Cols_Rendered`, steady
+state (grid loaded, warm-up done). This profile is wall-clock per thread and its call counts are
+synthesized from one-millisecond samples, so shares are trustworthy and per-call figures are not.
+
+| where the UI thread's time went | share |
+|---|---|
+| under `TableViewCellsPanel.MeasureOverride` (the dirty rows' measures, cells included) | 25% |
+| the settle pass re-creating and re-pinning content (`RealizeRowChunk`) | 9% |
+| native layout and render with no library frame on the stack | 27% |
+| the benchmark's own render waits and continuations | most of the rest |
+
+So the managed `MeasureOverride` in the traces is real, and it is the cost of the rows a band change
+dirties. The reveal path itself did not register.
+
+## Tried, measured, and what happened
+
+**Arrange each row once.** Three ancestors re-arranged their subtree at a rect shifted by the 4px
+corner radius after the base pass had already arranged it, and because the base pass resets the rect
+every time, the two never converged: every row was arranged twice on every layout pass, for the life of
+the control. The shift is now a margin, set once, with the multi-select variant re-applied from the
+selection-mode handler. Correct and provably less work, but it did not move either benchmark beyond
+noise. Kept, because it removes the work on every layout pass on both axes; the visual check is the row
+corners and the selection background.
+
+**Gate the row header's shared write.** Each row header wrote `RowHeaderActualWidth` on the grid from
+inside its own measure, on every pass, forced by the presenter above it. It now reads first. No
+measurable effect on its own.
+
+**Look ahead in the direction of travel.** Reveal a full viewport ahead while the horizontal axis is
+moving, shrink on settle, so a drag reveals once per viewport instead of once per few columns. Measured
+as a clear regression: the horizontal sweep went from 1461 ms to 4342 ms and the vertical throw from
+9965 ms to 13862 ms, reproducibly, on an idle machine. Reverted. Do not retry it without first
+understanding why: the plan's own rule was that if the vertical number moves, the settle is not
+shrinking the band, and it moved.
+
+**The supersede churn, which was the actual win.** A scrollbar drag has brief pauses. After one of at
+least 50 ms the settle pass starts, chunked across dispatcher turns; when the drag resumes, the reveal
+path supersedes it, and the abandoned pass invalidates the settled range as it aborts. The reveal code
+read an invalid settled range as "nothing realized yet" and started a synchronous full pass, which the
+next tick superseded, and so on: a row sort plus an eight-row, eighty-column walk on every other tick
+for the rest of the drag. The check now consults both memos, so once anything has been revealed it takes
+the delta path.
+
+| horizontal scrollbar sweep, ms per 100 ticks | |
+|---|---|
+| round two | 1364 to 1461 |
+| with the churn fixed (three runs) | 947, 872, 889 |
+| virtualization off | 599 |
+
+Vertical throw unchanged at about 9965 ms, as it should be: the fix is on the horizontal path only.
+
+## Not done, and why
+
+The plan's third item would have keyed the cell's constraint cache on the configured height rather than
+the arranged one, to stop a band change re-measuring every cell in a row when `RowHeight` is left
+unset. That fallback to the arranged height was itself a deliberate earlier fix, bounding content that
+was otherwise measured at infinite height on every data tick, and reverting it would reopen that.
+Grids that set `RowHeight`, which includes the sample page and the blotter, are not affected either
+way, so it is left alone and noted here.
+
+## Where it stands
+
+Horizontal scrolling with virtualization on now costs about 1.5 times what it costs with it off, down
+from 2.3 at the start of this round and about 3 at the start of the previous one. The remaining gap is
+the layout pass that revealing a column forces on the visible rows, and the profile puts a quarter of
+the thread there. Vertical is unchanged and is not a column-virtualization problem.

@@ -1645,11 +1645,13 @@ public partial class TableView : ListView
             return;
         }
 
-        // Nothing is realized at all: first layout, or the column set was just replaced. There is no delta to
+        // Nothing has ever been realized: first layout, or the column set was just replaced. There is no delta to
         // apply against, and waiting out the settle window would leave the grid showing collapsed cells for as
-        // long as it takes — so hand it straight to the chunked pass, which is what used to happen for every band
-        // change and is still right for this one.
-        if (_lastRealizedRange.First < 0)
+        // long as it takes — so hand it straight to the chunked pass. Checked against BOTH memos: the settled range
+        // is invalidated whenever a pass is superseded, and treating that alone as "nothing realized" re-entered
+        // this synchronous full pass on every tick of a drag that followed a brief pause, each one superseding
+        // the last.
+        if (_lastRevealedRange.First < 0 && _lastRealizedRange.First < 0)
         {
             if (!_realizeInFlight)
             {
@@ -1665,16 +1667,18 @@ public partial class TableView : ListView
             return;
         }
 
-        // A chunked pass still walking rows is working from an older band than this one. Supersede it rather than
-        // letting it finish and record a stale range; its next continuation aborts and invalidates, so the settle
-        // pass that follows redoes the work against the band the user actually ended on.
+        // A chunked pass still walking rows is working from an older band than this one. Supersede it — its next
+        // continuation aborts and invalidates the settled range, so the settle pass that follows redoes the work
+        // against the band the user actually ended on.
         if (_realizeInFlight)
         {
             _realizeGeneration++;
             _realizeInFlight = false;
-            _lastRealizedRange = (-2, -2);
-            _lastKeepRange = (-2, -2);
         }
+
+        // NOTE: a directional look-ahead (reveal a full viewport ahead while moving, shrink on settle) was tried
+        // here and measured as a clear regression on both axes — the horizontal sweep tripled and the vertical
+        // throw got a third slower — so the band stays symmetric. See docs/horizontal-scroll-performance.md.
 
         var scrollable = Columns.VisibleScrollableColumns;
 
@@ -4599,7 +4603,7 @@ public partial class TableView : ListView
         {
             row.EnsureLayout();
             row.RowPresenter?.SetRowHeaderVisibility();
-
+            row.RowPresenter?.ApplyRootPanelMargin(); // the multi-select shift lives in the margin now
         }
 
         _shouldThrowSelectionModeChangedException = false;

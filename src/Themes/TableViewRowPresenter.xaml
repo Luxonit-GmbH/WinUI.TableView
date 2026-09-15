@@ -69,8 +69,9 @@
                                           Padding="{ThemeResource TableViewBannerRowPadding}"
                                           Background="{ThemeResource TableViewBannerRowBackground}" />
 
-                        <Grid x:Name="RootPanel"
-                              Margin="{TemplateBinding Padding}">
+                        <!-- Margin is set in code (ApplyRootPanelMargin): the presenter's padding plus the shift that
+                             keeps the cells in place while the item presenter hangs its corner off the edge. -->
+                        <Grid x:Name="RootPanel">
 
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*" />

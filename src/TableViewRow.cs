@@ -157,6 +157,18 @@ public partial class TableViewRow : ListViewItem
         _cellPresenterBackground = Background;
         _cellPresenterForeground = Foreground;
         _itemPresenter = GetTemplateChild("Root") as ListViewItemPresenter;
+
+        // The presenter hangs its rounded left corner off the edge so it is not drawn; the row presenter shifts
+        // its root panel back by the same amount so the cells stay put. Both used to be done by re-arranging the
+        // subtree at a shifted rect after the base pass had already arranged it — and because the base pass resets
+        // the rect every time, the two never converged, so every row was arranged twice on every layout pass, for
+        // the life of the control. A margin is the same geometry for one arrange.
+        if (_itemPresenter is not null)
+        {
+            var cornerRadius = _itemPresenter.CornerRadius;
+            var left = Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
+            _itemPresenter.Margin = new Thickness(-left, 0, 0, 0);
+        }
         // The template (re)applied — cached visual-tree parts found under _itemPresenter are now stale.
         _selectionIndicator = null;
         _multiSelectIndicator = null;
@@ -245,10 +257,7 @@ public partial class TableViewRow : ListViewItem
     {
         finalSize = base.ArrangeOverride(finalSize);
 
-        var cornerRadius = _itemPresenter?.CornerRadius ?? new();
-        var left = Math.Max(cornerRadius.TopLeft, cornerRadius.BottomLeft);
-
-        _itemPresenter?.Arrange(new Rect(-left, 0, _itemPresenter.ActualWidth + left, _itemPresenter.ActualHeight));
+        // No explicit re-arrange of the presenter here: its off-edge shift is a margin set in OnApplyTemplate.
 
         // Position feeds drag-selection hit testing only, and both of its readers already refresh it on demand, so
         // there is nothing to keep warm here. It is a TransformToVisual — a visual-tree ancestor walk plus matrix
