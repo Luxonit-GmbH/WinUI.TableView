@@ -100,6 +100,10 @@ Set `RowHeight` on a grid that scrolls a lot. With a fixed row height the grid f
 
 `RowHeight` wins over `RowMinHeight`. The default minimum is 40, and a `RowHeight` below it, say 28, gives 28px rows: the explicit height is the more specific setting, so it caps the minimum. Leave `RowHeight` unset and the minimum is the row height.
 
+## Fast vertical scrolling
+
+A scroll that moves the view by more than a viewport in one step — a scrollbar throw, a jump to the end — recycles every row on screen at once, and binding every cell of every one of those rows is far more than a frame of work on a wide grid. Rows recycled by such a scroll are shown blank (background and grid lines only) and bound to their items once the scroll pauses for about 60 ms, the way most blotters and spreadsheets behave. Ordinary scrolling, by wheel, keyboard or a slow drag, binds rows at once as before.
+
 ## Horizontal scrolling and column count
 
 Set `IsColumnVirtualizationEnabled` to `true` on a grid with many columns. Cells outside a band around the visible columns are collapsed, so they are never measured, and cells further out have their content released entirely, so they stop evaluating their bindings. Without it every column of every realized row is built, measured and kept live — which on a grid with a frequently updating source means the columns you cannot see cost as much as the ones you can.

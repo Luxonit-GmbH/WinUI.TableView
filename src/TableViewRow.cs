@@ -238,6 +238,18 @@ public partial class TableViewRow : ListViewItem
 
             _syncedColumnLayoutVersion = layoutVersion;
 
+            // A cell in view whose content is still pinned to the previous item must follow the new one now. Two
+            // field reads per cell; the loop above is skipped on the common recycle, this one is not, because a
+            // pinned cell that stays in view would otherwise show the wrong row's data. Unless the whole row is
+            // being held on the previous item through a fast scroll — then the settle does it.
+            if (RowPresenter?.AreCellsDeferred is not true)
+            {
+                foreach (var cell in Cells)
+                {
+                    cell.OnRowItemChanged();
+                }
+            }
+
             TableView?.RealizeRowCells(this); // Ensure visible columns are realized for the recycled row.
         }
 

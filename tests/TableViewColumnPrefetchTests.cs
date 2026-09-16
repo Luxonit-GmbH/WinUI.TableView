@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -6,6 +7,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
+using WinUI.TableView.Extensions;
 
 namespace WinUI.TableView.Tests;
 
@@ -176,6 +178,148 @@ public class TableViewColumnPrefetchTests
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
     }
 
+    /// <summary>
+    /// The band is applied with hysteresis: it moves only once the viewport has used it up. A scroll that leaves the
+    /// visible columns inside the band with a column to spare must touch no row at all — no cell flags, no cells
+    /// panel measures — and the scroll that reaches the band's edge moves it for every visible row. Dirtying every
+    /// visible row on every column crossing is what made a fullscreen drag lag.
+    /// </summary>
+    [UITestMethod]
+    public async Task ScrollingInsideTheRevealedBand_TouchesNoRow_AndReachingItsEdgeMovesIt()
+    {
+        var tableView = await LoadAsync(prefetchLength: 0);
+
+        // Settled at offset 0: visible [0, 11], band [0, 15].
+        var visitsBefore = tableView.ColumnBandCellVisits;
+        var panelMeasuresBefore = tableView.CellsPanelMeasures;
+
+        // One column in: visible [1, 13], two columns short of the band's edge — inside the guard.
+        tableView.SetValue(TableView.HorizontalOffsetProperty, 100d);
+        tableView.UpdateLayout();
+
+        Assert.AreEqual(0, tableView.ColumnBandCellVisits - visitsBefore, "a scroll that stays inside the band must not flag a cell");
+        Assert.AreEqual(0, tableView.CellsPanelMeasures - panelMeasuresBefore, "a scroll that stays inside the band must not dirty a row");
+
+        // Three columns in: the visible range comes within the guard of the band's edge, so the band moves. The
+        // move is spread over ticks — a first slice of rows now, the rest as the drag goes on or when it settles —
+        // and no row is left showing a collapsed column meanwhile, which the one-pixel test below pins.
+        tableView.SetValue(TableView.HorizontalOffsetProperty, 300d);
+        tableView.UpdateLayout();
+
+        Assert.IsTrue(tableView.ColumnBandCellVisits - visitsBefore > 0, "reaching the band's edge must move it");
+        Assert.IsTrue(tableView.CellsPanelMeasures - panelMeasuresBefore > 0, "the band move must dirty the rows it revealed");
+
+        // Settled: every realized row ends up on the same band, and it reaches past the columns now in view. The
+        // settle pass is chunked across dispatcher turns and starts 100 ms after the last tick, so wait for it
+        // rather than assuming a fixed delay covers it on a loaded host.
+        var settled = (-2, -2);
+
+        for (var waited = 0; waited < 2000; waited += 50)
+        {
+            await Task.Delay(50);
+            tableView.UpdateLayout();
+            settled = tableView.Rows.First().AppliedBand;
+
+            if (settled.Item1 >= 0 && tableView.Rows.All(r => r.AppliedBand == settled))
+            {
+                break;
+            }
+        }
+
+        Assert.IsTrue(settled.Item2 >= 16, $"the settled band {settled} should reach past the columns in view");
+        Assert.IsTrue(tableView.Rows.All(r => r.AppliedBand == settled), "every realized row should settle on the same band");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// The other half of the contract: hysteresis must never let a column arrive in the viewport collapsed. One
+    /// pixel at a time across two band moves, every column that is even partly visible has a visible cell.
+    /// </summary>
+    [UITestMethod]
+    public async Task ScrollingOnePixelAtATime_NeverShowsACollapsedColumn()
+    {
+        var tableView = await LoadAsync(prefetchLength: 0);
+        var row = tableView.Rows.First();
+
+        for (var offset = 1d; offset <= 900d; offset += 1d)
+        {
+            tableView.SetValue(TableView.HorizontalOffsetProperty, offset);
+            tableView.UpdateLayout();
+
+            var (first, last) = tableView.GetVisibleScrollableRange(0);
+
+            for (var column = first; column <= last; column++)
+            {
+                var cell = CellFor(row, tableView.Columns.VisibleScrollableColumns[column]);
+                Assert.AreEqual(Visibility.Visible, cell.Visibility, $"column {column} is in the viewport at offset {offset} but its cell is collapsed");
+            }
+        }
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// A prefetched cell has its content's DataContext pinned to the item it was built under, and revealing it
+    /// under the same item leaves the pin in place. The row must then be able to recycle onto a different item
+    /// without that cell going on showing the old one: whatever pins for the collapsed state has to be undone by
+    /// the time the row shows another item.
+    /// </summary>
+    [UITestMethod]
+    public async Task PrefetchedThenRevealedCell_FollowsTheRowOntoANewItem()
+    {
+        var tableView = await LoadAsync(prefetchLength: 1);
+
+        // Reveal the prefetched column, so it is in band while still pinned to the item it was built under.
+        tableView.SetValue(TableView.HorizontalOffsetProperty, PrefetchedColumn * 100d - 200d);
+        tableView.UpdateLayout();
+        await Task.Delay(300);
+        tableView.UpdateLayout();
+
+        var row = tableView.Rows.First();
+        var cell = CellFor(row, tableView.Columns[PrefetchedColumn]);
+        var before = (Item)row.Content;
+        Assert.AreEqual(Visibility.Visible, cell.Visibility);
+        Assert.AreEqual(before.Name, TextOf(cell), "the revealed cell shows the item it was prefetched under");
+
+        // Recycle every container onto distant items.
+        tableView.ScrollIntoView(tableView.Items[60]);
+        tableView.UpdateLayout();
+        await Task.Delay(300);
+        tableView.UpdateLayout();
+
+        var checkedAny = false;
+
+        foreach (var realized in tableView.Rows)
+        {
+            if (realized.Content is not Item item || ReferenceEquals(item, before))
+            {
+                continue;
+            }
+
+            var recycled = CellFor(realized, tableView.Columns[PrefetchedColumn]);
+
+            if (recycled.Visibility is not Visibility.Visible)
+            {
+                continue;
+            }
+
+            checkedAny = true;
+            Assert.AreEqual(item.Name, TextOf(recycled), $"row {realized.Index} shows another item's value in a column that was prefetched, then revealed, then recycled");
+        }
+
+        Assert.IsTrue(checkedAny, "no recycled row with the column visible was found to check");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    private static string? TextOf(TableViewCell cell)
+    {
+        var content = cell.Content as FrameworkElement;
+        var textBlock = content as TextBlock ?? content?.FindDescendant<TextBlock>();
+        return textBlock?.Text;
+    }
+
     private static TableViewCell CellFor(TableViewRow row, TableViewColumn column)
         => row.Cells.First(cell => cell.Column == column);
 
@@ -208,7 +352,25 @@ public class TableViewColumnPrefetchTests
 
         await Task.Delay(300); // the debounced band realize
         tableView.UpdateLayout();
-        await Task.Delay(700); // idle time for the prefetch pump
+
+        // Idle time for the prefetch pump. It waits out the debounce after the last recycle and then works in
+        // small low-priority increments, so how long it needs depends on how loaded the host is; wait for the
+        // column the tests look at rather than a fixed time.
+        if (prefetchLength > 0)
+        {
+            var row = tableView.Rows.First();
+            var column = tableView.Columns[PrefetchedColumn];
+
+            for (var waited = 0; CellFor(row, column).Content is null && waited < 4000; waited += 50)
+            {
+                await Task.Delay(50);
+            }
+        }
+        else
+        {
+            await Task.Delay(700);
+        }
+
         tableView.UpdateLayout();
 
         return tableView;

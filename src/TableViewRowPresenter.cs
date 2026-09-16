@@ -44,6 +44,77 @@ public partial class TableViewRowPresenter : Control
     private int _rowHeaderLayoutVersion = -1; // TableView.RowHeaderLayoutVersion the header was last invalidated for
 
     /// <summary>
+    /// Whether the cells are being held on the item the row showed before its last recycle, hidden, until the
+    /// vertical scroll settles. See <see cref="TableView.PrepareContainerForItemOverride"/>.
+    /// </summary>
+    internal bool AreCellsDeferred { get; private set; }
+
+    /// <summary>
+    /// Holds every cell on <paramref name="previousItem"/> and hides the cell panels, so the recycle that is about
+    /// to change the row's item costs the cells nothing.
+    /// </summary>
+    /// <remarks>
+    /// One local DataContext on each cells panel shadows the row's for the whole subtree: the cells' bindings never
+    /// see the new item, so no text is re-laid-out or re-drawn for a row nobody will see settled. The panels go to
+    /// zero opacity rather than collapsed — opacity is a composition property and costs no layout — so the row
+    /// shows its background and grid lines and nothing else, the way a grid looks while its scrollbar is being
+    /// thrown. <see cref="CompleteDeferredCells"/> undoes both.
+    /// </remarks>
+    internal void DeferCells(object? previousItem)
+    {
+        if (AreCellsDeferred)
+        {
+            return; // already held, on the item it showed before the throw began
+        }
+
+        AreCellsDeferred = true;
+
+        if (_scrollableCellsPanel is not null)
+        {
+            _scrollableCellsPanel.DataContext = previousItem;
+            _scrollableCellsPanel.Opacity = 0;
+        }
+
+        if (_frozenCellsPanel is not null)
+        {
+            _frozenCellsPanel.DataContext = previousItem;
+            _frozenCellsPanel.Opacity = 0;
+        }
+    }
+
+    /// <summary>
+    /// Lets the cells follow the row's current item and shows them again. The one expensive part of a recycle,
+    /// every in-band cell's bindings and text, happens here, once, for the item the row settled on.
+    /// </summary>
+    internal void CompleteDeferredCells()
+    {
+        if (!AreCellsDeferred)
+        {
+            return;
+        }
+
+        AreCellsDeferred = false;
+
+        if (_scrollableCellsPanel is not null)
+        {
+            _scrollableCellsPanel.ClearValue(DataContextProperty);
+            _scrollableCellsPanel.Opacity = 1;
+        }
+
+        if (_frozenCellsPanel is not null)
+        {
+            _frozenCellsPanel.ClearValue(DataContextProperty);
+            _frozenCellsPanel.Opacity = 1;
+        }
+
+        // Cells pinned individually (prefetched or previously out of band) that are now in view must follow too.
+        foreach (var cell in _cellsList)
+        {
+            cell.OnRowItemChanged();
+        }
+    }
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="TableViewRowPresenter"/> class.
     /// </summary>
     public TableViewRowPresenter()
@@ -538,7 +609,7 @@ public partial class TableViewRowPresenter : Control
                                                     && (TableView.RowDetailsTemplate is not null || TableView.RowDetailsTemplateSelector is not null);
 
                 _v_gridLine.Fill = TableView.GridLinesVisibility is TableViewGridLinesVisibility.All or TableViewGridLinesVisibility.Vertical
-                                   ? TableView.VerticalGridLinesStroke : new SolidColorBrush(Colors.Transparent);
+                                   ? TableView.VerticalGridLinesStroke : TableView.TransparentBrush;
                 _v_gridLine.Width = TableView.VerticalGridLinesStrokeThickness;
                 _v_gridLine.Visibility = vGridLinesVisibility && (areHeadersVisible || isMultiSelection || isDetailsToggleButtonVisible) ? Visibility.Visible : Visibility.Collapsed;
             }
