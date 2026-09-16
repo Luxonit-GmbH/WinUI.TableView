@@ -53,22 +53,23 @@ public partial class TableViewRowPresenter : Control
     private readonly List<TableViewCell> _liveHeldCells = [];
 
     /// <summary>
-    /// Holds the scrollable cells on <paramref name="previousItem"/> and hides all but the live ones, so the
-    /// recycle that is about to change the row's item costs the held cells nothing.
+    /// Holds the scrollable cells on what they show and hides all but the live ones, so the recycle that is about
+    /// to change the row's item costs the held cells nothing.
     /// </summary>
-    /// <param name="previousItem">The item the row showed, which the held cells stay bound to.</param>
     /// <param name="liveFirst">Scrollable index of the first visible column; the live columns start there.</param>
     /// <param name="liveCount">How many scrollable columns from there stay bound and visible.</param>
     /// <remarks>
-    /// One local DataContext on the scrollable cells panel shadows the row's for the whole subtree: the held cells'
-    /// bindings never see the new item, so no text is re-laid-out or re-drawn for a row nobody will see settled.
-    /// The held cells go to zero opacity rather than collapsed — opacity is a composition property and costs no
-    /// layout. The frozen cells panel is not touched at all: frozen columns are a grid's identity columns and
-    /// they stay live, which is what lets the user tell where a throw has taken them; the live scrollable columns
-    /// serve the same purpose on a grid that freezes none, bound to the new item by <see cref="BindLiveCells"/>
-    /// once the recycle has set it. <see cref="CompleteDeferredCells"/> undoes all of it.
+    /// Each held cell's content is pinned to what it is bound to right now — the same pin a prefetched cell
+    /// carries — so its bindings never see the new item and no text is re-laid-out or re-drawn for a row nobody
+    /// will see settled; it goes to zero opacity rather than collapsed, since opacity is a composition property
+    /// and costs no layout. Held per cell, not by one DataContext on the panel: a column whose element binds its
+    /// own DataContext cannot be pinned, and under a held panel it inherited whatever the panel held — null, for
+    /// a container out of the recycle pool — and rendered that. Live cells are not touched at all: they inherit
+    /// the new item through whatever binding the column uses. Nor is the frozen cells panel: frozen columns are
+    /// a grid's identity columns and stay live, which is what lets the user tell where a throw has taken them.
+    /// <see cref="CompleteDeferredCells"/> undoes all of it.
     /// </remarks>
-    internal void DeferCells(object? previousItem, int liveFirst, int liveCount)
+    internal void DeferCells(int liveFirst, int liveCount)
     {
         if (AreCellsDeferred)
         {
@@ -76,7 +77,6 @@ public partial class TableViewRowPresenter : Control
         }
 
         AreCellsDeferred = true;
-        _scrollableCellsPanel?.DataContext = previousItem;
 
         if (TableView is null || TableViewRow is null)
         {
@@ -115,6 +115,7 @@ public partial class TableViewRowPresenter : Control
             }
             else
             {
+                cell.HoldContent();
                 cell.Opacity = 0;
                 _hiddenHeldCells.Add(cell);
             }
@@ -124,7 +125,7 @@ public partial class TableViewRowPresenter : Control
     private int _releaseCursor;
 
     /// <summary>
-    /// Releases the next <paramref name="count"/> held cells, left to right, binding each to the row's current
+    /// Releases the next <paramref name="count"/> held cells, left to right, letting each follow the row's current
     /// item and showing it; one phase of the platform's phased rendering. Returns <see langword="true"/> once the
     /// row has nothing left held, at which point it has been completed.
     /// </summary>
@@ -135,13 +136,12 @@ public partial class TableViewRowPresenter : Control
             return true;
         }
 
-        var item = TableViewRow?.Content;
         var end = Math.Min(_releaseCursor + count, _hiddenHeldCells.Count);
 
         for (; _releaseCursor < end; _releaseCursor++)
         {
             var cell = _hiddenHeldCells[_releaseCursor];
-            cell.PinContentTo(item);
+            cell.OnRowItemChanged();
             cell.Opacity = 1;
         }
 
@@ -155,13 +155,14 @@ public partial class TableViewRowPresenter : Control
     }
 
     /// <summary>
-    /// Binds the live columns of a held row to <paramref name="item"/>, the item the recycle has just set.
+    /// Lets the live columns of a held row follow the item the recycle has just set. They inherit it by
+    /// themselves; this only undoes a pin one of them may still carry from being prefetched under another item.
     /// </summary>
-    internal void BindLiveCells(object? item)
+    internal void BindLiveCells()
     {
         foreach (var cell in _liveHeldCells)
         {
-            cell.PinContentTo(item);
+            cell.OnRowItemChanged();
         }
     }
 
@@ -177,10 +178,7 @@ public partial class TableViewRowPresenter : Control
         }
 
         AreCellsDeferred = false;
-        _scrollableCellsPanel?.ClearValue(DataContextProperty);
 
-        // Cells a phase already released are pinned to the current item and stay so — clearing that pin would
-        // not change what they are bound to, and the next recycle undoes it anyway. The rest inherit the item now.
         for (var i = _releaseCursor; i < _hiddenHeldCells.Count; i++)
         {
             _hiddenHeldCells[i].Opacity = 1;
@@ -190,8 +188,8 @@ public partial class TableViewRowPresenter : Control
         _liveHeldCells.Clear();
         _releaseCursor = 0;
 
-        // Cells pinned individually — prefetched, previously out of band, or the live columns — that are now in
-        // view must follow the row's item; the live ones already do and stay as they are.
+        // Every cell in view that is still pinned to another item — held, or prefetched under it — follows the
+        // row's item now.
         foreach (var cell in _cellsList)
         {
             cell.OnRowItemChanged();

@@ -1116,26 +1116,12 @@ public partial class TableViewCell : ContentControl
     }
 
     /// <summary>
-    /// Binds this cell's content to <paramref name="item"/> directly, as a pin, while the panel above it is held
-    /// on a previous item: the live columns of a row recycled by a fast vertical scroll. The pin is undone by
-    /// <see cref="OnRowItemChanged"/> on the next recycle, like any other.
+    /// Holds this cell's content on whatever it is bound to now, so the recycle about to change the row's item
+    /// costs it nothing: the held cells of a row recycled by a fast vertical scroll. The same pin as a prefetched
+    /// cell's, undone by <see cref="OnRowItemChanged"/> when the cell is released or the row recycles again. A
+    /// column whose element binds its own DataContext cannot be held this way and simply follows the item.
     /// </summary>
-    internal void PinContentTo(object? item)
-    {
-        if (Content is not FrameworkElement element || element.GetBindingExpression(DataContextProperty) is not null)
-        {
-            return;
-        }
-
-        if (_dataContextPinned && ReferenceEquals(_pinnedItem, item))
-        {
-            return;
-        }
-
-        element.DataContext = item;
-        _pinnedItem = item;
-        _dataContextPinned = true;
-    }
+    internal void HoldContent() => PinContentDataContext(pin: true);
 
     /// <summary>
     /// The row this cell belongs to now shows a different item. A cell that is in view must follow it at once.

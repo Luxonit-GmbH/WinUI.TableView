@@ -575,12 +575,15 @@ eighteen chunks. Counters added this round showed the pass, not the reveal, was 
 ## What changed
 
 **Recycled rows are held blank through a throw.** A layout pass whose vertical offset moved by more
-than a viewport marks each row it recycles as deferred: one local DataContext on each cells panel holds
-every cell on the item it showed, and the held cells go to zero opacity, so the row shows its background, its grid lines and its live
-columns and nothing else. Live columns are the frozen ones (their panel is not touched at all), any
-column flagged `KeepLiveDuringFastScroll`, and the leftmost `FastScrollLiveColumnCount` visible
-scrollable columns (default 1); they are bound to the new item at once, one cell each per recycled
-row, so the user can tell where a throw has taken them.
+than a viewport marks each row it recycles as deferred: every held cell's content is pinned to what it
+is bound to, the same pin a prefetched cell carries, and goes to zero opacity, so the row shows its
+background, its grid lines and its live columns and nothing else. Live columns are the frozen ones
+(their panel is not touched at all), any column flagged `KeepLiveDuringFastScroll`, and the leftmost
+`FastScrollLiveColumnCount` visible scrollable columns (default 1); they are not touched either, so
+they follow the new item through whatever binding their column uses, one cell each per recycled row,
+and the user can tell where a throw has taken them. The hold was first one local DataContext on the
+cells panel, and a column whose element binds its own DataContext could not be pinned around it: it
+inherited what the panel held, null for a container out of the recycle pool, and rendered that.
 
 The release is left to right, a slice of eight columns per row per turn from the left edge of the
 viewport, the rows on screen first and top to bottom, so a row fills in the way it is read. Two
@@ -593,8 +596,9 @@ have been arriving at (80 ms at least, 500 at most) after the last one, releasin
 budget per dispatcher turn and stopping the moment a new fast tick arrives. A fixed gap was tried twice
 and cascaded both times, at 60 ms and at 80 ms: a fullscreen tick takes about 75 ms, the timer fired
 between two of them, released every row, and the next tick held them all again, a throw two to three
-times slower with every row released and re-held on every tick. A thumb drag also reports its view
-changes as intermediate until the thumb is let go, and the settle waits for that. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
+times slower with every row released and re-held on every tick. The settle is deliberately not gated
+on the thumb still being held: a slow drag after a throw makes no fast ticks, and the rows under the
+thumb should fill in while it is dragged, not after it is let go. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
 taken from the scroll viewer's `ViewChanging`, which announces the next offset before the layout that
 recycles; the `VerticalOffset` property still reads the old value during that layout.
 

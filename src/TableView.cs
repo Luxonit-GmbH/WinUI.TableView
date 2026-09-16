@@ -545,7 +545,7 @@ public partial class TableView : ListView
                 if (!presenter.AreCellsDeferred)
                 {
                     var liveFirst = Math.Max(0, GetVisibleScrollableRange(0).First);
-                    presenter.DeferCells(preparingRow.Content, liveFirst, Math.Max(0, FastScrollLiveColumnCount));
+                    presenter.DeferCells(liveFirst, Math.Max(0, FastScrollLiveColumnCount));
                     RowsDeferred++;
                 }
 
@@ -566,7 +566,7 @@ public partial class TableView : ListView
             {
                 if (fastScroll)
                 {
-                    deferred.BindLiveCells(item); // the identity columns follow the new item at once
+                    deferred.BindLiveCells(); // the identity columns follow the new item at once
                 }
                 else
                 {
@@ -634,7 +634,6 @@ public partial class TableView : ListView
     private const double DeferredBindSettleBudgetMs = 12;  // rebinding per settle turn; the rest waits for the next turn
     private long _lastFastOffsetTick;
     private double _settleIntervalMs = DeferredBindSettleMinMs;
-    private bool _viewChangeIntermediate; // the scroll viewer's last ViewChanged said the gesture is still in progress
 
     /// <summary>
     /// The platform's phased rendering, used to release held rows. Phase 0 is raised as a container is prepared;
@@ -662,7 +661,7 @@ public partial class TableView : ListView
         // throw three times slower, every row released and re-held on every tick), and asking for yet another
         // phase kept every container in a pending-phase state the platform paid for on every frame (measured as
         // 17 ms a tick at 46 rows). The settle releases what the throw leaves held, in the same left-to-right slices.
-        if (_viewChangeIntermediate || Environment.TickCount64 - _lastFastOffsetTick < _settleIntervalMs)
+        if (Environment.TickCount64 - _lastFastOffsetTick < _settleIntervalMs)
         {
             return;
         }
@@ -740,17 +739,6 @@ public partial class TableView : ListView
         }
     }
 
-    private void OnScrollViewerViewChangedForDeferral(object? sender, ScrollViewerViewChangedEventArgs e)
-    {
-        // A thumb drag reports its view changes as intermediate until the thumb is let go; the settle waits.
-        _viewChangeIntermediate = e.IsIntermediate;
-
-        if (!e.IsIntermediate && _deferredRows.Count > 0)
-        {
-            ArmDeferredBindTimer();
-        }
-    }
-
     private void ArmDeferredBindTimer()
     {
         if (_deferredBindTimer is null)
@@ -773,12 +761,8 @@ public partial class TableView : ListView
     /// </summary>
     private void FlushDeferredRows()
     {
-        if (_viewChangeIntermediate)
-        {
-            ArmDeferredBindTimer(); // the thumb is still held; look again later
-            return;
-        }
-
+        // Not gated on the thumb still being held: a slow drag after a throw makes no fast ticks, and the rows it
+        // is looking at should fill in under the thumb, not after it is let go.
         _passIsFastVerticalScroll = false; // the gesture is over; the cache rows the panel builds next are ordinary
         ContinueFlushingDeferredRows();
     }
@@ -1781,7 +1765,6 @@ public partial class TableView : ListView
         _dragRectangle = GetTemplateChild("DragRectangle") as Border;
         _scrollViewer?.Loaded += OnScrollViewerLoaded;
         _scrollViewer?.ViewChanging += OnScrollViewerViewChanging;
-        _scrollViewer?.ViewChanged += OnScrollViewerViewChangedForDeferral;
 
         if (IsLoaded)
         {
