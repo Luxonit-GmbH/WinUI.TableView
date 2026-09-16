@@ -115,8 +115,7 @@ public class TableViewRecycledRowStateTests
             Assert.AreEqual(0d, hidden.Opacity, $"row {row.Index}: a held cell must be hidden");
         }
 
-        await Task.Delay(600);
-        tableView.UpdateLayout();
+        await WaitForReleaseAsync(tableView);
 
         foreach (var row in tableView.Rows)
         {
@@ -173,8 +172,7 @@ public class TableViewRecycledRowStateTests
             Assert.AreEqual(0d, row.Cells[0].Opacity, $"row {row.Index}: with no count, the first column is held like the rest");
         }
 
-        await Task.Delay(600);
-        tableView.UpdateLayout();
+        await WaitForReleaseAsync(tableView);
 
         foreach (var row in tableView.Rows)
         {
@@ -189,6 +187,24 @@ public class TableViewRecycledRowStateTests
     {
         var content = cell.Content as FrameworkElement;
         return (content as TextBlock ?? content?.FindDescendant<TextBlock>())?.Text;
+    }
+
+    /// <summary>
+    /// Waits for the settle to release every held row. How long it takes depends on the settle's wait, which
+    /// follows the gesture, and on the host's load, so it is polled rather than assumed.
+    /// </summary>
+    private static async Task WaitForReleaseAsync(TableView tableView)
+    {
+        for (var waited = 0; waited < 3000; waited += 50)
+        {
+            await Task.Delay(50);
+            tableView.UpdateLayout();
+
+            if (!tableView.Rows.Any(r => r.RowPresenter?.AreCellsDeferred is true))
+            {
+                return;
+            }
+        }
     }
 
     private static async Task ScrollToAsync(TableView tableView, int index)

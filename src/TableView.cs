@@ -579,6 +579,11 @@ public partial class TableView : ListView
 
             row.EnsureCellsStyle(default, item);
 
+            // Once more, now that the container is fully prepared: the pass inside the base call reads the row's
+            // index, and during a jump the panel can answer -1 for a container it has not finished placing, which
+            // painted the wrong parity. Two property writes when nothing changed.
+            row.EnsureAlternateColors();
+
             // Queued, but still the FULL apply (ApplyPendingCellStates calls ApplyCellsSelectionState with no
             // argument): a recycled container carries the previous item's selection visuals, so the "only set the
             // selected state" variant leaves phantom selected rows behind after scrolling (the classic "I selected
@@ -669,15 +674,14 @@ public partial class TableView : ListView
             return;
         }
 
-        // One slice of columns per phase, left to right. The platform interleaves phases across containers, so
-        // the leftmost band of every row on screen appears first, then the next, which is the order a row is read.
-        if (presenter.ReleaseHeldColumns(FastScrollReleaseColumnsPerPhase))
-        {
-            _deferredRows.Remove(row);
-            return;
-        }
-
-        args.RegisterUpdateCallback(OnContainerContentChanging);
+        // The phase says the panel has budget now; it does not do the releasing. Left to itself the platform ran
+        // a container's phases back to back within one tick, so a row appeared whole and the next row after it.
+        // The release loop does the slicing instead: the rows on screen first, top to bottom, one slice of columns
+        // per row per turn, so the leftmost band of every visible row appears first, then the next — the order a
+        // row is read. Nothing is registered again: the loop carries on by itself until the rows are done, and it
+        // checks the same quiet gate on every turn, so one callback landing in a lull cannot release rows that the
+        // next tick is about to hold again.
+        ScheduleDeferredRelease();
     }
     private double _lastVerticalOffsetSeen = double.NaN;
     private bool _passIsFastVerticalScroll;
@@ -758,16 +762,22 @@ public partial class TableView : ListView
             slowest = Math.Max(slowest, interval);
         }
 
+        // While the thumb is held, a reversal — the last fast tick one way, two or three hundred milliseconds of
+        // turnaround, the first fast tick the other — must not read as the gesture ending: rows released in that
+        // gap were rendered and held again at once, which was felt as a lag in the middle of a fast up-and-down.
         return _thumbHeld
-            ? Math.Clamp(3d * slowest, DeferredBindSettleMinMs * 3, DeferredBindSettleMaxMs * 2)
+            ? Math.Clamp(4d * slowest, DeferredBindSettleMinMs * 5, DeferredBindSettleMaxMs * 3)
             : Math.Clamp(2d * slowest, DeferredBindSettleMinMs, DeferredBindSettleMaxMs);
     }
 
     private void OnScrollViewerViewChangedForDeferral(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        // Only a hint to the settle's timing: a drag still in progress waits longer before releasing, and the
-        // final change re-arms the timer so the release follows the thumb being let go. Never a block — a slow
-        // drag after a throw makes no fast ticks, and the rows under the thumb should fill in while it is dragged.
+        // A hint to the settle's timing, never a block: while the drag is in progress the wait is longer, and when
+        // the thumb is let go the timer is re-armed with the short wait, so the fill follows within about a tenth
+        // of a second. Not started at once: the scroll viewer reports an intermediate change followed by a final
+        // one for programmatic scrolls as well, and treating each final one as "let go" started the fill on every
+        // tick of a throw, which the next tick undid — every row released and held again, a throw slower by a
+        // third.
         var wasHeld = _thumbHeld;
         _thumbHeld = e.IsIntermediate;
 
@@ -776,6 +786,26 @@ public partial class TableView : ListView
             _settleIntervalMs = ComputeSettleInterval();
             ArmDeferredBindTimer();
         }
+    }
+
+    private bool _releaseScheduled;
+
+    /// <summary>
+    /// Queues one turn of the release; further requests while one is queued fold into it.
+    /// </summary>
+    private void ScheduleDeferredRelease()
+    {
+        if (_releaseScheduled || _deferredRows.Count == 0)
+        {
+            return;
+        }
+
+        _releaseScheduled = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _releaseScheduled = false;
+            ContinueFlushingDeferredRows();
+        });
     }
 
     private void ArmDeferredBindTimer()
@@ -810,14 +840,17 @@ public partial class TableView : ListView
         }
 
         _passIsFastVerticalScroll = false; // the gesture is over; the cache rows the panel builds next are ordinary
-        ContinueFlushingDeferredRows();
+        ScheduleDeferredRelease();
     }
 
     private void ContinueFlushingDeferredRows()
     {
-        if (_deferredRows.Count == 0 || _passIsFastVerticalScroll)
+        // Done, or the gesture is not over: a new throw has begun, or the last fast tick is still within the wait.
+        // Whoever queued this turn — the settle timer, a phase, the thumb let go — does not get to decide that; the
+        // timer will bring the loop back once the wait has been served.
+        if (_deferredRows.Count == 0 || _passIsFastVerticalScroll || Environment.TickCount64 - _lastFastOffsetTick < _settleIntervalMs)
         {
-            return; // done, or a new throw has begun and the timer will bring us back after it
+            return;
         }
 
         // The rows on screen, top to bottom, then the rest.
@@ -854,7 +887,7 @@ public partial class TableView : ListView
 
         if (_deferredRows.Count > 0)
         {
-            DispatcherQueue.TryEnqueue(ContinueFlushingDeferredRows);
+            ScheduleDeferredRelease();
         }
     }
 

@@ -586,14 +586,20 @@ cells panel, and a column whose element binds its own DataContext could not be p
 inherited what the panel held, null for a container out of the recycle pool, and rendered that.
 
 The release is left to right, a slice of eight columns per row per turn from the left edge of the
-viewport, the rows on screen first and top to bottom, so a row fills in the way it is read. Two
-mechanisms drive it. The platform's phased rendering: phase 0 of `ContainerContentChanging` asks for a
-later phase, and the callback releases a slice when it comes after the gesture has gone quiet, so a
-single jump fills in as soon as the panel has budget. A callback that lands while the gesture is still
-hot drops out rather than asking again, because every container kept in a pending-phase state cost the
-platform 17 ms a frame at 46 rows. And the settle: a timer that fires twice the interval the fast ticks
-have been arriving at (80 ms at least, 500 at most) after the last one, releasing slices within a 12 ms
-budget per dispatcher turn and stopping the moment a new fast tick arrives. A fixed gap was tried twice
+viewport, the rows on screen first and top to bottom, so a row fills in the way it is read: one loop,
+run a turn at a time within a 12 ms budget, stopping the moment a new fast tick arrives. Three things
+start it. The platform's phased rendering: phase 0 of `ContainerContentChanging` asks for a later phase,
+and when the callback comes after the gesture has gone quiet it queues a turn of the loop, so a single
+jump fills in as soon as the panel has budget. The phase does not release anything itself: left to it,
+the platform ran a container's phases back to back within one tick, so a row appeared whole and the
+next row after it, which is not a cascade. A callback that lands while the gesture is still hot drops
+out rather than asking again, because every container kept in a pending-phase state cost the platform
+17 ms a frame at 46 rows. The settle timer, which fires twice the slowest recent interval between fast
+ticks (80 ms at least, 500 at most) after the last one. And the thumb being let go, which re-arms that
+timer with the short wait, so the fill follows within about a tenth of a second. Not at once: the
+scroll viewer reports an intermediate change followed by a final one for programmatic scrolls as well,
+and treating each final one as "let go" started the fill on every tick of a throw, which the next tick
+undid. A fixed gap was tried twice
 and cascaded both times, at 60 ms and at 80 ms: a fullscreen tick takes about 75 ms, the timer fired
 between two of them, released every row, and the next tick held them all again, a throw two to three
 times slower with every row released and re-held on every tick. Following only the last interval fell
@@ -601,9 +607,11 @@ into the same thing on a remote session, where the ticks jitter: a burst of quic
 the network held the next one back past it, the rows were released and rendered, and the tick after
 that held them again, seen as a lag and cells appearing that should have stayed held. The wait now
 follows the slowest of the last four intervals, and while the scroll viewer reports the thumb as still
-held it is three times that instead of two. A longer wait, never a block: a slow drag after a throw
-makes no fast ticks, and the rows under the thumb should fill in while it is dragged, not after it is
-let go. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
+held it is four times that and at least 400 ms, because a reversal, the last fast tick one way and the
+first the other with the turnaround between, must not read as the gesture ending: rows released in
+that gap were rendered and held again at once, which was the lag felt in the middle of a fast up and
+down. A longer wait, never a block: a slow drag after a throw makes no fast ticks, and the rows under
+the thumb should fill in while it is dragged, not after it is let go. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
 taken from the scroll viewer's `ViewChanging`, which announces the next offset before the layout that
 recycles; the `VerticalOffset` property still reads the old value during that layout.
 
