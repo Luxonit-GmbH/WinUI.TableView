@@ -576,11 +576,25 @@ eighteen chunks. Counters added this round showed the pass, not the reveal, was 
 
 **Recycled rows are held blank through a throw.** A layout pass whose vertical offset moved by more
 than a viewport marks each row it recycles as deferred: one local DataContext on each cells panel holds
-every cell on the item it showed, and the panels go to zero opacity, so the row shows its background
-and grid lines and nothing else. A 60 ms settle timer, armed once per fast offset change rather than
-once per row prepared (the cache rows the panel builds over the following frames would otherwise keep
-pushing it out), then releases the held rows a chunk per dispatcher turn, most recently prepared
-first, and their cells bind once, to the item the row settled on. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
+every cell on the item it showed, and the held cells go to zero opacity, so the row shows its background, its grid lines and its live
+columns and nothing else. Live columns are the frozen ones (their panel is not touched at all), any
+column flagged `KeepLiveDuringFastScroll`, and the leftmost `FastScrollLiveColumnCount` visible
+scrollable columns (default 1); they are bound to the new item at once, one cell each per recycled
+row, so the user can tell where a throw has taken them.
+
+The release is left to right, a slice of eight columns per row per turn from the left edge of the
+viewport, the rows on screen first and top to bottom, so a row fills in the way it is read. Two
+mechanisms drive it. The platform's phased rendering: phase 0 of `ContainerContentChanging` asks for a
+later phase, and the callback releases a slice when it comes after the gesture has gone quiet, so a
+single jump fills in as soon as the panel has budget. A callback that lands while the gesture is still
+hot drops out rather than asking again, because every container kept in a pending-phase state cost the
+platform 17 ms a frame at 46 rows. And the settle: a timer that fires twice the interval the fast ticks
+have been arriving at (80 ms at least, 500 at most) after the last one, releasing slices within a 12 ms
+budget per dispatcher turn and stopping the moment a new fast tick arrives. A fixed gap was tried twice
+and cascaded both times, at 60 ms and at 80 ms: a fullscreen tick takes about 75 ms, the timer fired
+between two of them, released every row, and the next tick held them all again, a throw two to three
+times slower with every row released and re-held on every tick. A thumb drag also reports its view
+changes as intermediate until the thumb is let go, and the settle waits for that. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
 taken from the scroll viewer's `ViewChanging`, which announces the next offset before the layout that
 recycles; the `VerticalOffset` property still reads the old value during that layout.
 

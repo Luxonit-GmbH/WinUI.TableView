@@ -908,9 +908,9 @@ public class PerformanceBenchmarks
     /// The vertical equivalent: throwing the scrollbar, where every realized container is recycled onto a distant
     /// item on every frame. The ordinary vertical pan moves a row or two a tick and never exercises that.
     /// </summary>
-    private async Task ScrollbarThrowAsync(int columnCount, bool columnVirtualization, string benchmarkName, double width = 1200, double height = 800, double rowHeight = 32)
+    private async Task ScrollbarThrowAsync(int columnCount, bool columnVirtualization, string benchmarkName, double width = 1200, double height = 800, double rowHeight = 32, int liveColumns = 1, bool scrollingPlaceholders = true)
     {
-        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization, width: width, height: height, rowHeight: rowHeight);
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization, width: width, height: height, rowHeight: rowHeight, liveColumns: liveColumns, scrollingPlaceholders: scrollingPlaceholders);
         var scrollViewer = GetScrollViewer(tableView);
 
         // The whole extent in PanTicks steps, so each tick jumps a hundred rows and nothing on screen survives it
@@ -978,6 +978,18 @@ public class PerformanceBenchmarks
     private const int FeedBatchIntervalMs = 16;
     private const int FeedBatchSize = 128;
     private const int FeedBatches = 187; // about three seconds
+
+    /// <summary>The throw with no live column: what the leftmost column's per-tick rebind costs.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalScrollbarThrow_80Cols_Rendered_NoLiveColumns()
+        => await ScrollbarThrowAsync(WideColumnCount, columnVirtualization: true, "Grid_VerticalScrollbarThrow_80Cols_Rendered_NoLiveColumns", liveColumns: 0);
+
+    /// <summary>The throw without the platform's scrolling placeholders: what they cost while phases are pending.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalScrollbarThrow_80Cols_Rendered_NoPlaceholders()
+        => await ScrollbarThrowAsync(WideColumnCount, columnVirtualization: true, "Grid_VerticalScrollbarThrow_80Cols_Rendered_NoPlaceholders", scrollingPlaceholders: false);
 
     [UITestMethod]
     [TestCategory("Benchmark")]
@@ -1254,7 +1266,7 @@ public class PerformanceBenchmarks
     /// in a 1200x800 viewport. Column virtualization is a parameter rather than a constant because it is the
     /// biggest fork in the horizontal path, and because the control ships with it off.
     /// </summary>
-    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization, int frozenColumns = 0, double prefetchLength = 1d, bool heavyCells = false, double width = 1200, double height = 800, double rowHeight = 32)
+    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization, int frozenColumns = 0, double prefetchLength = 1d, bool heavyCells = false, double width = 1200, double height = 800, double rowHeight = 32, int liveColumns = 1, bool scrollingPlaceholders = true)
     {
         var items = new ObservableCollection<BenchItem>(
             Enumerable.Range(0, RowCount).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
@@ -1266,6 +1278,8 @@ public class PerformanceBenchmarks
             RowHeight = rowHeight,
             Width = width,
             Height = height,
+            FastScrollLiveColumnCount = liveColumns,
+            ShowsScrollingPlaceholders = scrollingPlaceholders,
             SelectionMode = ListViewSelectionMode.Extended,
             FrozenColumnCount = frozenColumns,
             ColumnPrefetchLength = prefetchLength, // set before load: the pump runs during the settle wait below

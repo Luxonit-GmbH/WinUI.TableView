@@ -49,18 +49,26 @@ public partial class TableViewRowPresenter : Control
     /// </summary>
     internal bool AreCellsDeferred { get; private set; }
 
+    private readonly List<TableViewCell> _hiddenHeldCells = [];
+    private readonly List<TableViewCell> _liveHeldCells = [];
+
     /// <summary>
-    /// Holds every cell on <paramref name="previousItem"/> and hides the cell panels, so the recycle that is about
-    /// to change the row's item costs the cells nothing.
+    /// Holds the scrollable cells on <paramref name="previousItem"/> and hides all but the live ones, so the
+    /// recycle that is about to change the row's item costs the held cells nothing.
     /// </summary>
+    /// <param name="previousItem">The item the row showed, which the held cells stay bound to.</param>
+    /// <param name="liveFirst">Scrollable index of the first visible column; the live columns start there.</param>
+    /// <param name="liveCount">How many scrollable columns from there stay bound and visible.</param>
     /// <remarks>
-    /// One local DataContext on each cells panel shadows the row's for the whole subtree: the cells' bindings never
-    /// see the new item, so no text is re-laid-out or re-drawn for a row nobody will see settled. The panels go to
-    /// zero opacity rather than collapsed — opacity is a composition property and costs no layout — so the row
-    /// shows its background and grid lines and nothing else, the way a grid looks while its scrollbar is being
-    /// thrown. <see cref="CompleteDeferredCells"/> undoes both.
+    /// One local DataContext on the scrollable cells panel shadows the row's for the whole subtree: the held cells'
+    /// bindings never see the new item, so no text is re-laid-out or re-drawn for a row nobody will see settled.
+    /// The held cells go to zero opacity rather than collapsed — opacity is a composition property and costs no
+    /// layout. The frozen cells panel is not touched at all: frozen columns are a grid's identity columns and
+    /// they stay live, which is what lets the user tell where a throw has taken them; the live scrollable columns
+    /// serve the same purpose on a grid that freezes none, bound to the new item by <see cref="BindLiveCells"/>
+    /// once the recycle has set it. <see cref="CompleteDeferredCells"/> undoes all of it.
     /// </remarks>
-    internal void DeferCells(object? previousItem)
+    internal void DeferCells(object? previousItem, int liveFirst, int liveCount)
     {
         if (AreCellsDeferred)
         {
@@ -68,17 +76,92 @@ public partial class TableViewRowPresenter : Control
         }
 
         AreCellsDeferred = true;
+        _scrollableCellsPanel?.DataContext = previousItem;
 
-        if (_scrollableCellsPanel is not null)
+        if (TableView is null || TableViewRow is null)
         {
-            _scrollableCellsPanel.DataContext = previousItem;
-            _scrollableCellsPanel.Opacity = 0;
+            return;
         }
 
-        if (_frozenCellsPanel is not null)
+        var scrollable = TableView.Columns.VisibleScrollableColumns;
+        var band = TableViewRow.AppliedBand;
+        var first = band.First >= 0 ? band.First : 0;
+        var last = band.First >= 0 ? Math.Min(band.Last, scrollable.Count - 1) : scrollable.Count - 1;
+
+        // Held cells are listed in the order they are released: from the left edge of the viewport rightwards,
+        // the way a row is read, and the buffer columns left of the viewport last.
+        var start = Math.Clamp(liveFirst, first, last + 1);
+
+        for (var i = start; i <= last; i++)
         {
-            _frozenCellsPanel.DataContext = previousItem;
-            _frozenCellsPanel.Opacity = 0;
+            Hold(i);
+        }
+
+        for (var i = first; i < start; i++)
+        {
+            Hold(i);
+        }
+
+        void Hold(int i)
+        {
+            if (GetCellForColumn(scrollable[i]) is not { IsInViewport: true } cell)
+            {
+                return;
+            }
+
+            if ((i >= liveFirst && i < liveFirst + liveCount) || scrollable[i].KeepLiveDuringFastScroll)
+            {
+                _liveHeldCells.Add(cell);
+            }
+            else
+            {
+                cell.Opacity = 0;
+                _hiddenHeldCells.Add(cell);
+            }
+        }
+    }
+
+    private int _releaseCursor;
+
+    /// <summary>
+    /// Releases the next <paramref name="count"/> held cells, left to right, binding each to the row's current
+    /// item and showing it; one phase of the platform's phased rendering. Returns <see langword="true"/> once the
+    /// row has nothing left held, at which point it has been completed.
+    /// </summary>
+    internal bool ReleaseHeldColumns(int count)
+    {
+        if (!AreCellsDeferred)
+        {
+            return true;
+        }
+
+        var item = TableViewRow?.Content;
+        var end = Math.Min(_releaseCursor + count, _hiddenHeldCells.Count);
+
+        for (; _releaseCursor < end; _releaseCursor++)
+        {
+            var cell = _hiddenHeldCells[_releaseCursor];
+            cell.PinContentTo(item);
+            cell.Opacity = 1;
+        }
+
+        if (_releaseCursor < _hiddenHeldCells.Count)
+        {
+            return false;
+        }
+
+        CompleteDeferredCells();
+        return true;
+    }
+
+    /// <summary>
+    /// Binds the live columns of a held row to <paramref name="item"/>, the item the recycle has just set.
+    /// </summary>
+    internal void BindLiveCells(object? item)
+    {
+        foreach (var cell in _liveHeldCells)
+        {
+            cell.PinContentTo(item);
         }
     }
 
@@ -94,20 +177,21 @@ public partial class TableViewRowPresenter : Control
         }
 
         AreCellsDeferred = false;
+        _scrollableCellsPanel?.ClearValue(DataContextProperty);
 
-        if (_scrollableCellsPanel is not null)
+        // Cells a phase already released are pinned to the current item and stay so — clearing that pin would
+        // not change what they are bound to, and the next recycle undoes it anyway. The rest inherit the item now.
+        for (var i = _releaseCursor; i < _hiddenHeldCells.Count; i++)
         {
-            _scrollableCellsPanel.ClearValue(DataContextProperty);
-            _scrollableCellsPanel.Opacity = 1;
+            _hiddenHeldCells[i].Opacity = 1;
         }
 
-        if (_frozenCellsPanel is not null)
-        {
-            _frozenCellsPanel.ClearValue(DataContextProperty);
-            _frozenCellsPanel.Opacity = 1;
-        }
+        _hiddenHeldCells.Clear();
+        _liveHeldCells.Clear();
+        _releaseCursor = 0;
 
-        // Cells pinned individually (prefetched or previously out of band) that are now in view must follow too.
+        // Cells pinned individually — prefetched, previously out of band, or the live columns — that are now in
+        // view must follow the row's item; the live ones already do and stay as they are.
         foreach (var cell in _cellsList)
         {
             cell.OnRowItemChanged();

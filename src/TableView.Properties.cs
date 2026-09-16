@@ -74,6 +74,11 @@ public partial class TableView
     public static readonly DependencyProperty ColumnPrefetchLengthProperty = DependencyProperty.Register(nameof(ColumnPrefetchLength), typeof(double), typeof(TableView), new PropertyMetadata(1d, OnColumnPrefetchLengthChanged));
 
     /// <summary>
+    /// Identifies the FastScrollLiveColumnCount dependency property.
+    /// </summary>
+    public static readonly DependencyProperty FastScrollLiveColumnCountProperty = DependencyProperty.Register(nameof(FastScrollLiveColumnCount), typeof(int), typeof(TableView), new PropertyMetadata(1));
+
+    /// <summary>
     /// Identifies the UseCollectionView dependency property.
     /// </summary>
     public static readonly DependencyProperty UseCollectionViewProperty = DependencyProperty.Register(nameof(UseCollectionView), typeof(bool), typeof(TableView), new PropertyMetadata(true, OnUseCollectionViewChanged));
@@ -860,6 +865,24 @@ public partial class TableView
     {
         get => (double)GetValue(ColumnPrefetchLengthProperty);
         set => SetValue(ColumnPrefetchLengthProperty, value);
+    }
+
+    /// <summary>
+    /// Gets or sets how many of the leftmost visible scrollable columns stay bound and visible on the rows a fast
+    /// vertical scroll recycles, so the user can tell where they are while the rest of the row is held blank.
+    /// Frozen columns always stay live. Default 1; 0 holds every scrollable cell.
+    /// </summary>
+    /// <remarks>
+    /// A scroll that moves the view by more than a viewport per pass recycles every row on screen, and binding
+    /// every cell of every one of those rows is far more than a frame of work on a wide grid, so those rows are
+    /// held on the item they showed and hidden until the scroll settles. Each live column costs one cell's
+    /// binding per recycled row per pass; the identity columns a blotter freezes are the natural choice, and this
+    /// covers a grid that freezes none.
+    /// </remarks>
+    public int FastScrollLiveColumnCount
+    {
+        get => (int)GetValue(FastScrollLiveColumnCountProperty);
+        set => SetValue(FastScrollLiveColumnCountProperty, value);
     }
 
     /// <summary>

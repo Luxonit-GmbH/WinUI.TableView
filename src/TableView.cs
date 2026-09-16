@@ -385,6 +385,7 @@ public partial class TableView : ListView
 
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        ContainerContentChanging += OnContainerContentChanging;
         SelectionChanged += TableView_SelectionChanged;
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
         _collectionView.VectorChanged += (_, _) => InvalidateRowIndices();
@@ -543,7 +544,8 @@ public partial class TableView : ListView
             {
                 if (!presenter.AreCellsDeferred)
                 {
-                    presenter.DeferCells(preparingRow.Content);
+                    var liveFirst = Math.Max(0, GetVisibleScrollableRange(0).First);
+                    presenter.DeferCells(preparingRow.Content, liveFirst, Math.Max(0, FastScrollLiveColumnCount));
                     RowsDeferred++;
                 }
 
@@ -560,12 +562,19 @@ public partial class TableView : ListView
 
         if (element is TableViewRow row)
         {
-            if (!fastScroll && row.RowPresenter is { AreCellsDeferred: true } deferred)
+            if (row.RowPresenter is { AreCellsDeferred: true } deferred)
             {
-                // A held row recycled by an ordinary scroll: release it now that the base call has set the item,
-                // so its cells bind once, to the item it will show.
-                _deferredRows.Remove(row);
-                deferred.CompleteDeferredCells();
+                if (fastScroll)
+                {
+                    deferred.BindLiveCells(item); // the identity columns follow the new item at once
+                }
+                else
+                {
+                    // A held row recycled by an ordinary scroll: release it now that the base call has set the
+                    // item, so its cells bind once, to the item it will show.
+                    _deferredRows.Remove(row);
+                    deferred.CompleteDeferredCells();
+                }
             }
 
             row.EnsureCellsStyle(default, item);
@@ -615,9 +624,59 @@ public partial class TableView : ListView
     }
 
     // Deferred binding through a fast vertical scroll. A pass whose vertical offset moved by more than this many
-    // viewports is a throw, not a scroll: the rows it recycles are held blank and bound when it settles.
+    // viewports is a throw, not a scroll: the rows it recycles are held, all but their live columns hidden, and
+    // released by the platform's phased rendering as it finds budget (OnContainerContentChanging). The timer is
+    // the backstop for a panel that raises no phases, and it is what ends the gesture.
     private const double DeferredBindViewportsPerPass = 1d;
-    private const int DeferredBindSettleMs = 60;
+    private const int DeferredBindSettleMinMs = 80;   // the settle waits at least this long after the last fast tick...
+    private const int DeferredBindSettleMaxMs = 500;  // ...and at most this long, at twice the observed tick interval in between
+    private const int FastScrollReleaseColumnsPerPhase = 8; // held cells released per row per phase or settle slice, left to right
+    private const double DeferredBindSettleBudgetMs = 12;  // rebinding per settle turn; the rest waits for the next turn
+    private long _lastFastOffsetTick;
+    private double _settleIntervalMs = DeferredBindSettleMinMs;
+    private bool _viewChangeIntermediate; // the scroll viewer's last ViewChanged said the gesture is still in progress
+
+    /// <summary>
+    /// The platform's phased rendering, used to release held rows. Phase 0 is raised as a container is prepared;
+    /// asking for a further phase gets a callback when the panel has budget for it — not while it is still
+    /// recycling a row per frame through a throw — and a container recycled again before its turn loses the
+    /// callback, so a new throw never pays for rows it is about to hold again. That is the release policy this
+    /// grid wants, and the platform schedules it better than a timer would: on a machine that keeps up the rows
+    /// are back within a frame or two, on one that does not they fill in as the budget allows.
+    /// </summary>
+    private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.InRecycleQueue || args.ItemContainer is not TableViewRow row || row.RowPresenter is not { AreCellsDeferred: true } presenter)
+        {
+            return;
+        }
+
+        if (args.Phase == 0)
+        {
+            args.RegisterUpdateCallback(OnContainerContentChanging);
+            return;
+        }
+
+        // A later phase that landed in the idle gap between two ticks of a throw still in progress: drop out.
+        // Releasing here would rebind the row's cells for a tick that is about to hold them again (measured as a
+        // throw three times slower, every row released and re-held on every tick), and asking for yet another
+        // phase kept every container in a pending-phase state the platform paid for on every frame (measured as
+        // 17 ms a tick at 46 rows). The settle releases what the throw leaves held, in the same left-to-right slices.
+        if (_viewChangeIntermediate || Environment.TickCount64 - _lastFastOffsetTick < _settleIntervalMs)
+        {
+            return;
+        }
+
+        // One slice of columns per phase, left to right. The platform interleaves phases across containers, so
+        // the leftmost band of every row on screen appears first, then the next, which is the order a row is read.
+        if (presenter.ReleaseHeldColumns(FastScrollReleaseColumnsPerPhase))
+        {
+            _deferredRows.Remove(row);
+            return;
+        }
+
+        args.RegisterUpdateCallback(OnContainerContentChanging);
+    }
     private double _lastVerticalOffsetSeen = double.NaN;
     private bool _passIsFastVerticalScroll;
     private readonly List<TableViewRow> _deferredRows = [];
@@ -665,6 +724,29 @@ public partial class TableView : ListView
         // the timer fires are picked up by the chunks that follow, and the flush itself clears the flag.
         if (_passIsFastVerticalScroll)
         {
+            // The settle waits twice the interval the fast ticks are arriving at. A fixed gap is what a throw whose
+            // ticks outlast it fell into, twice: at a fullscreen window a tick takes 75 ms, an 80 ms settle fired
+            // between two of them, released every row, and the next tick held them all again — a throw twice as
+            // slow and every row released and re-held on every tick.
+            var now = Environment.TickCount64;
+
+            if (_lastFastOffsetTick > 0)
+            {
+                _settleIntervalMs = Math.Clamp(2d * (now - _lastFastOffsetTick), DeferredBindSettleMinMs, DeferredBindSettleMaxMs);
+            }
+
+            _lastFastOffsetTick = now;
+            ArmDeferredBindTimer();
+        }
+    }
+
+    private void OnScrollViewerViewChangedForDeferral(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        // A thumb drag reports its view changes as intermediate until the thumb is let go; the settle waits.
+        _viewChangeIntermediate = e.IsIntermediate;
+
+        if (!e.IsIntermediate && _deferredRows.Count > 0)
+        {
             ArmDeferredBindTimer();
         }
     }
@@ -674,40 +756,75 @@ public partial class TableView : ListView
         if (_deferredBindTimer is null)
         {
             _deferredBindTimer = DispatcherQueue.CreateTimer();
-            _deferredBindTimer.Interval = TimeSpan.FromMilliseconds(DeferredBindSettleMs);
             _deferredBindTimer.IsRepeating = false;
             _deferredBindTimer.Tick += (_, _) => FlushDeferredRows();
         }
 
         _deferredBindTimer.Stop();
+        _deferredBindTimer.Interval = TimeSpan.FromMilliseconds(_settleIntervalMs);
         _deferredBindTimer.Start();
     }
 
     /// <summary>
-    /// Releases the rows held through a fast scroll, a chunk per dispatcher turn so the frames between stay
-    /// responsive, most recently prepared first — those are the rows on screen.
+    /// Ends the gesture and releases the rows the throw left held, one slice of columns per row per turn, left
+    /// to right, the rows on screen first and top to bottom, within a time budget per dispatcher turn so the
+    /// frames between stay responsive. Stops as soon as a new fast tick arrives: those rows are about to be
+    /// held again, and binding them first is what a cascade is made of.
     /// </summary>
     private void FlushDeferredRows()
     {
-        _passIsFastVerticalScroll = false; // the gesture is over; the cache rows the panel builds next are ordinary
-
-        if (_deferredRows.Count == 0)
+        if (_viewChangeIntermediate)
         {
+            ArmDeferredBindTimer(); // the thumb is still held; look again later
             return;
         }
 
-        var count = Math.Min(RealizeRowChunkSize, _deferredRows.Count);
+        _passIsFastVerticalScroll = false; // the gesture is over; the cache rows the panel builds next are ordinary
+        ContinueFlushingDeferredRows();
+    }
 
-        for (var i = 0; i < count; i++)
+    private void ContinueFlushingDeferredRows()
+    {
+        if (_deferredRows.Count == 0 || _passIsFastVerticalScroll)
         {
-            var row = _deferredRows[^1];
-            _deferredRows.RemoveAt(_deferredRows.Count - 1);
-            row.RowPresenter?.CompleteDeferredCells();
+            return; // done, or a new throw has begun and the timer will bring us back after it
+        }
+
+        // The rows on screen, top to bottom, then the rest.
+        var (visibleFirst, visibleLast) = GetVisibleRowRange();
+        _deferredRows.Sort((a, b) =>
+        {
+            var ia = a.Index;
+            var ib = b.Index;
+            var va = visibleFirst >= 0 && ia >= visibleFirst && ia <= visibleLast;
+            var vb = visibleFirst >= 0 && ib >= visibleFirst && ib <= visibleLast;
+            return va != vb ? (va ? -1 : 1) : ia.CompareTo(ib);
+        });
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        for (var i = 0; i < _deferredRows.Count;)
+        {
+            var row = _deferredRows[i];
+
+            if (row.RowPresenter is not { } presenter || presenter.ReleaseHeldColumns(FastScrollReleaseColumnsPerPhase))
+            {
+                _deferredRows.RemoveAt(i); // released in full (or has no presenter to release)
+            }
+            else
+            {
+                i++;
+            }
+
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds >= DeferredBindSettleBudgetMs)
+            {
+                break;
+            }
         }
 
         if (_deferredRows.Count > 0)
         {
-            DispatcherQueue.TryEnqueue(FlushDeferredRows);
+            DispatcherQueue.TryEnqueue(ContinueFlushingDeferredRows);
         }
     }
 
@@ -1664,6 +1781,7 @@ public partial class TableView : ListView
         _dragRectangle = GetTemplateChild("DragRectangle") as Border;
         _scrollViewer?.Loaded += OnScrollViewerLoaded;
         _scrollViewer?.ViewChanging += OnScrollViewerViewChanging;
+        _scrollViewer?.ViewChanged += OnScrollViewerViewChangedForDeferral;
 
         if (IsLoaded)
         {
