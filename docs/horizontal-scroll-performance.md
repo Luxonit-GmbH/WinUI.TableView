@@ -596,9 +596,14 @@ have been arriving at (80 ms at least, 500 at most) after the last one, releasin
 budget per dispatcher turn and stopping the moment a new fast tick arrives. A fixed gap was tried twice
 and cascaded both times, at 60 ms and at 80 ms: a fullscreen tick takes about 75 ms, the timer fired
 between two of them, released every row, and the next tick held them all again, a throw two to three
-times slower with every row released and re-held on every tick. The settle is deliberately not gated
-on the thumb still being held: a slow drag after a throw makes no fast ticks, and the rows under the
-thumb should fill in while it is dragged, not after it is let go. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
+times slower with every row released and re-held on every tick. Following only the last interval fell
+into the same thing on a remote session, where the ticks jitter: a burst of quick ones set a short wait,
+the network held the next one back past it, the rows were released and rendered, and the tick after
+that held them again, seen as a lag and cells appearing that should have stayed held. The wait now
+follows the slowest of the last four intervals, and while the scroll viewer reports the thumb as still
+held it is three times that instead of two. A longer wait, never a block: a slow drag after a throw
+makes no fast ticks, and the rows under the thumb should fill in while it is dragged, not after it is
+let go. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
 taken from the scroll viewer's `ViewChanging`, which announces the next offset before the layout that
 recycles; the `VerticalOffset` property still reads the old value during that layout.
 

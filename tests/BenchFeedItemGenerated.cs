@@ -5,12 +5,11 @@ using System.Linq;
 namespace WinUI.TableView.Tests;
 
 /// <summary>
-/// One row of a blotter-shaped feed for the benchmarks: seventy numeric columns, each its own property, mutated in
-/// place through <see cref="INotifyPropertyChanged"/> one column at a time — the shape of the sample page's
-/// <c>PerfRow</c> and of the consuming app's items. The pan benchmarks' <c>BenchItem</c> has two properties shared
-/// by all columns, so one change there re-evaluates every cell of the row at once, which is not what a feed does.
+/// <see cref="BenchFeedItem"/> with the CsWinRT-generated bindable property provider, so a {Binding} to it does not go
+/// through reflection. The feed benchmark runs both to measure what the binding engine's reflection costs per update.
 /// </summary>
-public sealed class BenchFeedItem : INotifyPropertyChanged, IBenchFeedItem
+[WinRT.GeneratedBindableCustomProperty]
+public sealed partial class BenchFeedItemGenerated : INotifyPropertyChanged, IBenchFeedItem
 {
     public const int ValueCount = 70;
 
@@ -21,7 +20,7 @@ public sealed class BenchFeedItem : INotifyPropertyChanged, IBenchFeedItem
 
     private double[]? _values; // allocated on the first tick; rows that are never on screen never pay for it
 
-    public BenchFeedItem(int index)
+    public BenchFeedItemGenerated(int index)
     {
         Index = index;
     }
@@ -113,10 +112,4 @@ public sealed class BenchFeedItem : INotifyPropertyChanged, IBenchFeedItem
     public double C67 => Get(67);
     public double C68 => Get(68);
     public double C69 => Get(69);
-}
-
-/// <summary>What the feed benchmark needs from an item, whichever binding path the item exposes.</summary>
-public interface IBenchFeedItem
-{
-    void Tick(int column, double delta);
 }

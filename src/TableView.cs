@@ -634,6 +634,9 @@ public partial class TableView : ListView
     private const double DeferredBindSettleBudgetMs = 12;  // rebinding per settle turn; the rest waits for the next turn
     private long _lastFastOffsetTick;
     private double _settleIntervalMs = DeferredBindSettleMinMs;
+    private readonly double[] _recentFastTickIntervals = new double[4]; // ring of the latest intervals; the settle follows the slowest
+    private int _recentFastTickIndex;
+    private bool _thumbHeld; // the scroll viewer's last ViewChanged was intermediate: a drag still in progress
 
     /// <summary>
     /// The platform's phased rendering, used to release held rows. Phase 0 is raised as a container is prepared;
@@ -723,18 +726,54 @@ public partial class TableView : ListView
         // the timer fires are picked up by the chunks that follow, and the flush itself clears the flag.
         if (_passIsFastVerticalScroll)
         {
-            // The settle waits twice the interval the fast ticks are arriving at. A fixed gap is what a throw whose
-            // ticks outlast it fell into, twice: at a fullscreen window a tick takes 75 ms, an 80 ms settle fired
-            // between two of them, released every row, and the next tick held them all again — a throw twice as
-            // slow and every row released and re-held on every tick.
+            // The settle waits twice the slowest of the recent intervals the fast ticks arrived at. A fixed gap is
+            // what a throw whose ticks outlast it fell into, twice: at a fullscreen window a tick takes 75 ms, an
+            // 80 ms settle fired between two of them, released every row, and the next tick held them all again —
+            // a throw twice as slow and every row released and re-held on every tick. Following only the LAST
+            // interval fell into the same thing on a remote session, where the ticks jitter: a burst of quick
+            // ones set a short wait, the network then held the next one back past it, the rows were released
+            // and rendered, and the tick after that held them again — seen as a lag and cells appearing that
+            // should have stayed held. The slowest of the last few absorbs the jitter; a drag the scroll viewer
+            // still reports as in progress waits longer again, without being blocked outright.
             var now = Environment.TickCount64;
 
             if (_lastFastOffsetTick > 0)
             {
-                _settleIntervalMs = Math.Clamp(2d * (now - _lastFastOffsetTick), DeferredBindSettleMinMs, DeferredBindSettleMaxMs);
+                _recentFastTickIntervals[_recentFastTickIndex] = now - _lastFastOffsetTick;
+                _recentFastTickIndex = (_recentFastTickIndex + 1) % _recentFastTickIntervals.Length;
             }
 
             _lastFastOffsetTick = now;
+            _settleIntervalMs = ComputeSettleInterval();
+            ArmDeferredBindTimer();
+        }
+    }
+
+    private double ComputeSettleInterval()
+    {
+        var slowest = 0d;
+
+        foreach (var interval in _recentFastTickIntervals)
+        {
+            slowest = Math.Max(slowest, interval);
+        }
+
+        return _thumbHeld
+            ? Math.Clamp(3d * slowest, DeferredBindSettleMinMs * 3, DeferredBindSettleMaxMs * 2)
+            : Math.Clamp(2d * slowest, DeferredBindSettleMinMs, DeferredBindSettleMaxMs);
+    }
+
+    private void OnScrollViewerViewChangedForDeferral(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        // Only a hint to the settle's timing: a drag still in progress waits longer before releasing, and the
+        // final change re-arms the timer so the release follows the thumb being let go. Never a block — a slow
+        // drag after a throw makes no fast ticks, and the rows under the thumb should fill in while it is dragged.
+        var wasHeld = _thumbHeld;
+        _thumbHeld = e.IsIntermediate;
+
+        if (wasHeld && !e.IsIntermediate && _deferredRows.Count > 0)
+        {
+            _settleIntervalMs = ComputeSettleInterval();
             ArmDeferredBindTimer();
         }
     }
@@ -761,8 +800,15 @@ public partial class TableView : ListView
     /// </summary>
     private void FlushDeferredRows()
     {
-        // Not gated on the thumb still being held: a slow drag after a throw makes no fast ticks, and the rows it
-        // is looking at should fill in under the thumb, not after it is let go.
+        // Not blocked on the thumb still being held (that only lengthens the wait): a slow drag after a throw
+        // makes no fast ticks, and the rows it is looking at should fill in under the thumb, not after it is let
+        // go. But if a fast tick arrived after the timer was armed, the wait has not been served yet.
+        if (Environment.TickCount64 - _lastFastOffsetTick < _settleIntervalMs)
+        {
+            ArmDeferredBindTimer();
+            return;
+        }
+
         _passIsFastVerticalScroll = false; // the gesture is over; the cache rows the panel builds next are ordinary
         ContinueFlushingDeferredRows();
     }
@@ -1765,6 +1811,7 @@ public partial class TableView : ListView
         _dragRectangle = GetTemplateChild("DragRectangle") as Border;
         _scrollViewer?.Loaded += OnScrollViewerLoaded;
         _scrollViewer?.ViewChanging += OnScrollViewerViewChanging;
+        _scrollViewer?.ViewChanged += OnScrollViewerViewChangedForDeferral;
 
         if (IsLoaded)
         {

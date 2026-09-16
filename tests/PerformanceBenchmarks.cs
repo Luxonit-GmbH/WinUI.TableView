@@ -1029,9 +1029,44 @@ public class PerformanceBenchmarks
     public async Task Grid_4K_Resize_400To2100_Rendered()
         => await ResizeAsync("Grid_4K_Resize_400To2100_Rendered");
 
-    private async Task IdleFeedAsync(string benchmarkName, double width, double height, double rowHeight)
+    /// <summary>
+    /// A text column whose TextBlock opts out of the layout work a default one does on every text change: text
+    /// scaling, trimming and wrapping are all off. What a cell costs when the platform is asked for the least.
+    /// </summary>
+    private sealed class PlainTextColumn : TableViewTextColumn
     {
-        var items = new ObservableCollection<BenchFeedItem>(Enumerable.Range(0, RowCount).Select(i => new BenchFeedItem(i)));
+        public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem)
+        {
+            var textBlock = new TextBlock
+            {
+                Margin = new Thickness(12, 0, 12, 0),
+                IsTextScaleFactorEnabled = false,
+                TextTrimming = TextTrimming.None,
+                TextWrapping = TextWrapping.NoWrap,
+            };
+            textBlock.SetBinding(TextBlock.TextProperty, Binding);
+            return textBlock;
+        }
+    }
+
+    /// <summary>The same feed against an item with a generated bindable property provider: no reflection in the binding.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_4K_IdleFeed_8000PerSecond_Rendered_GeneratedBindable()
+        => await IdleFeedAsync("Grid_4K_IdleFeed_8000PerSecond_Rendered_GeneratedBindable", FourKWidth, FourKHeight, FourKRowHeight, i => new BenchFeedItemGenerated(i));
+
+    /// <summary>The same feed with the plainest TextBlock the column can make.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_4K_IdleFeed_8000PerSecond_Rendered_PlainTextBlock()
+        => await IdleFeedAsync("Grid_4K_IdleFeed_8000PerSecond_Rendered_PlainTextBlock", FourKWidth, FourKHeight, FourKRowHeight, columnFactory: i => new PlainTextColumn());
+
+    private async Task IdleFeedAsync(string benchmarkName, double width, double height, double rowHeight, Func<int, IBenchFeedItem>? itemFactory = null, Func<int, TableViewTextColumn>? columnFactory = null)
+    {
+        itemFactory ??= i => new BenchFeedItem(i);
+        columnFactory ??= _ => new TableViewTextColumn();
+
+        var items = new ObservableCollection<IBenchFeedItem>(Enumerable.Range(0, RowCount).Select(itemFactory));
 
         var tableView = new TableView
         {
@@ -1044,11 +1079,13 @@ public class PerformanceBenchmarks
             SelectionUnit = TableViewSelectionUnit.Cell,
         };
 
-        tableView.Columns.AddRange(Enumerable.Range(0, FourKColumnCount).Select(i => new TableViewTextColumn
+        tableView.Columns.AddRange(Enumerable.Range(0, FourKColumnCount).Select(i =>
         {
-            Header = BenchFeedItem.Names[i],
-            Width = new GridLength(100, GridUnitType.Pixel),
-            Binding = new Binding { Path = new PropertyPath(BenchFeedItem.Names[i]) },
+            var column = columnFactory(i);
+            column.Header = BenchFeedItem.Names[i];
+            column.Width = new GridLength(100, GridUnitType.Pixel);
+            column.Binding = new Binding { Path = new PropertyPath(BenchFeedItem.Names[i]) };
+            return column;
         }));
         tableView.ItemsSource = items;
 
