@@ -419,6 +419,8 @@ public partial class TableViewCell : ContentControl
     /// <inheritdoc/>
     protected override Size ArrangeOverride(Size finalSize)
     {
+        TableView?.NoteCellArrange();
+
         finalSize = base.ArrangeOverride(finalSize);
 
         // During a resize-drag preview, manually re-arrange the overlapping template borders wider
@@ -1074,6 +1076,23 @@ public partial class TableViewCell : ContentControl
     /// </remarks>
     private void PinContentDataContext(bool pin)
     {
+        // The cheap checks first. This runs for every cell a band move visits and, since the recycle fix below, for
+        // every cell of every recycled row; the binding-expression probe is a crossing into the core and is only
+        // needed when a pin or unpin is actually about to happen.
+        if (pin == _dataContextPinned)
+        {
+            return; // already in the requested state
+        }
+
+        // Back in view under the SAME item it was pinned to — the common case for prefetched content on the first
+        // scroll — the local value is already the right one, and clearing it would only re-run every binding for the
+        // same result. Stay pinned. A recycle under a different item is the case that must re-inherit, and it gets
+        // here through OnRowItemChanged.
+        if (!pin && ReferenceEquals(_pinnedItem, Row?.Content))
+        {
+            return;
+        }
+
         if (Content is not FrameworkElement element || element.GetBindingExpression(DataContextProperty) is not null)
         {
             return; // no content, or the column binds DataContext itself (the ComboBox column) — a local value would break it
@@ -1081,33 +1100,45 @@ public partial class TableViewCell : ContentControl
 
         if (pin)
         {
-            if (_dataContextPinned)
-            {
-                return;
-            }
-
-            _pinnedItem = Row?.Content;
-            element.DataContext = element.DataContext;
+            // What the element is actually bound to, not the row's item: while a row is held through a fast
+            // vertical scroll its cells inherit the previous item from the held panel, and a pin recorded against
+            // the row's new item would later pass the "same item, stay pinned" check above while showing the old one.
+            var dataContext = element.DataContext;
+            _pinnedItem = dataContext;
+            element.DataContext = dataContext;
             _dataContextPinned = true;
-            return;
-        }
-
-        if (!_dataContextPinned)
-        {
-            return;
-        }
-
-        // Back in view under the SAME item it was pinned to — the common case for prefetched content on the first
-        // scroll — the local value is already the right one, and clearing it would only re-run every binding for the
-        // same result. Stay pinned. A recycle under a different item is the case that must re-inherit.
-        if (ReferenceEquals(_pinnedItem, Row?.Content))
-        {
             return;
         }
 
         element.ClearValue(DataContextProperty);
         _dataContextPinned = false;
         _pinnedItem = null;
+    }
+
+    /// <summary>
+    /// Holds this cell's content on whatever it is bound to now, so the recycle about to change the row's item
+    /// costs it nothing: the held cells of a row recycled by a fast vertical scroll. The same pin as a prefetched
+    /// cell's, undone by <see cref="OnRowItemChanged"/> when the cell is released or the row recycles again. A
+    /// column whose element binds its own DataContext cannot be held this way and simply follows the item.
+    /// </summary>
+    internal void HoldContent() => PinContentDataContext(pin: true);
+
+    /// <summary>
+    /// The row this cell belongs to now shows a different item. A cell that is in view must follow it at once.
+    /// </summary>
+    /// <remarks>
+    /// A cell's content is pinned to the item it was built under while the cell is collapsed, so a recycle costs
+    /// nothing for columns nobody can see. A prefetched cell that scrolled into view under that same item stayed
+    /// pinned, deliberately, since unpinning would re-run its bindings for the same values — and nothing on the
+    /// recycle path undid the pin, so the cell went on showing the old item's values after the row moved on. This
+    /// is the undo. Collapsed cells stay pinned: they re-inherit when they are next revealed, as before.
+    /// </remarks>
+    internal void OnRowItemChanged()
+    {
+        if (_isInViewport && _dataContextPinned)
+        {
+            PinContentDataContext(pin: false);
+        }
     }
 
     /// <summary>
@@ -1118,7 +1149,7 @@ public partial class TableViewCell : ContentControl
         if (_v_gridLine is not null && TableView is not null)
         {
             _v_gridLine.Fill = TableView.GridLinesVisibility is TableViewGridLinesVisibility.All or TableViewGridLinesVisibility.Vertical
-                               ? TableView.VerticalGridLinesStroke : new SolidColorBrush(Colors.Transparent);
+                               ? TableView.VerticalGridLinesStroke : TableView.TransparentBrush;
             _v_gridLine.Width = TableView.VerticalGridLinesStrokeThickness;
             _v_gridLine.Visibility = TableView.HeaderGridLinesVisibility is TableViewGridLinesVisibility.All or TableViewGridLinesVisibility.Vertical
                                      || TableView.GridLinesVisibility is TableViewGridLinesVisibility.All or TableViewGridLinesVisibility.Vertical

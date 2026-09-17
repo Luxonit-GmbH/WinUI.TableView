@@ -344,6 +344,7 @@ We have no equivalent, and it is a real gap for filtered trees.
 
 | 2026-08-10 | **The fork is diverged from upstream, deliberately.** Upstream landed its own row grouping (PR #425): it is the CollectionView's grouping (`GroupDescriptions => _collectionView.GroupDescriptions`, `RefreshGrouping() => _collectionView.RefreshGrouping()`), so it does nothing on the direct-binding path that the 100M-row target requires (`UseCollectionView=false`); it is Windows-only; and it cannot host trees inside groups. It is excluded permanently. Ours stays. |
 | 2026-08-10 | No further full merges of `upstream/main`. Upstream is read for ideas and mined for fixes by cherry-pick; features are re-implemented against our constraints rather than lifted. |
+| 2026-09-17 | **Second upstream pass**, 31 commits on `upstream/main` past the divergence point (`baf4409`). Taken: `6bd04a0` — the filter flyout's `Items` typed `IList<T>` is projected as `IVector<T>` under Native AOT and the XAML parser cannot add derived menu items to it (upstream #422); the blotter publishes AOT. **Rejected after an A/B: the pointer refactor `bd94046` + `708de3a`.** Applied by hand it kills the test host with a stowed exception in `Microsoft.UI.Xaml.dll` — no managed exception reaches `Application.UnhandledException` — in `DragSelectionRectangleTests`, which never sends pointer input: 0 aborts in 10 runs without it, 2 in 10 with both picks, 2 in 14 with the pointer refactor alone. Mechanism not found; nothing in it executes without a pointer event, so the overrides themselves change what XAML does natively. Not to be retried as a pick. Left: upstream grouping and `753331b` (standing rejects), `8e39863` (needs the grouping-era sort refactor; our sort chain already drops the column's previous entry), `be2aa5d` (its non-grouping hunks — the yield before scrolling to a new current cell, the `Items.IndexOf` lookup — are already here or belong to the CollectionView grouping), `dbc6033` (sample pages for row headers, row details, compact sizing and headers visibility: every property exists here, sample-only, conflicts in the nav switch; take on demand), `750ef8c` (Android workload for the Uno sample CI job; the fork's samples workflow does not run). Fixed here the same day, not upstream: the flyout's value list threw "At least one object must implement IComparable" for any column of records or custom structs and, from an `async void` initialiser, took the process down — see `FilterValueComparer`. |
 
 One-group-per-row still stands as a constraint: the adapter rejects duplicate instances by design, so an item
 cannot appear under two groups at once.
@@ -369,11 +370,13 @@ would conflict with ours on the same lines. So the relationship is now:
     computed on demand at its readers here.
   - The column-header sort refactor inside the grouping PR (`b7ce0aa`, `8e39863`): grouping-dependent, does not
     apply without it. Our Shift+click multi-sort stays.
-- **Worth doing by hand, not by pick:** upstream's pointer refactor (`bd94046`, `708de3a`) replaces our
-  `AddHandler(PointerPressedEvent, …, handledEventsToo: true)` — which runs on every press, including ones a
-  child already handled — with per-control `OnPointerPressed` overrides. Cleaner and slightly cheaper, but it is
-  the exact area of the "context menu fires before selection" bug; do it with the context-selection tests
-  watching.
+- **Rejected, A/B-tested (2026-09-17):** upstream's pointer refactor (`bd94046`, `708de3a`), which replaces our
+  `AddHandler(PointerPressedEvent, …, handledEventsToo: true)` with per-control `OnPointerPressed` /
+  `OnPointerReleased` overrides. Cleaner on paper, but with it the test host dies natively about one run in five in
+  the drag-selection tests, with no pointer input involved and no managed exception to catch; without it, never.
+  Whatever the overrides change in XAML's own pointer plumbing is not worth the cleanup. Our handler stays. If the
+  idea is revisited, it is a from-scratch design with the crash reproduced first (`DragSelectionRectangleTests`,
+  fourteen runs), not a pick.
 
 ## Appendix: right-click selection
 

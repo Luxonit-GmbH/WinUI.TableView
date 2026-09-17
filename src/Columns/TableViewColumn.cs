@@ -585,6 +585,14 @@ public abstract partial class TableViewColumn : DependencyObject
     }
 
     /// <summary>
+    /// Gets or sets whether this column's cells stay bound and visible on the rows a fast vertical scroll recycles,
+    /// while the other cells are held until the scroll settles. For the columns that identify a row — a name, an
+    /// identifier — so the user can tell where a throw has taken them. Frozen columns always stay live; see also
+    /// <see cref="TableView.FastScrollLiveColumnCount"/>.
+    /// </summary>
+    public bool KeepLiveDuringFastScroll { get; set; }
+
+    /// <summary>
     /// Gets or sets the optional data binding used to perform operations on cell content, for example sorting, filtering and exporting.
     /// </summary>
     public virtual Binding? OperationContentBinding { get; set; }

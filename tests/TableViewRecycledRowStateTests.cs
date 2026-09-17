@@ -1,12 +1,15 @@
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
+using WinUI.TableView.Extensions;
 
 namespace WinUI.TableView.Tests;
 
@@ -72,6 +75,149 @@ public class TableViewRecycledRowStateTests
         Assert.IsTrue(checkedAny, "no realized rows to check");
 
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// A vertical jump of more than a viewport is a throw: the rows it recycles are held blank — their cell panels
+    /// at zero opacity, their cells still bound to the item they showed — and bound to their new item once the
+    /// scroll settles. A jump of less than a viewport is an ordinary scroll and binds at once.
+    /// </summary>
+    [UITestMethod]
+    public async Task ThrowingTheScrollbar_HoldsRecycledRowsBlank_ThenBindsThemWhenItSettles()
+    {
+        var tableView = await LoadAsync();
+        var scrollViewer = tableView.FindDescendant<ScrollViewer>(x => x.Name == "ScrollViewer")!;
+        var deferredBefore = tableView.RowsDeferred;
+
+        // Ten viewports down. The new offset lands on the next frame, and the recycles with it, so wait for them.
+        scrollViewer.ChangeView(null, 4000d, null, disableAnimation: true);
+
+        for (var waited = 0; tableView.RowsDeferred == deferredBefore && waited < 300; waited += 5)
+        {
+            await Task.Delay(5);
+            tableView.UpdateLayout();
+        }
+
+        Assert.IsTrue(tableView.RowsDeferred > deferredBefore, "a jump of ten viewports must defer the rows it recycles");
+
+        // While held: the first visible column stays live and shows the row's new item, so the user can tell
+        // where the throw has taken them; the other cells are hidden. Bindings settle on the next tick, and the
+        // platform's phased rendering releases held rows once the gesture has been quiet for 50 ms, so the held
+        // state is checked a tick later, on whatever rows are still held then.
+        await Task.Delay(20);
+        tableView.UpdateLayout();
+
+        foreach (var row in HeldRowsWithItems(tableView))
+        {
+            var live = row.Cells[0];
+            var hidden = row.Cells[1];
+            Assert.AreEqual(1d, live.Opacity, $"row {row.Index}: the live column must stay visible while held");
+            Assert.AreEqual(ItemOf(row).Name, TextOf(live), $"row {row.Index}: the live column must show the new item while held");
+            Assert.AreEqual(0d, hidden.Opacity, $"row {row.Index}: a held cell must be hidden");
+        }
+
+        await WaitForReleaseAsync(tableView);
+
+        foreach (var row in RowsWithItems(tableView))
+        {
+            Assert.IsFalse(row.RowPresenter?.AreCellsDeferred is true, $"row {row.Index} is still held after the scroll settled");
+
+            foreach (var cell in row.Cells.Where(c => c.Visibility == Visibility.Visible))
+            {
+                Assert.AreEqual(1d, cell.Opacity, $"row {row.Index} settled but a cell is still hidden");
+                Assert.AreEqual(ItemOf(row).Name, TextOf(cell), $"row {row.Index} shows another item's value after the throw settled");
+            }
+        }
+
+        // Less than a viewport: an ordinary scroll, bound at once.
+        deferredBefore = tableView.RowsDeferred;
+        scrollViewer.ChangeView(null, 4200d, null, disableAnimation: true);
+        await Task.Delay(100);
+        tableView.UpdateLayout();
+
+        Assert.AreEqual(deferredBefore, tableView.RowsDeferred, "a scroll of less than a viewport must not defer anything");
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// A column flagged <see cref="TableViewColumn.KeepLiveDuringFastScroll"/> stays bound and visible on held
+    /// rows wherever it sits, so an identifier column can be kept in view through a throw.
+    /// </summary>
+    [UITestMethod]
+    public async Task ThrowingTheScrollbar_KeepsAFlaggedColumnLive()
+    {
+        var tableView = await LoadAsync();
+        tableView.FastScrollLiveColumnCount = 0;
+        tableView.Columns[3].KeepLiveDuringFastScroll = true;
+        var scrollViewer = tableView.FindDescendant<ScrollViewer>(x => x.Name == "ScrollViewer")!;
+        var deferredBefore = tableView.RowsDeferred;
+
+        scrollViewer.ChangeView(null, 4000d, null, disableAnimation: true);
+
+        for (var waited = 0; tableView.RowsDeferred == deferredBefore && waited < 300; waited += 5)
+        {
+            await Task.Delay(5);
+            tableView.UpdateLayout();
+        }
+
+        Assert.IsTrue(tableView.RowsDeferred > deferredBefore, "the jump must defer the rows it recycles");
+
+        await Task.Delay(20);
+        tableView.UpdateLayout();
+
+        foreach (var row in HeldRowsWithItems(tableView))
+        {
+            Assert.AreEqual(1d, row.Cells[3].Opacity, $"row {row.Index}: the flagged column must stay visible while held");
+            Assert.AreEqual(ItemOf(row).Name, TextOf(row.Cells[3]), $"row {row.Index}: the flagged column must show the new item while held");
+            Assert.AreEqual(0d, row.Cells[0].Opacity, $"row {row.Index}: with no count, the first column is held like the rest");
+        }
+
+        await WaitForReleaseAsync(tableView);
+
+        foreach (var row in RowsWithItems(tableView))
+        {
+            Assert.IsFalse(row.RowPresenter?.AreCellsDeferred is true, $"row {row.Index} is still held after the scroll settled");
+            Assert.AreEqual(ItemOf(row).Name, TextOf(row.Cells[3]));
+        }
+
+        await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
+    }
+
+    /// <summary>
+    /// The rows that are bound to an item. Under load a container the panel has just cleared can still be enumerated
+    /// with no content; it shows nothing and has nothing to be compared against, so it is not part of the check.
+    /// </summary>
+    private static IEnumerable<TableViewRow> RowsWithItems(TableView tableView)
+        => tableView.Rows.Where(r => r.Content is Item);
+
+    private static IEnumerable<TableViewRow> HeldRowsWithItems(TableView tableView)
+        => RowsWithItems(tableView).Where(r => r.RowPresenter?.AreCellsDeferred is true);
+
+    private static Item ItemOf(TableViewRow row) => (Item)row.Content;
+
+    private static string? TextOf(TableViewCell cell)
+    {
+        var content = cell.Content as FrameworkElement;
+        return (content as TextBlock ?? content?.FindDescendant<TextBlock>())?.Text;
+    }
+
+    /// <summary>
+    /// Waits for the settle to release every held row. How long it takes depends on the settle's wait, which
+    /// follows the gesture, and on the host's load, so it is polled rather than assumed.
+    /// </summary>
+    private static async Task WaitForReleaseAsync(TableView tableView)
+    {
+        for (var waited = 0; waited < 3000; waited += 50)
+        {
+            await Task.Delay(50);
+            tableView.UpdateLayout();
+
+            if (!tableView.Rows.Any(r => r.RowPresenter?.AreCellsDeferred is true))
+            {
+                return;
+            }
+        }
     }
 
     private static async Task ScrollToAsync(TableView tableView, int index)

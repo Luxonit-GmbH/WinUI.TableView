@@ -58,7 +58,10 @@ public class ColumnFilterHandler : IColumnFilterHandler
         var nullCount = 0;
         var isNullItemSelected = !column.IsFiltered || !string.IsNullOrEmpty(searchText) ||
                                  (column.IsFiltered && SelectedValues[column].Contains(null));
-        var filterValues = new SortedDictionary<object, int>();
+        // Distinct by equality, the same notion the filter itself matches selected values with; the order is a
+        // separate step, so a value type without IComparable cannot throw out of the flyout (see
+        // FilterValueComparer).
+        var filterValues = new Dictionary<object, int>();
 
         foreach (var item in collectionView)
         {
@@ -71,17 +74,20 @@ public class ColumnFilterHandler : IColumnFilterHandler
 
         IEnumerable<TableViewFilterItem> nullFilterItem = nullCount > 0 ? [new TableViewFilterItem(isNullItemSelected, null, nullCount, true)] : [];
 
-        return [.. nullFilterItem,.. filterValues.Select(x =>
-        {
-            var isSelected = !column.IsFiltered || !string.IsNullOrEmpty(searchText) ||
-                             (column.IsFiltered && SelectedValues[column].Contains(x.Key));
-            return new TableViewFilterItem(isSelected, x.Key, x.Value, true);
-        }) .OrderByDescending(x=>x.Count)];
+        return [.. nullFilterItem,.. filterValues
+            .OrderBy(x => x.Key, FilterValueComparer.Instance)
+            .Select(x =>
+            {
+                var isSelected = !column.IsFiltered || !string.IsNullOrEmpty(searchText) ||
+                                 (column.IsFiltered && SelectedValues[column].Contains(x.Key));
+                return new TableViewFilterItem(isSelected, x.Key, x.Value, true);
+            })
+            .OrderByDescending(x => x.Count)];
     }
 
     private IEnumerable<TableViewFilterItem> GetFilterItems(TableViewColumn column, string? searchText, CollectionView collectionView)
     {
-        var filterValues = new SortedSet<object?>();
+        var filterValues = new HashSet<object?>();
 
         foreach (var item in collectionView)
         {
@@ -90,12 +96,14 @@ public class ColumnFilterHandler : IColumnFilterHandler
             filterValues.Add(value);
         }
 
-        return [.. filterValues.Select(x =>
-        {
-            var isSelected = !column.IsFiltered || !string.IsNullOrEmpty(searchText) ||
-                             (column.IsFiltered && SelectedValues[column].Contains(x));
-            return new TableViewFilterItem(isSelected, x, 0);
-        })];
+        return [.. filterValues
+            .OrderBy(x => x, FilterValueComparer.Instance)
+            .Select(x =>
+            {
+                var isSelected = !column.IsFiltered || !string.IsNullOrEmpty(searchText) ||
+                                 (column.IsFiltered && SelectedValues[column].Contains(x));
+                return new TableViewFilterItem(isSelected, x, 0);
+            })];
     }
 
     private static bool IsBlank([NotNullWhen(false)] object? value)

@@ -535,3 +535,145 @@ The half-pixel vibration is gone by construction. The cells do not re-measure, b
 horizontal sweep pays with virtualization on is the layout chain of the dozen rows a band change
 dirties, about one real cell measure per row, and the settle passes; that is the 1.5x over
 virtualization off, and the remaining lever is fewer dirtied rows per tick, not cheaper measures.
+
+---
+
+# Round five: the fullscreen window (2026-09-16)
+
+Small windows were acceptable; near fullscreen on a 4K monitor everything lagged — horizontal drags,
+vertical throws, idle with the feed on, and resizing. The window multiplies every per-row and per-column
+constant, and the benchmark grid of the previous rounds (1200x800, 25 rows and 12 columns on screen)
+had hidden that. This round measured at the size that hurts before touching anything.
+
+## The shape, measured
+
+Four benchmarks on a 3800x2100 grid with 70 columns of 100px at a 28px row height, the shape of a
+4K monitor at 100% scaling: about 75 rows and 38 columns on screen, 141 realized rows.
+
+| 3800x2100, before this round | result |
+|---|---|
+| horizontal scrollbar sweep, 100 ticks | 3123 ms; 97 ms per band move |
+| vertical scrollbar throw, 100 ticks | 58,444 ms; 584 ms per tick, 73 rows recycled per tick |
+| idle feed, 8000 mutations a second | 17.5 ms of UI thread per 16 ms batch |
+| resize from 400 to 2100 tall | 11 ms once containers exist |
+
+Two profiles then said where the time was, and the second one overturned an assumption.
+
+**The throw is the platform drawing text.** 86% of the throw's UI thread time is native with no library
+frame on the stack, and only 8% is inside layout at all. The cells' managed measure never runs during a
+throw. A recycled row rebinds every in-band cell, 46 of them at this width, and each rebind is a new
+text layout and a redraw: some 3,400 a frame, half a second of platform work per tick, none of it for a
+row anyone will see settled. No measure optimisation touches that; only not doing it does.
+
+**The sweep is dirtied rows, but not for the reason the code said.** A band move dirties every visible
+row, and at 4K that is 76 rows at about a millisecond each of native layout and render. The reveal
+itself moved the band once per column of travel. The settle pass, though, "chased" the viewport: on
+completing it started another full walk of all 141 rows whenever the viewport had moved on, and with
+31 ms ticks the 50 ms settle timer fired mid-drag, so a single sweep ran eight or nine passes of
+eighteen chunks. Counters added this round showed the pass, not the reveal, was most of the dirtying.
+
+## What changed
+
+**Recycled rows are held blank through a throw.** A layout pass whose vertical offset moved by more
+than a viewport marks each row it recycles as deferred: every held cell's content is pinned to what it
+is bound to, the same pin a prefetched cell carries, and goes to zero opacity, so the row shows its
+background, its grid lines and its live columns and nothing else. Live columns are the frozen ones
+(their panel is not touched at all), any column flagged `KeepLiveDuringFastScroll`, and the leftmost
+`FastScrollLiveColumnCount` visible scrollable columns (default 1); they are not touched either, so
+they follow the new item through whatever binding their column uses, one cell each per recycled row,
+and the user can tell where a throw has taken them. The hold was first one local DataContext on the
+cells panel, and a column whose element binds its own DataContext could not be pinned around it: it
+inherited what the panel held, null for a container out of the recycle pool, and rendered that.
+
+The release is left to right, a slice of eight columns per row per turn from the left edge of the
+viewport, the rows on screen first and top to bottom, so a row fills in the way it is read: one loop,
+run a turn at a time within a 12 ms budget, stopping the moment a new fast tick arrives. Three things
+start it. The platform's phased rendering: phase 0 of `ContainerContentChanging` asks for a later phase,
+and when the callback comes after the gesture has gone quiet it queues a turn of the loop, so a single
+jump fills in as soon as the panel has budget. The phase does not release anything itself: left to it,
+the platform ran a container's phases back to back within one tick, so a row appeared whole and the
+next row after it, which is not a cascade. A callback that lands while the gesture is still hot drops
+out rather than asking again, because every container kept in a pending-phase state cost the platform
+17 ms a frame at 46 rows. The settle timer, which fires twice the slowest recent interval between fast
+ticks (80 ms at least, 500 at most) after the last one. And the thumb being let go, which re-arms that
+timer with the short wait, so the fill follows within about a tenth of a second. Not at once: the
+scroll viewer reports an intermediate change followed by a final one for programmatic scrolls as well,
+and treating each final one as "let go" started the fill on every tick of a throw, which the next tick
+undid. A fixed gap was tried twice
+and cascaded both times, at 60 ms and at 80 ms: a fullscreen tick takes about 75 ms, the timer fired
+between two of them, released every row, and the next tick held them all again, a throw two to three
+times slower with every row released and re-held on every tick. Following only the last interval fell
+into the same thing on a remote session, where the ticks jitter: a burst of quick ones set a short wait,
+the network held the next one back past it, the rows were released and rendered, and the tick after
+that held them again, seen as a lag and cells appearing that should have stayed held. The wait now
+follows the slowest of the last four intervals, and while the scroll viewer reports the thumb as still
+held it is four times that and at least 400 ms, because a reversal, the last fast tick one way and the
+first the other with the turnaround between, must not read as the gesture ending: rows released in
+that gap were rendered and held again at once, which was the lag felt in the middle of a fast up and
+down. A longer wait, never a block: a slow drag after a throw makes no fast ticks, and the rows under
+the thumb should fill in while it is dragged, not after it is let go. A row recycled again by an ordinary scroll is released at once against its new item. The offset is
+taken from the scroll viewer's `ViewChanging`, which announces the next offset before the layout that
+recycles; the `VerticalOffset` property still reads the old value during that layout.
+
+| vertical scrollbar throw, ms per 100 ticks | before | after |
+|---|---|---|
+| 1200x800 | 10,622 | 1,596 |
+| 3800x2100 | 58,444 | 5,501 |
+
+**A correctness bug found on the way.** A cell prefetched under one item keeps its content pinned to
+that item, and revealing it under the same item left the pin in place on purpose. Nothing on the
+recycle path undid it, so a column that was prefetched, then revealed, then recycled onto another item
+went on showing the first item's value. A test now pins the contract; the row's recycle releases any
+pinned cell that is in view, unless the whole row is being held through a throw, in which case the
+settle does it. And a pin now records the item the element is actually bound to rather than the row's:
+while a row is held, its cells inherit the previous item from the held panel, and a pin recorded against
+the row's new item would have passed the "same item, stay pinned" check later while showing the old one.
+
+**The settle pass no longer chases the viewport, and waits 100 ms instead of 50.** Every tick re-arms
+the timer; the visible rows are the reveal's job; the cached rows and the releases can wait. Settle
+passes per fullscreen sweep went from eight or nine to one.
+
+**Band moves are rarer and spread over ticks.** The band is recomputed on every tick but moved only
+once the viewport comes within two columns of the edge of the band the rows were last revealed to,
+so a move happens once per two columns of travel rather than once per column. And a move no longer
+reveals every visible row in one tick: the rows are revealed a slice per tick, sized from the drag's
+speed so the move finishes before the old band's edge is reached, with any row whose band no longer
+covers the viewport revealed at once regardless. Revealing all rows in one tick had been a burst of
+15 ms at the small window and 40 to 60 ms at 4K, on top of the pan, every few columns.
+
+The small window's sweep is the one number that went up, and it is a trade the frame cadence made: the
+benchmark host renders at 120Hz, one-column moves of two milliseconds never pushed a frame, and a slice
+of six rows is a nine millisecond tick that pushes one. At 60Hz, which is what the 4K monitor this
+round is about runs at, both fit inside a frame. Widening the band to spread a move thinner would put
+the cost back onto every slow vertical scroll, so it was not done.
+
+| horizontal scrollbar sweep, ms per 100 ticks (worst synchronous tick) | before | after |
+|---|---|---|
+| 1200x800 | 930 (~2) | 1,208 (9 to 12) |
+| 3800x2100 | 3,123 (~95) | 1,943 to 2,000 (12 to 19) |
+
+**One transparent brush.** Every grid line configured away got a fresh `SolidColorBrush` per element
+per template application, a composition object each; the fullscreen sweep's warm-up applied 6,700 cell
+templates and the profile put a third of their cost there. One brush per grid now.
+
+## What did not change, and why
+
+**Idle with the feed on is the platform, per mutation.** At 4K the feed's 128 mutations per 16 ms cost
+16 ms of UI thread; at the small window, 7.5 ms. The counters show a mutation dirties only its cell,
+never the row chain, so the library's layout is not in the way; the cost is the binding, the text
+layout and the redraw of one cell, about 125 µs, and two thirds of the mutations land on measured cells
+at 4K against a third at the small window. A grid that is fed 8000 updates a second onto a 4K window has
+no frame budget left for anything else; the number to change is the rate, which the blotter's channel
+already gates by visible rows.
+
+**Resize is fine once containers exist.** Growing from 400 to 2100 tall costs 11 ms after the first
+time; the first time builds 74 rows of 70 cells, and that is the price of the rows.
+
+## The counters
+
+The sweep and throw benchmarks now print, per iteration: band moves and guard skips, settle passes
+and chunks, cell measures and arranges, cells panel measures and arranges (and how many arrived with a
+changed height), band cell visits, templates applied, and rows deferred. They only show under
+`vstest.console.exe ... /logger:"console;verbosity=detailed"`; the default console logger drops the
+output of passing tests. They are what made this round's diagnoses possible, and what will show the
+next regression before a stopwatch does.

@@ -835,12 +835,12 @@ public class PerformanceBenchmarks
     /// iterations are therefore the steady state, i.e. what a user feels on the second and every later drag. Pair
     /// it with the NoColumnVirtualization twin: the gap between them is the price of the feature.</para>
     /// </remarks>
-    private async Task ScrollbarSweepAsync(int columnCount, bool columnVirtualization, string benchmarkName)
+    private async Task ScrollbarSweepAsync(int columnCount, bool columnVirtualization, string benchmarkName, double width = 1200, double height = 800, double rowHeight = 32)
     {
-        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization, width: width, height: height, rowHeight: rowHeight);
 
         // The full scrollable width, swept in PanTicks steps.
-        var extent = Math.Max(0d, (columnCount * 100d) - 1200d);
+        var extent = Math.Max(0d, (columnCount * 100d) - width);
         var step = extent / PanTicks;
 
         // What each sweep did, not only how long it took. The measure counters say whether the cells that did not
@@ -853,20 +853,37 @@ public class PerformanceBenchmarks
             async () =>
             {
                 var cellMeasures = tableView.CellMeasures;
+                var cellArranges = tableView.CellArranges;
                 var templates = tableView.CellTemplateApplications;
                 var prefetched = tableView.CellTemplatesPrefetched;
                 var panelMeasures = tableView.CellsPanelMeasures;
+                var panelArranges = tableView.CellsPanelArranges;
+                var heightChanges = tableView.CellsPanelArrangeHeightChanges;
                 var visits = tableView.ColumnBandCellVisits;
+                var moves = tableView.BandMoves;
+                var skips = tableView.BandMoveSkips;
+                var passes = tableView.SettlePasses;
+                var chunks = tableView.SettleChunks;
+
+                // The synchronous part of each tick — the offset write with the reveal it triggers, and layout —
+                // is what has to fit in a frame; the worst one is the hitch a band move costs.
+                var tick = new Stopwatch();
+                var worstTick = 0d;
+                var synchronous = 0d;
 
                 for (var i = 1; i <= PanTicks; i++)
                 {
+                    tick.Restart();
                     tableView.SetValue(TableView.HorizontalOffsetProperty, i * step);
                     tableView.UpdateLayout();
+                    tick.Stop();
+                    synchronous += tick.Elapsed.TotalMilliseconds;
+                    worstTick = Math.Max(worstTick, tick.Elapsed.TotalMilliseconds);
                     await WaitForRenderAsync();
                 }
 
                 sweeps.Add(string.Create(CultureInfo.InvariantCulture,
-                    $"cell measures {tableView.CellMeasures - cellMeasures}, band cell visits {tableView.ColumnBandCellVisits - visits}, cells panel measures {tableView.CellsPanelMeasures - panelMeasures}, cell templates applied {tableView.CellTemplateApplications - templates} of which by prefetch {tableView.CellTemplatesPrefetched - prefetched}"));
+                    $"synchronous {synchronous:F0} ms of which the worst tick {worstTick:F1} ms, band moves {tableView.BandMoves - moves}, skips {tableView.BandMoveSkips - skips}, settle passes {tableView.SettlePasses - passes}, settle chunks {tableView.SettleChunks - chunks}, cell measures {tableView.CellMeasures - cellMeasures}, cell arranges {tableView.CellArranges - cellArranges}, band cell visits {tableView.ColumnBandCellVisits - visits}, cells panel measures {tableView.CellsPanelMeasures - panelMeasures}, cells panel arranges {tableView.CellsPanelArranges - panelArranges} of which with a changed height {tableView.CellsPanelArrangeHeightChanges - heightChanges}, cell templates applied {tableView.CellTemplateApplications - templates} of which by prefetch {tableView.CellTemplatesPrefetched - prefetched}"));
             },
             warmup: 1,
             iterations: 3,
@@ -876,7 +893,7 @@ public class PerformanceBenchmarks
                 tableView.UpdateLayout();
             });
 
-        TestContext.WriteLine($"{benchmarkName}: {columnCount} columns, step {step:N0}px, realized rows {tableView.Rows.Count}");
+        TestContext.WriteLine($"{benchmarkName}: {columnCount} columns, {width}x{height} at row height {rowHeight}, step {step:N0}px, realized rows {tableView.Rows.Count}");
 
         for (var i = 0; i < sweeps.Count; i++)
         {
@@ -891,23 +908,37 @@ public class PerformanceBenchmarks
     /// The vertical equivalent: throwing the scrollbar, where every realized container is recycled onto a distant
     /// item on every frame. The ordinary vertical pan moves a row or two a tick and never exercises that.
     /// </summary>
-    private async Task ScrollbarThrowAsync(int columnCount, bool columnVirtualization, string benchmarkName)
+    private async Task ScrollbarThrowAsync(int columnCount, bool columnVirtualization, string benchmarkName, double width = 1200, double height = 800, double rowHeight = 32, int liveColumns = 1, bool scrollingPlaceholders = true)
     {
-        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization);
+        var tableView = await LoadPanGridAsync(columnCount, columnVirtualization, width: width, height: height, rowHeight: rowHeight, liveColumns: liveColumns, scrollingPlaceholders: scrollingPlaceholders);
         var scrollViewer = GetScrollViewer(tableView);
 
-        // Far enough each tick that nothing on screen survives: ~100 rows at a row height of 32.
-        const double ThrowStep = 3200d;
+        // The whole extent in PanTicks steps, so each tick jumps a hundred rows and nothing on screen survives it
+        // (3200px at the default shape: 10,000 rows of 32px over 100 ticks).
+        var throwStep = RowCount * rowHeight / PanTicks;
+
+        // What each throw did, per recycled container: how many cells were measured and how many rows' cell panels
+        // ran, so a change to the recycle path can be read as a count and not only as milliseconds.
+        var throws = new List<string>();
 
         var result = await MeasureAsync(
             async () =>
             {
+                var cellMeasures = tableView.CellMeasures;
+                var panelMeasures = tableView.CellsPanelMeasures;
+                var templates = tableView.CellTemplateApplications;
+                var visits = tableView.ColumnBandCellVisits;
+                var deferred = tableView.RowsDeferred;
+
                 for (var i = 1; i <= PanTicks; i++)
                 {
-                    scrollViewer.ChangeView(null, i * ThrowStep, null, true);
+                    scrollViewer.ChangeView(null, i * throwStep, null, true);
                     tableView.UpdateLayout();
                     await WaitForRenderAsync();
                 }
+
+                throws.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"cell measures {tableView.CellMeasures - cellMeasures}, cells panel measures {tableView.CellsPanelMeasures - panelMeasures}, cell templates applied {tableView.CellTemplateApplications - templates}, band cell visits {tableView.ColumnBandCellVisits - visits}, rows deferred {tableView.RowsDeferred - deferred}"));
             },
             warmup: 1,
             iterations: 3,
@@ -916,6 +947,241 @@ public class PerformanceBenchmarks
                 scrollViewer.ChangeView(null, 0d, null, true);
                 tableView.UpdateLayout();
             });
+
+        TestContext.WriteLine($"{benchmarkName}: {columnCount} columns, {width}x{height} at row height {rowHeight}, throw step {throwStep:N0}px, realized rows {tableView.Rows.Count}");
+
+        for (var i = 0; i < throws.Count; i++)
+        {
+            TestContext.WriteLine($"{benchmarkName} throw {i}{(i == 0 ? " (warm-up)" : string.Empty)}: {throws[i]}");
+        }
+
+        Report(result, benchmarkName);
+        await UnloadAsync(tableView);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // The fullscreen shape — "small window is okay, near fullscreen on 4K it lags"
+    //
+    // Every per-row and per-column constant the grid has is multiplied by the window: a 3840x2160 monitor at a
+    // 28px row height shows about 75 rows and 38 columns of 100px where the 1200x800 grid above shows 25 and 12.
+    // These four run the same gestures on that shape, plus the two that only show up at that size: the idle feed,
+    // where most mutations now land on cells that are measured rather than released, and the resize itself. The
+    // test host window is smaller than the grid; layout is unaffected by that and render is understated.
+    // ---------------------------------------------------------------------------------------------------------
+
+    private const double FourKWidth = 3800;
+    private const double FourKHeight = 2100;
+    private const double FourKRowHeight = 28;
+    private const int FourKColumnCount = 70;
+
+    /// <summary>The sample feed's cadence: a batch every 16ms, 128 mutations each, 8000 a second.</summary>
+    private const int FeedBatchIntervalMs = 16;
+    private const int FeedBatchSize = 128;
+    private const int FeedBatches = 187; // about three seconds
+
+    /// <summary>The throw with no live column: what the leftmost column's per-tick rebind costs.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalScrollbarThrow_80Cols_Rendered_NoLiveColumns()
+        => await ScrollbarThrowAsync(WideColumnCount, columnVirtualization: true, "Grid_VerticalScrollbarThrow_80Cols_Rendered_NoLiveColumns", liveColumns: 0);
+
+    /// <summary>The throw without the platform's scrolling placeholders: what they cost while phases are pending.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_VerticalScrollbarThrow_80Cols_Rendered_NoPlaceholders()
+        => await ScrollbarThrowAsync(WideColumnCount, columnVirtualization: true, "Grid_VerticalScrollbarThrow_80Cols_Rendered_NoPlaceholders", scrollingPlaceholders: false);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_4K_HorizontalScrollbarSweep_70Cols_Rendered()
+        => await ScrollbarSweepAsync(FourKColumnCount, columnVirtualization: true, "Grid_4K_HorizontalScrollbarSweep_70Cols_Rendered", FourKWidth, FourKHeight, FourKRowHeight);
+
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_4K_VerticalScrollbarThrow_70Cols_Rendered()
+        => await ScrollbarThrowAsync(FourKColumnCount, columnVirtualization: true, "Grid_4K_VerticalScrollbarThrow_70Cols_Rendered", FourKWidth, FourKHeight, FourKRowHeight);
+
+    /// <summary>
+    /// Idle with the feed on: the sample's cadence over the rows on screen and a random column each, one layout and
+    /// one frame per batch. Two numbers: how long the batches took against the three seconds they represent (the
+    /// UI thread keeping up or not), and the synchronous part alone — mutate plus layout — per batch, which is what
+    /// the frame budget actually has to fit. The decisive counter is cells panel measures: near zero means a text
+    /// change dirties its cell alone; near the number of rows touched means it dirties the whole row chain.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_4K_IdleFeed_8000PerSecond_Rendered()
+        => await IdleFeedAsync("Grid_4K_IdleFeed_8000PerSecond_Rendered", FourKWidth, FourKHeight, FourKRowHeight);
+
+    /// <summary>The same feed on the small shape, for the ratio.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_IdleFeed_8000PerSecond_Rendered()
+        => await IdleFeedAsync("Grid_IdleFeed_8000PerSecond_Rendered", 1200, 800, 32);
+
+    /// <summary>
+    /// Growing the window: the height goes from a small window to the 4K shape and the grid has to realize and
+    /// build the rows that just came into view. Timed to the first rendered frame, which is what the user waits
+    /// for; the settle and prefetch that follow are asynchronous and reported separately by the counters.
+    /// </summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_4K_Resize_400To2100_Rendered()
+        => await ResizeAsync("Grid_4K_Resize_400To2100_Rendered");
+
+    /// <summary>
+    /// A text column whose TextBlock opts out of the layout work a default one does on every text change: text
+    /// scaling, trimming and wrapping are all off. What a cell costs when the platform is asked for the least.
+    /// </summary>
+    private sealed class PlainTextColumn : TableViewTextColumn
+    {
+        public override FrameworkElement GenerateElement(TableViewCell cell, object? dataItem)
+        {
+            var textBlock = new TextBlock
+            {
+                Margin = new Thickness(12, 0, 12, 0),
+                IsTextScaleFactorEnabled = false,
+                TextTrimming = TextTrimming.None,
+                TextWrapping = TextWrapping.NoWrap,
+            };
+            textBlock.SetBinding(TextBlock.TextProperty, Binding);
+            return textBlock;
+        }
+    }
+
+    /// <summary>The same feed against an item with a generated bindable property provider: no reflection in the binding.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_4K_IdleFeed_8000PerSecond_Rendered_GeneratedBindable()
+        => await IdleFeedAsync("Grid_4K_IdleFeed_8000PerSecond_Rendered_GeneratedBindable", FourKWidth, FourKHeight, FourKRowHeight, i => new BenchFeedItemGenerated(i));
+
+    /// <summary>The same feed with the plainest TextBlock the column can make.</summary>
+    [UITestMethod]
+    [TestCategory("Benchmark")]
+    public async Task Grid_4K_IdleFeed_8000PerSecond_Rendered_PlainTextBlock()
+        => await IdleFeedAsync("Grid_4K_IdleFeed_8000PerSecond_Rendered_PlainTextBlock", FourKWidth, FourKHeight, FourKRowHeight, columnFactory: i => new PlainTextColumn());
+
+    private async Task IdleFeedAsync(string benchmarkName, double width, double height, double rowHeight, Func<int, IBenchFeedItem>? itemFactory = null, Func<int, TableViewTextColumn>? columnFactory = null)
+    {
+        itemFactory ??= i => new BenchFeedItem(i);
+        columnFactory ??= _ => new TableViewTextColumn();
+
+        var items = new ObservableCollection<IBenchFeedItem>(Enumerable.Range(0, RowCount).Select(itemFactory));
+
+        var tableView = new TableView
+        {
+            AutoGenerateColumns = false,
+            IsColumnVirtualizationEnabled = true,
+            RowHeight = rowHeight,
+            Width = width,
+            Height = height,
+            SelectionMode = ListViewSelectionMode.Extended,
+            SelectionUnit = TableViewSelectionUnit.Cell,
+        };
+
+        tableView.Columns.AddRange(Enumerable.Range(0, FourKColumnCount).Select(i =>
+        {
+            var column = columnFactory(i);
+            column.Header = BenchFeedItem.Names[i];
+            column.Width = new GridLength(100, GridUnitType.Pixel);
+            column.Binding = new Binding { Path = new PropertyPath(BenchFeedItem.Names[i]) };
+            return column;
+        }));
+        tableView.ItemsSource = items;
+
+        await UnitTestApp.Current.MainWindow.LoadTestContentAsync(tableView);
+        tableView.UpdateLayout();
+        await Task.Delay(RealizeSettleWaitMs);
+        tableView.UpdateLayout();
+        await Task.Delay(1000); // let the prefetch margin fill, as it would have on a grid that has been open a while
+        tableView.UpdateLayout();
+
+        var scrollViewer = GetScrollViewer(tableView);
+        var random = new Random(12345);
+        var runs = new List<string>();
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                var cellMeasures = tableView.CellMeasures;
+                var panelMeasures = tableView.CellsPanelMeasures;
+                var synchronous = 0d;
+                var worstBatch = 0d;
+                var stopwatch = new Stopwatch();
+
+                for (var batch = 0; batch < FeedBatches; batch++)
+                {
+                    // The sample's row pick: the rows on screen from the offset and the row height, plus two.
+                    var first = Math.Clamp((int)(scrollViewer.VerticalOffset / rowHeight), 0, items.Count - 1);
+                    var last = Math.Min(items.Count - 1, first + (int)(height / rowHeight) + 2);
+
+                    stopwatch.Restart();
+
+                    for (var n = 0; n < FeedBatchSize; n++)
+                    {
+                        items[random.Next(first, last + 1)].Tick(random.Next(BenchFeedItem.ValueCount), random.NextDouble() * 2 - 1);
+                    }
+
+                    tableView.UpdateLayout();
+                    stopwatch.Stop();
+
+                    var elapsed = stopwatch.Elapsed.TotalMilliseconds;
+                    synchronous += elapsed;
+                    worstBatch = Math.Max(worstBatch, elapsed);
+
+                    await WaitForRenderAsync();
+                }
+
+                runs.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"synchronous {synchronous / FeedBatches:F2} ms per {FeedBatchIntervalMs} ms batch (worst {worstBatch:F1} ms), cell measures {tableView.CellMeasures - cellMeasures}, cells panel measures {tableView.CellsPanelMeasures - panelMeasures}"));
+            },
+            warmup: 1,
+            iterations: 3);
+
+        TestContext.WriteLine($"{benchmarkName}: {FourKColumnCount} columns, {width}x{height} at row height {rowHeight}, realized rows {tableView.Rows.Count}, {FeedBatches} batches of {FeedBatchSize} = {FeedBatches * FeedBatchIntervalMs} ms of feed");
+
+        for (var i = 0; i < runs.Count; i++)
+        {
+            TestContext.WriteLine($"{benchmarkName} run {i}{(i == 0 ? " (warm-up)" : string.Empty)}: {runs[i]}");
+        }
+
+        Report(result, benchmarkName);
+        await UnloadAsync(tableView);
+    }
+
+    private async Task ResizeAsync(string benchmarkName)
+    {
+        var tableView = await LoadPanGridAsync(FourKColumnCount, columnVirtualization: true, width: FourKWidth, height: 400, rowHeight: FourKRowHeight);
+        var grows = new List<string>();
+
+        var result = await MeasureAsync(
+            async () =>
+            {
+                var templates = tableView.CellTemplateApplications;
+                var cellMeasures = tableView.CellMeasures;
+                var rowsBefore = tableView.Rows.Count;
+
+                tableView.Height = FourKHeight;
+                tableView.UpdateLayout();
+                await WaitForRenderAsync();
+
+                grows.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"realized rows {rowsBefore} -> {tableView.Rows.Count}, cell templates applied {tableView.CellTemplateApplications - templates}, cell measures {tableView.CellMeasures - cellMeasures}"));
+            },
+            warmup: 1,
+            iterations: 3,
+            reset: () =>
+            {
+                tableView.Height = 400;
+                tableView.UpdateLayout();
+            });
+
+        TestContext.WriteLine($"{benchmarkName}: {FourKColumnCount} columns, width {FourKWidth}, height 400 -> {FourKHeight} at row height {FourKRowHeight}");
+
+        for (var i = 0; i < grows.Count; i++)
+        {
+            TestContext.WriteLine($"{benchmarkName} grow {i}{(i == 0 ? " (warm-up)" : string.Empty)}: {grows[i]}");
+        }
 
         Report(result, benchmarkName);
         await UnloadAsync(tableView);
@@ -1037,7 +1303,7 @@ public class PerformanceBenchmarks
     /// in a 1200x800 viewport. Column virtualization is a parameter rather than a constant because it is the
     /// biggest fork in the horizontal path, and because the control ships with it off.
     /// </summary>
-    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization, int frozenColumns = 0, double prefetchLength = 1d, bool heavyCells = false)
+    private static Task<TableView> LoadPanGridAsync(int columnCount, bool columnVirtualization, int frozenColumns = 0, double prefetchLength = 1d, bool heavyCells = false, double width = 1200, double height = 800, double rowHeight = 32, int liveColumns = 1, bool scrollingPlaceholders = true)
     {
         var items = new ObservableCollection<BenchItem>(
             Enumerable.Range(0, RowCount).Select(i => new BenchItem { Name = $"Item {i}", Value = i }));
@@ -1046,9 +1312,11 @@ public class PerformanceBenchmarks
         {
             AutoGenerateColumns = false,
             IsColumnVirtualizationEnabled = columnVirtualization,
-            RowHeight = 32,
-            Width = 1200,
-            Height = 800,
+            RowHeight = rowHeight,
+            Width = width,
+            Height = height,
+            FastScrollLiveColumnCount = liveColumns,
+            ShowsScrollingPlaceholders = scrollingPlaceholders,
             SelectionMode = ListViewSelectionMode.Extended,
             FrozenColumnCount = frozenColumns,
             ColumnPrefetchLength = prefetchLength, // set before load: the pump runs during the settle wait below

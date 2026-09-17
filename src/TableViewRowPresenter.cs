@@ -44,6 +44,159 @@ public partial class TableViewRowPresenter : Control
     private int _rowHeaderLayoutVersion = -1; // TableView.RowHeaderLayoutVersion the header was last invalidated for
 
     /// <summary>
+    /// Whether the cells are being held on the item the row showed before its last recycle, hidden, until the
+    /// vertical scroll settles. See <see cref="TableView.PrepareContainerForItemOverride"/>.
+    /// </summary>
+    internal bool AreCellsDeferred { get; private set; }
+
+    private readonly List<TableViewCell> _hiddenHeldCells = [];
+    private readonly List<TableViewCell> _liveHeldCells = [];
+
+    /// <summary>
+    /// Holds the scrollable cells on what they show and hides all but the live ones, so the recycle that is about
+    /// to change the row's item costs the held cells nothing.
+    /// </summary>
+    /// <param name="liveFirst">Scrollable index of the first visible column; the live columns start there.</param>
+    /// <param name="liveCount">How many scrollable columns from there stay bound and visible.</param>
+    /// <remarks>
+    /// Each held cell's content is pinned to what it is bound to right now — the same pin a prefetched cell
+    /// carries — so its bindings never see the new item and no text is re-laid-out or re-drawn for a row nobody
+    /// will see settled; it goes to zero opacity rather than collapsed, since opacity is a composition property
+    /// and costs no layout. Held per cell, not by one DataContext on the panel: a column whose element binds its
+    /// own DataContext cannot be pinned, and under a held panel it inherited whatever the panel held — null, for
+    /// a container out of the recycle pool — and rendered that. Live cells are not touched at all: they inherit
+    /// the new item through whatever binding the column uses. Nor is the frozen cells panel: frozen columns are
+    /// a grid's identity columns and stay live, which is what lets the user tell where a throw has taken them.
+    /// <see cref="CompleteDeferredCells"/> undoes all of it.
+    /// </remarks>
+    internal void DeferCells(int liveFirst, int liveCount)
+    {
+        if (AreCellsDeferred)
+        {
+            return; // already held, on the item it showed before the throw began
+        }
+
+        AreCellsDeferred = true;
+
+        if (TableView is null || TableViewRow is null)
+        {
+            return;
+        }
+
+        var scrollable = TableView.Columns.VisibleScrollableColumns;
+        var band = TableViewRow.AppliedBand;
+        var first = band.First >= 0 ? band.First : 0;
+        var last = band.First >= 0 ? Math.Min(band.Last, scrollable.Count - 1) : scrollable.Count - 1;
+
+        // Held cells are listed in the order they are released: from the left edge of the viewport rightwards,
+        // the way a row is read, and the buffer columns left of the viewport last.
+        var start = Math.Clamp(liveFirst, first, last + 1);
+
+        for (var i = start; i <= last; i++)
+        {
+            Hold(i);
+        }
+
+        for (var i = first; i < start; i++)
+        {
+            Hold(i);
+        }
+
+        void Hold(int i)
+        {
+            if (GetCellForColumn(scrollable[i]) is not { IsInViewport: true } cell)
+            {
+                return;
+            }
+
+            if ((i >= liveFirst && i < liveFirst + liveCount) || scrollable[i].KeepLiveDuringFastScroll)
+            {
+                _liveHeldCells.Add(cell);
+            }
+            else
+            {
+                cell.HoldContent();
+                cell.Opacity = 0;
+                _hiddenHeldCells.Add(cell);
+            }
+        }
+    }
+
+    private int _releaseCursor;
+
+    /// <summary>
+    /// Releases the next <paramref name="count"/> held cells, left to right, letting each follow the row's current
+    /// item and showing it; one phase of the platform's phased rendering. Returns <see langword="true"/> once the
+    /// row has nothing left held, at which point it has been completed.
+    /// </summary>
+    internal bool ReleaseHeldColumns(int count)
+    {
+        if (!AreCellsDeferred)
+        {
+            return true;
+        }
+
+        var end = Math.Min(_releaseCursor + count, _hiddenHeldCells.Count);
+
+        for (; _releaseCursor < end; _releaseCursor++)
+        {
+            var cell = _hiddenHeldCells[_releaseCursor];
+            cell.OnRowItemChanged();
+            cell.Opacity = 1;
+        }
+
+        if (_releaseCursor < _hiddenHeldCells.Count)
+        {
+            return false;
+        }
+
+        CompleteDeferredCells();
+        return true;
+    }
+
+    /// <summary>
+    /// Lets the live columns of a held row follow the item the recycle has just set. They inherit it by
+    /// themselves; this only undoes a pin one of them may still carry from being prefetched under another item.
+    /// </summary>
+    internal void BindLiveCells()
+    {
+        foreach (var cell in _liveHeldCells)
+        {
+            cell.OnRowItemChanged();
+        }
+    }
+
+    /// <summary>
+    /// Lets the cells follow the row's current item and shows them again. The one expensive part of a recycle,
+    /// every in-band cell's bindings and text, happens here, once, for the item the row settled on.
+    /// </summary>
+    internal void CompleteDeferredCells()
+    {
+        if (!AreCellsDeferred)
+        {
+            return;
+        }
+
+        AreCellsDeferred = false;
+
+        for (var i = _releaseCursor; i < _hiddenHeldCells.Count; i++)
+        {
+            _hiddenHeldCells[i].Opacity = 1;
+        }
+
+        _hiddenHeldCells.Clear();
+        _liveHeldCells.Clear();
+        _releaseCursor = 0;
+
+        // Every cell in view that is still pinned to another item — held, or prefetched under it — follows the
+        // row's item now.
+        foreach (var cell in _cellsList)
+        {
+            cell.OnRowItemChanged();
+        }
+    }
+
+    /// <summary>
     /// Initializes a new instance of the <see cref="TableViewRowPresenter"/> class.
     /// </summary>
     public TableViewRowPresenter()
@@ -538,7 +691,7 @@ public partial class TableViewRowPresenter : Control
                                                     && (TableView.RowDetailsTemplate is not null || TableView.RowDetailsTemplateSelector is not null);
 
                 _v_gridLine.Fill = TableView.GridLinesVisibility is TableViewGridLinesVisibility.All or TableViewGridLinesVisibility.Vertical
-                                   ? TableView.VerticalGridLinesStroke : new SolidColorBrush(Colors.Transparent);
+                                   ? TableView.VerticalGridLinesStroke : TableView.TransparentBrush;
                 _v_gridLine.Width = TableView.VerticalGridLinesStrokeThickness;
                 _v_gridLine.Visibility = vGridLinesVisibility && (areHeadersVisible || isMultiSelection || isDetailsToggleButtonVisible) ? Visibility.Visible : Visibility.Collapsed;
             }

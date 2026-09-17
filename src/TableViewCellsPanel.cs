@@ -18,6 +18,7 @@ public partial class TableViewCellsPanel : Panel
 {
     private TableView? _tableView;
     private UIElement[] _childSnapshot = [];
+    private double _lastArrangedHeight = double.NaN; // diagnostic: a changed height re-arranges every in-band cell
 
     private TableView? OwningTableView => _tableView ??= this.FindAscendant<TableView>();
 
@@ -184,7 +185,11 @@ public partial class TableViewCellsPanel : Panel
 
         var children = GetChildSnapshot(collection, count);
 
-        var offsets = OwningTableView?.ScrollableColumnOffsets ?? [];
+        var tableView = OwningTableView;
+        tableView?.NoteCellsPanelArrange(finalSize.Height != _lastArrangedHeight);
+        _lastArrangedHeight = finalSize.Height;
+
+        var offsets = tableView?.ScrollableColumnOffsets ?? [];
 
         if (offsets.Length != count)
         {

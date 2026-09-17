@@ -97,10 +97,65 @@ public partial class TableView : ListView
     /// </summary>
     internal int CellsPanelMeasures { get; private set; }
 
+    /// <summary>
+    /// How many times a cell's managed arrange has run. Diagnostic: WinUI skips a clean element arranged at the
+    /// rect it had last time, so on a band move this should be close to <see cref="CellMeasures"/> — the cells that
+    /// changed — and not the number of in-band cells on the dirtied rows.
+    /// </summary>
+    internal int CellArranges { get; private set; }
+
+    /// <summary>How many times a row's cells panel has arranged. Diagnostic.</summary>
+    internal int CellsPanelArranges { get; private set; }
+
+    /// <summary>
+    /// How many of <see cref="CellsPanelArranges"/> arrived with a different height than that panel's previous
+    /// arrange. Diagnostic: the column rects are identical from pass to pass, so a changed height is the one thing
+    /// that would make every in-band cell's rect differ and force all of them to re-arrange.
+    /// </summary>
+    internal int CellsPanelArrangeHeightChanges { get; private set; }
+
+    /// <summary>
+    /// How many row recycles were deferred because the vertical scroll was moving faster than a viewport per pass.
+    /// Diagnostic: on a scrollbar throw this should be nearly every recycle; on a wheel scroll it should be zero.
+    /// </summary>
+    internal int RowsDeferred { get; private set; }
+
+    /// <summary>How many times the in-motion reveal moved the band on the visible rows. Diagnostic.</summary>
+    internal int BandMoves { get; private set; }
+
+    /// <summary>How many ticks the reveal declined to move the band because the viewport was still inside it. Diagnostic.</summary>
+    internal int BandMoveSkips { get; private set; }
+
+    /// <summary>How many settle passes started walking rows. Diagnostic.</summary>
+    internal int SettlePasses { get; private set; }
+
+    /// <summary>How many row chunks settle passes have walked. Diagnostic.</summary>
+    internal int SettleChunks { get; private set; }
+
     internal void NoteCellMeasure() => CellMeasures++;
+    internal void NoteCellArrange() => CellArranges++;
     internal void NoteCellTemplateApplied() => CellTemplateApplications++;
     internal void NoteCellTemplatePrefetched() => CellTemplatesPrefetched++;
     internal void NoteCellsPanelMeasure() => CellsPanelMeasures++;
+
+    internal void NoteCellsPanelArrange(bool heightChanged)
+    {
+        CellsPanelArranges++;
+
+        if (heightChanged)
+        {
+            CellsPanelArrangeHeightChanges++;
+        }
+    }
+
+    private SolidColorBrush? _transparentBrush;
+
+    /// <summary>
+    /// One transparent brush for every grid line that is configured away. Each was a fresh
+    /// <see cref="SolidColorBrush"/> per element per template application — a composition object each — and the
+    /// profile of a fullscreen sweep put a third of the cell template's cost in that one allocation.
+    /// </summary>
+    internal SolidColorBrush TransparentBrush => _transparentBrush ??= new SolidColorBrush(Microsoft.UI.Colors.Transparent);
 
     /// <summary>
     /// Bumped whenever a property the row headers lay out from changes, so a row presenter can tell whether its
@@ -240,7 +295,10 @@ public partial class TableView : ListView
     private (int First, int Last) _lastKeepRange = (-2, -2); // outside this, content is released (see TableViewCell.ReleaseContent)
     private (int First, int Last) _lastRevealedRange = (-2, -2); // band the cheap in-motion reveal last applied
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _realizeSettleTimer; // debounces realize until horizontal scroll settles
-    private const double HorizontalScrollSettleMs = 50; // ms of no horizontal movement before realizing the visible band
+    // ms of no horizontal movement before the settle pass walks every realized row. The in-motion reveal keeps the
+    // visible rows right during the drag, so this only has to beat a drag's own tick interval: at a fullscreen
+    // window a tick is 30ms or more, and 50 fired mid-drag.
+    private const double HorizontalScrollSettleMs = 100;
     private const double ColumnPrefetchDelayMs = 150;   // ms of no scroll or recycle activity before the idle prefetch pump starts
     private const double ColumnPrefetchBudgetMs = 2;    // ms of work per prefetch increment; a template-heavy cell is a few of these
     private int _realizeGeneration; // bumped on every scroll; an in-flight chunked realize aborts when it changes
@@ -250,6 +308,8 @@ public partial class TableView : ListView
     // released, which is what makes column virtualization two-way; the gap between the prefetch edge and the keep
     // edge is the hysteresis that stops a cell being built and dropped on alternate wheel notches.
     private const int ColumnBandMaxBufferColumns = 4;     // measured and visible
+    private const int ColumnBandRevealGuard = 2;          // in-band columns still beyond the viewport when a band move starts: the room to spread it over
+    private const int RevealSliceMinRows = 4;             // fewest visible rows a band move reveals per tick while it has room to spread
     private const int ColumnPrefetchMaxBufferColumns = 8; // content built, still collapsed
     private const int ColumnReleaseExtraColumns = 4;      // kept beyond the prefetch edge before content is dropped
     private const int ColumnKeepMaxBufferColumns = ColumnPrefetchMaxBufferColumns + ColumnReleaseExtraColumns;
@@ -325,6 +385,7 @@ public partial class TableView : ListView
 
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        ContainerContentChanging += OnContainerContentChanging;
         SelectionChanged += TableView_SelectionChanged;
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
         _collectionView.VectorChanged += (_, _) => InvalidateRowIndices();
@@ -454,6 +515,8 @@ public partial class TableView : ListView
     {
         //Console.WriteLine("PrepareContainerForItemOverride " + item + " rows=" + _rows.Count + ", view=" + _collectionView.Count);
 
+        var fastScroll = IsFastVerticalScrollPass();
+
         // Invalidate before base binds the content: OnContentChanged (raised by the base call) reads Index.
         if (element is TableViewRow preparingRow)
         {
@@ -470,13 +533,56 @@ public partial class TableView : ListView
             {
                 _rows.Add(preparingRow);
             }
+
+            // A throw recycles every container on screen on every frame, and each recycled row's cost is its
+            // in-band cells' bindings and text — at a fullscreen 4K window some 3,400 text layouts and draws a
+            // frame, half a second of platform work, none of it for a row anyone will see settled. So while the
+            // view is moving faster than a viewport per pass the cells are held on the item they showed and
+            // hidden, before the base call changes the row's item underneath them, and released when the scroll
+            // settles (FlushDeferredRows). The row itself — its header, its selection state — still recycles.
+            if (fastScroll && preparingRow.RowPresenter is { } presenter)
+            {
+                if (!presenter.AreCellsDeferred)
+                {
+                    var liveFirst = Math.Max(0, GetVisibleScrollableRange(0).First);
+                    presenter.DeferCells(liveFirst, Math.Max(0, FastScrollLiveColumnCount));
+                    RowsDeferred++;
+                }
+
+                // A held row that left the panel and is back in the same fast scroll is still held, on the item it
+                // showed before the throw began; it goes back on the list so the settle releases it.
+                if (!_deferredRows.Contains(preparingRow))
+                {
+                    _deferredRows.Add(preparingRow);
+                }
+            }
         }
 
         base.PrepareContainerForItemOverride(element, item);
 
         if (element is TableViewRow row)
         {
+            if (row.RowPresenter is { AreCellsDeferred: true } deferred)
+            {
+                if (fastScroll)
+                {
+                    deferred.BindLiveCells(); // the identity columns follow the new item at once
+                }
+                else
+                {
+                    // A held row recycled by an ordinary scroll: release it now that the base call has set the
+                    // item, so its cells bind once, to the item it will show.
+                    _deferredRows.Remove(row);
+                    deferred.CompleteDeferredCells();
+                }
+            }
+
             row.EnsureCellsStyle(default, item);
+
+            // Once more, now that the container is fully prepared: the pass inside the base call reads the row's
+            // index, and during a jump the panel can answer -1 for a container it has not finished placing, which
+            // painted the wrong parity. Two property writes when nothing changed.
+            row.EnsureAlternateColors();
 
             // Queued, but still the FULL apply (ApplyPendingCellStates calls ApplyCellsSelectionState with no
             // argument): a recycled container carries the previous item's selection visuals, so the "only set the
@@ -510,9 +616,279 @@ public partial class TableView : ListView
             _rows.Remove(row);
             row.TableView = null;
             row.InvalidateIndex();
+
+            // A held row leaving the panel: stays held (its panels keep the old item and zero opacity) until it is
+            // prepared again, where a fast pass keeps it held and a slow one releases it against its new item.
+            if (row.RowPresenter?.AreCellsDeferred is true)
+            {
+                _deferredRows.Remove(row);
+            }
         }
 
         base.ClearContainerForItemOverride(element, item);
+    }
+
+    // Deferred binding through a fast vertical scroll. A pass whose vertical offset moved by more than this many
+    // viewports is a throw, not a scroll: the rows it recycles are held, all but their live columns hidden, and
+    // released by the platform's phased rendering as it finds budget (OnContainerContentChanging). The timer is
+    // the backstop for a panel that raises no phases, and it is what ends the gesture.
+    private const double DeferredBindViewportsPerPass = 1d;
+    private const int DeferredBindSettleMinMs = 80;   // the settle waits at least this long after the last fast tick...
+    private const int DeferredBindSettleMaxMs = 500;  // ...and at most this long, at twice the observed tick interval in between
+    private const int FastScrollReleaseColumnsPerPhase = 8; // held cells released per row per phase or settle slice, left to right
+    private const double DeferredBindSettleBudgetMs = 12;  // rebinding per settle turn; the rest waits for the next turn
+    private long _lastFastOffsetTick;
+    private double _settleIntervalMs = DeferredBindSettleMinMs;
+    private readonly double[] _recentFastTickIntervals = new double[4]; // ring of the latest intervals; the settle follows the slowest
+    private int _recentFastTickIndex;
+    private bool _thumbHeld; // the scroll viewer's last ViewChanged was intermediate: a drag still in progress
+
+    /// <summary>
+    /// The platform's phased rendering, used to release held rows. Phase 0 is raised as a container is prepared;
+    /// asking for a further phase gets a callback when the panel has budget for it — not while it is still
+    /// recycling a row per frame through a throw — and a container recycled again before its turn loses the
+    /// callback, so a new throw never pays for rows it is about to hold again. That is the release policy this
+    /// grid wants, and the platform schedules it better than a timer would: on a machine that keeps up the rows
+    /// are back within a frame or two, on one that does not they fill in as the budget allows.
+    /// </summary>
+    private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.InRecycleQueue || args.ItemContainer is not TableViewRow row || row.RowPresenter is not { AreCellsDeferred: true } presenter)
+        {
+            return;
+        }
+
+        if (args.Phase == 0)
+        {
+            args.RegisterUpdateCallback(OnContainerContentChanging);
+            return;
+        }
+
+        // A later phase that landed in the idle gap between two ticks of a throw still in progress: drop out.
+        // Releasing here would rebind the row's cells for a tick that is about to hold them again (measured as a
+        // throw three times slower, every row released and re-held on every tick), and asking for yet another
+        // phase kept every container in a pending-phase state the platform paid for on every frame (measured as
+        // 17 ms a tick at 46 rows). The settle releases what the throw leaves held, in the same left-to-right slices.
+        if (Environment.TickCount64 - _lastFastOffsetTick < _settleIntervalMs)
+        {
+            return;
+        }
+
+        // The phase says the panel has budget now; it does not do the releasing. Left to itself the platform ran
+        // a container's phases back to back within one tick, so a row appeared whole and the next row after it.
+        // The release loop does the slicing instead: the rows on screen first, top to bottom, one slice of columns
+        // per row per turn, so the leftmost band of every visible row appears first, then the next — the order a
+        // row is read. Nothing is registered again: the loop carries on by itself until the rows are done, and it
+        // checks the same quiet gate on every turn, so one callback landing in a lull cannot release rows that the
+        // next tick is about to hold again.
+        ScheduleDeferredRelease();
+    }
+    private double _lastVerticalOffsetSeen = double.NaN;
+    private bool _passIsFastVerticalScroll;
+    private readonly List<TableViewRow> _deferredRows = [];
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _deferredBindTimer;
+
+    /// <summary>
+    /// Whether the layout pass preparing containers right now moved the view by more than a viewport. Decided from
+    /// the offset the scroll viewer is about to apply, which it announces before the layout that recycles; its
+    /// VerticalOffset property still reads the old value during that layout.
+    /// </summary>
+    private bool IsFastVerticalScrollPass()
+    {
+        if (_scrollViewer is null)
+        {
+            return false;
+        }
+
+        if (double.IsNaN(_lastVerticalOffsetSeen))
+        {
+            NoteVerticalOffset(_scrollViewer.VerticalOffset); // nothing announced yet: the first pass is never fast
+        }
+
+        return _passIsFastVerticalScroll;
+    }
+
+    private void OnScrollViewerViewChanging(object? sender, ScrollViewerViewChangingEventArgs e)
+        => NoteVerticalOffset(e.NextView.VerticalOffset);
+
+    private void NoteVerticalOffset(double offset)
+    {
+        if (offset == _lastVerticalOffsetSeen)
+        {
+            return;
+        }
+
+        var viewport = _scrollViewer?.ViewportHeight ?? 0;
+        _passIsFastVerticalScroll = !double.IsNaN(_lastVerticalOffsetSeen)
+                                    && viewport > 0
+                                    && Math.Abs(offset - _lastVerticalOffsetSeen) > viewport * DeferredBindViewportsPerPass;
+        _lastVerticalOffsetSeen = offset;
+
+        // The settle is armed once per fast offset change, not once per row prepared: the cache rows the panel
+        // builds over the frames after a jump are prepared at the same offset while the flag still holds, and
+        // re-arming for each of them pushed the release out past the next several frames. Rows deferred after
+        // the timer fires are picked up by the chunks that follow, and the flush itself clears the flag.
+        if (_passIsFastVerticalScroll)
+        {
+            // The settle waits twice the slowest of the recent intervals the fast ticks arrived at. A fixed gap is
+            // what a throw whose ticks outlast it fell into, twice: at a fullscreen window a tick takes 75 ms, an
+            // 80 ms settle fired between two of them, released every row, and the next tick held them all again —
+            // a throw twice as slow and every row released and re-held on every tick. Following only the LAST
+            // interval fell into the same thing on a remote session, where the ticks jitter: a burst of quick
+            // ones set a short wait, the network then held the next one back past it, the rows were released
+            // and rendered, and the tick after that held them again — seen as a lag and cells appearing that
+            // should have stayed held. The slowest of the last few absorbs the jitter; a drag the scroll viewer
+            // still reports as in progress waits longer again, without being blocked outright.
+            var now = Environment.TickCount64;
+
+            if (_lastFastOffsetTick > 0)
+            {
+                _recentFastTickIntervals[_recentFastTickIndex] = now - _lastFastOffsetTick;
+                _recentFastTickIndex = (_recentFastTickIndex + 1) % _recentFastTickIntervals.Length;
+            }
+
+            _lastFastOffsetTick = now;
+            _settleIntervalMs = ComputeSettleInterval();
+            ArmDeferredBindTimer();
+        }
+    }
+
+    private double ComputeSettleInterval()
+    {
+        var slowest = 0d;
+
+        foreach (var interval in _recentFastTickIntervals)
+        {
+            slowest = Math.Max(slowest, interval);
+        }
+
+        // While the thumb is held, a reversal — the last fast tick one way, two or three hundred milliseconds of
+        // turnaround, the first fast tick the other — must not read as the gesture ending: rows released in that
+        // gap were rendered and held again at once, which was felt as a lag in the middle of a fast up-and-down.
+        return _thumbHeld
+            ? Math.Clamp(4d * slowest, DeferredBindSettleMinMs * 5, DeferredBindSettleMaxMs * 3)
+            : Math.Clamp(2d * slowest, DeferredBindSettleMinMs, DeferredBindSettleMaxMs);
+    }
+
+    private void OnScrollViewerViewChangedForDeferral(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        // A hint to the settle's timing, never a block: while the drag is in progress the wait is longer, and when
+        // the thumb is let go the timer is re-armed with the short wait, so the fill follows within about a tenth
+        // of a second. Not started at once: the scroll viewer reports an intermediate change followed by a final
+        // one for programmatic scrolls as well, and treating each final one as "let go" started the fill on every
+        // tick of a throw, which the next tick undid — every row released and held again, a throw slower by a
+        // third.
+        var wasHeld = _thumbHeld;
+        _thumbHeld = e.IsIntermediate;
+
+        if (wasHeld && !e.IsIntermediate && _deferredRows.Count > 0)
+        {
+            _settleIntervalMs = ComputeSettleInterval();
+            ArmDeferredBindTimer();
+        }
+    }
+
+    private bool _releaseScheduled;
+
+    /// <summary>
+    /// Queues one turn of the release; further requests while one is queued fold into it.
+    /// </summary>
+    private void ScheduleDeferredRelease()
+    {
+        if (_releaseScheduled || _deferredRows.Count == 0)
+        {
+            return;
+        }
+
+        _releaseScheduled = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _releaseScheduled = false;
+            ContinueFlushingDeferredRows();
+        });
+    }
+
+    private void ArmDeferredBindTimer()
+    {
+        if (_deferredBindTimer is null)
+        {
+            _deferredBindTimer = DispatcherQueue.CreateTimer();
+            _deferredBindTimer.IsRepeating = false;
+            _deferredBindTimer.Tick += (_, _) => FlushDeferredRows();
+        }
+
+        _deferredBindTimer.Stop();
+        _deferredBindTimer.Interval = TimeSpan.FromMilliseconds(_settleIntervalMs);
+        _deferredBindTimer.Start();
+    }
+
+    /// <summary>
+    /// Ends the gesture and releases the rows the throw left held, one slice of columns per row per turn, left
+    /// to right, the rows on screen first and top to bottom, within a time budget per dispatcher turn so the
+    /// frames between stay responsive. Stops as soon as a new fast tick arrives: those rows are about to be
+    /// held again, and binding them first is what a cascade is made of.
+    /// </summary>
+    private void FlushDeferredRows()
+    {
+        // Not blocked on the thumb still being held (that only lengthens the wait): a slow drag after a throw
+        // makes no fast ticks, and the rows it is looking at should fill in under the thumb, not after it is let
+        // go. But if a fast tick arrived after the timer was armed, the wait has not been served yet.
+        if (Environment.TickCount64 - _lastFastOffsetTick < _settleIntervalMs)
+        {
+            ArmDeferredBindTimer();
+            return;
+        }
+
+        _passIsFastVerticalScroll = false; // the gesture is over; the cache rows the panel builds next are ordinary
+        ScheduleDeferredRelease();
+    }
+
+    private void ContinueFlushingDeferredRows()
+    {
+        // Done, or the gesture is not over: a new throw has begun, or the last fast tick is still within the wait.
+        // Whoever queued this turn — the settle timer, a phase, the thumb let go — does not get to decide that; the
+        // timer will bring the loop back once the wait has been served.
+        if (_deferredRows.Count == 0 || _passIsFastVerticalScroll || Environment.TickCount64 - _lastFastOffsetTick < _settleIntervalMs)
+        {
+            return;
+        }
+
+        // The rows on screen, top to bottom, then the rest.
+        var (visibleFirst, visibleLast) = GetVisibleRowRange();
+        _deferredRows.Sort((a, b) =>
+        {
+            var ia = a.Index;
+            var ib = b.Index;
+            var va = visibleFirst >= 0 && ia >= visibleFirst && ia <= visibleLast;
+            var vb = visibleFirst >= 0 && ib >= visibleFirst && ib <= visibleLast;
+            return va != vb ? (va ? -1 : 1) : ia.CompareTo(ib);
+        });
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        for (var i = 0; i < _deferredRows.Count;)
+        {
+            var row = _deferredRows[i];
+
+            if (row.RowPresenter is not { } presenter || presenter.ReleaseHeldColumns(FastScrollReleaseColumnsPerPhase))
+            {
+                _deferredRows.RemoveAt(i); // released in full (or has no presenter to release)
+            }
+            else
+            {
+                i++;
+            }
+
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds >= DeferredBindSettleBudgetMs)
+            {
+                break;
+            }
+        }
+
+        if (_deferredRows.Count > 0)
+        {
+            ScheduleDeferredRelease();
+        }
     }
 
     /// <inheritdoc/>
@@ -1467,6 +1843,8 @@ public partial class TableView : ListView
         DragRectangleCanvas = GetTemplateChild("DragRectangleCanvas") as Canvas;
         _dragRectangle = GetTemplateChild("DragRectangle") as Border;
         _scrollViewer?.Loaded += OnScrollViewerLoaded;
+        _scrollViewer?.ViewChanging += OnScrollViewerViewChanging;
+        _scrollViewer?.ViewChanged += OnScrollViewerViewChangedForDeferral;
 
         if (IsLoaded)
         {
@@ -1577,6 +1955,7 @@ public partial class TableView : ListView
         _lastRealizedRange = (-2, -2);
         _lastKeepRange = (-2, -2);
         _lastRevealedRange = (-2, -2);
+        _pendingRevealRows.Clear();
 
         // Each row remembers the band its own cells are flagged for, and that memo is what lets the next pass skip
         // work. It cannot see a column-set change, so drop it here or the next pass believes rows are already
@@ -1719,10 +2098,51 @@ public partial class TableView : ListView
             return;
         }
 
+        var visible = GetVisibleScrollableRange(0);
+
+        if (visible.First < 0)
+        {
+            return;
+        }
+
+        // The drag's speed, signed, for sizing the slices below.
+        var offset = HorizontalOffset;
+
+        if (!double.IsNaN(_lastRevealOffset))
+        {
+            _lastRevealTravel = offset - _lastRevealOffset;
+        }
+
+        _lastRevealOffset = offset;
+
+        // The previous move's remaining rows: a slice of them now, or all of them if any row's band is about to be
+        // outrun.
+        if (_pendingRevealRows.Count > 0)
+        {
+            DrainPendingReveal(visible, force: false);
+        }
+
         if (band == _lastRevealedRange)
         {
             return;
         }
+
+        // Hysteresis. The band is recomputed on every tick but moved only once the viewport has nearly used up
+        // the one the rows were last revealed to: while the visible columns sit at least ColumnBandRevealGuard
+        // columns inside it on both sides, no row is touched. A band move dirties every visible row — the cells
+        // panel's walk over every in-band cell, the row's grids, a real measure and arrange per revealed cell, and
+        // the native layout and render of the row — and re-banding on every column crossing did that once per
+        // column of travel, on every row the window shows, which is what made a fullscreen drag lag. A band that
+        // already ends at an edge of the grid has nothing more to reveal on that side. (The round-three
+        // look-ahead revealed further ahead but still re-banded on every crossing, so it paid the per-move cost
+        // as often over a wider band, which is why it measured slower, not faster.)
+        if (IsCovered(_lastRevealedRange, visible, ColumnBandRevealGuard))
+        {
+            BandMoveSkips++;
+            return;
+        }
+
+        BandMoves++;
 
         // A chunked pass still walking rows is working from an older band than this one. Supersede it — its next
         // continuation aborts and invalidates the settled range, so the settle pass that follows redoes the work
@@ -1733,11 +2153,12 @@ public partial class TableView : ListView
             _realizeInFlight = false;
         }
 
-        // NOTE: a directional look-ahead (reveal a full viewport ahead while moving, shrink on settle) was tried
-        // here and measured as a clear regression on both axes — the horizontal sweep tripled and the vertical
-        // throw got a third slower — so the band stays symmetric. See docs/horizontal-scroll-performance.md.
-
-        var scrollable = Columns.VisibleScrollableColumns;
+        // A move while the previous one still has rows pending: those rows hold a band the viewport has now come
+        // within the guard of, so finish them before starting on the next.
+        if (_pendingRevealRows.Count > 0)
+        {
+            DrainPendingReveal(visible, force: true);
+        }
 
         // Only the rows the user can actually see need to be right this instant. A grid realizes roughly twice
         // the viewport (CacheLength defaults to one extra viewport), and dirtying those cached rows makes them
@@ -1747,7 +2168,7 @@ public partial class TableView : ListView
 
         foreach (var row in _rows)
         {
-            if (row.RowPresenter is not { } presenter)
+            if (row.RowPresenter is null)
             {
                 continue;
             }
@@ -1764,23 +2185,119 @@ public partial class TableView : ListView
 
             var oldBand = row.AppliedBand;
 
-            if (oldBand == band)
+            if (oldBand == band || oldBand.First < 0 || !Intersects(oldBand, band))
             {
+                continue; // already there, or no delta to apply — the settle pass will walk this row in full
+            }
+
+            _pendingRevealRows.Add(row);
+        }
+
+        _pendingRevealFrom = _lastRevealedRange;
+        _lastRevealedRange = band;
+
+        // The move is spread over ticks rather than done in one: revealing every visible row at once is a burst
+        // of a frame or more at a small window and several frames at a large one, on top of the pan, and that
+        // burst was the hitch a drag showed every few columns. The guard's columns are the room to spread it in.
+        DrainPendingReveal(visible, force: false);
+    }
+
+    // A band move in progress: the visible rows still to be brought from _pendingRevealFrom to _lastRevealedRange.
+    private readonly List<TableViewRow> _pendingRevealRows = [];
+    private (int First, int Last) _pendingRevealFrom = (-2, -2);
+    private double _lastRevealOffset = double.NaN;
+    private double _lastRevealTravel; // signed pixels between the last two horizontal ticks
+
+    /// <summary>
+    /// Reveals a slice of the rows a band move still owes, sized from the drag's speed so the move completes
+    /// before the viewport reaches the edge of the band those rows still hold; any row whose band no longer
+    /// covers the viewport is revealed at once regardless. With <paramref name="force"/>, all of them.
+    /// </summary>
+    private void DrainPendingReveal((int First, int Last) visible, bool force)
+    {
+        var pending = _pendingRevealRows;
+        var band = _lastRevealedRange;
+        var scrollable = Columns.VisibleScrollableColumns;
+        var count = pending.Count;
+
+        if (!force)
+        {
+            // Room left, in pixels of travel, before the old band's edge in the direction of travel is reached.
+            var slackColumns = _lastRevealTravel >= 0 ? _pendingRevealFrom.Last - visible.Last : visible.First - _pendingRevealFrom.First;
+            var offsets = (Columns as TableViewColumnsCollection)?.VisibleScrollableColumnOffsets ?? [];
+            var averageWidth = offsets.Length > 0 ? offsets[^1] / offsets.Length : 0d;
+            var slack = slackColumns * averageWidth;
+            var travel = Math.Abs(_lastRevealTravel);
+
+            // The floor is small on purpose: at a small window a slice of eight rows was about a frame of work at
+            // 120Hz and every move-tick missed one, which is what made the sweep slower than one-column moves
+            // there. At a large window the speed-based count above the floor is what sizes the slice.
+            if (slack > travel && travel > 0)
+            {
+                count = Math.Max(RevealSliceMinRows, (int)Math.Ceiling(pending.Count * travel / slack));
+            }
+            else if (slack > 0 && travel == 0)
+            {
+                count = RevealSliceMinRows;
+            }
+        }
+
+        // Any row whose own band no longer covers the viewport goes now, whatever the slice says. Rows that were
+        // recycled meanwhile already carry the new band and simply drop out.
+        for (var i = pending.Count - 1; i >= 0; i--)
+        {
+            var row = pending[i];
+            var oldBand = row.AppliedBand;
+
+            if (row.RowPresenter is not { } presenter || row.TableView is null || oldBand == band || oldBand.First < 0 || !Intersects(oldBand, band))
+            {
+                pending.RemoveAt(i);
                 continue;
             }
 
-            if (oldBand.First < 0 || !Intersects(oldBand, band))
+            if (!IsCovered(oldBand, visible, 0))
             {
-                continue; // no delta to apply — the settle pass will walk this row in full
+                RevealRow(presenter, row, scrollable, oldBand, band);
+                pending.RemoveAt(i);
             }
-
-            ApplyBandEdgeSpan(presenter, scrollable, oldBand.First, band.First, leading: true, band, row.AppliedKeep, allowRelease: false);
-            ApplyBandEdgeSpan(presenter, scrollable, oldBand.Last, band.Last, leading: false, band, row.AppliedKeep, allowRelease: false);
-
-            row.AppliedBand = band;
         }
 
-        _lastRevealedRange = band;
+        // Then the slice, newest first.
+        while (count-- > 0 && pending.Count > 0)
+        {
+            var row = pending[^1];
+            pending.RemoveAt(pending.Count - 1);
+
+            if (row.RowPresenter is { } presenter)
+            {
+                RevealRow(presenter, row, scrollable, row.AppliedBand, band);
+            }
+        }
+    }
+
+    private void RevealRow(TableViewRowPresenter presenter, TableViewRow row, IList<TableViewColumn> scrollable, (int First, int Last) oldBand, (int First, int Last) band)
+    {
+        ApplyBandEdgeSpan(presenter, scrollable, oldBand.First, band.First, leading: true, band, row.AppliedKeep, allowRelease: false);
+        ApplyBandEdgeSpan(presenter, scrollable, oldBand.Last, band.Last, leading: false, band, row.AppliedKeep, allowRelease: false);
+        row.AppliedBand = band;
+    }
+
+    /// <summary>
+    /// Whether the visible columns sit inside <paramref name="range"/> with at least <paramref name="guard"/>
+    /// columns to spare on each side. A side that already ends at an edge of the grid counts as covered.
+    /// </summary>
+    private bool IsCovered((int First, int Last) range, (int First, int Last) visible, int guard)
+    {
+        if (range.First < 0 || visible.First < 0)
+        {
+            return false;
+        }
+
+        var lastColumn = Columns.VisibleScrollableColumns.Count - 1;
+        var left = range.First == 0 || visible.First >= range.First + guard;
+        var right = range.Last >= lastColumn || visible.Last <= range.Last - guard;
+
+        return left && right;
     }
 
     /// <summary>
@@ -1805,7 +2322,8 @@ public partial class TableView : ListView
             return true; // nothing realized, or a pass was abandoned half-applied: do not make the user wait
         }
 
-        return visible.First < _lastRealizedRange.First || visible.Last > _lastRealizedRange.Last;
+        // With the guard, so the first move after a settle starts with the same room to spread in as the rest.
+        return !IsCovered(_lastRealizedRange, visible, ColumnBandRevealGuard);
     }
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer CreateRealizeSettleTimer()
@@ -1860,6 +2378,8 @@ public partial class TableView : ListView
 
         _realizeGeneration++; // supersedes anything still walking rows
         _realizeInFlight = true;
+        _pendingRevealRows.Clear(); // this pass walks every row, pending or not
+        SettlePasses++;
         RealizeRowChunk(wide, keep, _realizeGeneration, RowsInVisualOrder(), 0);
     }
 
@@ -1901,6 +2421,8 @@ public partial class TableView : ListView
         }
 
         var end = Math.Min(start + RealizeRowChunkSize, rows.Length);
+        SettleChunks++;
+
         for (var i = start; i < end; i++)
         {
             RealizeRowCells(rows[i], range, keep);
@@ -1923,12 +2445,15 @@ public partial class TableView : ListView
         _lastKeepRange = keep;
         _lastRevealedRange = range; // the in-motion reveal has nothing left to do for this band
 
-        // The viewport can have moved on while this pass walked the rows — a drag does not pause for it. Chase it
-        // now rather than waiting for the next scroll tick, which is what keeps a continuous drag realizing
-        // instead of showing collapsed cells until the user lets go.
+        // The viewport may have moved on while this pass walked the rows. It is NOT chased from here. This used to
+        // start another full pass at once whenever the viewport was outside the band just realized, which during
+        // a drag whose ticks outlast the settle timer — every tick at a fullscreen window — became a chain of
+        // passes over every realized row for the whole of the drag: eight or nine passes of eighteen chunks in a
+        // single fullscreen sweep, each re-flagging rows to a band the reveal had already moved past, and that,
+        // not the reveal, was most of what dirtied rows. The visible rows are the in-motion reveal's job; the
+        // cached rows and the releases can wait for the settle timer, which every tick re-arms.
         if (HasLeftRealizedBand())
         {
-            StartBandRealize();
             return;
         }
 
@@ -1949,12 +2474,16 @@ public partial class TableView : ListView
             return;
         }
 
-        // Flag this (newly realized / recycled) row to match the current realized band, so it lines up with every
-        // other row. Falls back to computing the band when none has been established yet (early load). A row whose
-        // memo already matches returns without touching a cell, which is the usual case on a recycle.
-        var range = _lastRealizedRange.First >= 0
-            ? _lastRealizedRange
-            : GetVisibleScrollableRange(ColumnCacheLength, ColumnBandMaxBufferColumns);
+        // Flag this (newly realized / recycled) row to match the band the visible rows were most recently brought
+        // to — the in-motion reveal's, which the settle pass also records when it completes — so it lines up with
+        // every other row. The settled range alone is behind the viewport for the whole of a drag, and with the
+        // reveal moving the band only every few columns, a row recycled into view mid-drag would show collapsed
+        // cells until the next move. Falls back to computing the band when none has been established yet (early
+        // load). A row whose memo already matches returns without touching a cell, which is the usual case on a
+        // recycle.
+        var range = _lastRevealedRange.First >= 0 ? _lastRevealedRange
+                  : _lastRealizedRange.First >= 0 ? _lastRealizedRange
+                  : GetVisibleScrollableRange(ColumnCacheLength, ColumnBandMaxBufferColumns);
         var keep = _lastKeepRange.First >= 0
             ? _lastKeepRange
             : GetVisibleScrollableRange(ColumnCacheLength + ColumnPrefetchLength, ColumnKeepMaxBufferColumns);
@@ -2302,6 +2831,7 @@ public partial class TableView : ListView
     private void RealizeAllCells()
     {
         _lastRevealedRange = (-2, -2); // every cell is about to be shown; the reveal memo describes nothing
+        _pendingRevealRows.Clear();
 
         // Chunked like the band realize: this touches every cell of every realized row, which at 80 columns is
         // thousands of content generations, and running it in one go blocks the frame it lands on.
