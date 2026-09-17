@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Microsoft.VisualStudio.TestTools.UnitTesting.AppContainer;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
@@ -106,25 +107,25 @@ public class TableViewRecycledRowStateTests
         await Task.Delay(20);
         tableView.UpdateLayout();
 
-        foreach (var row in tableView.Rows.Where(r => r.RowPresenter?.AreCellsDeferred is true))
+        foreach (var row in HeldRowsWithItems(tableView))
         {
             var live = row.Cells[0];
             var hidden = row.Cells[1];
             Assert.AreEqual(1d, live.Opacity, $"row {row.Index}: the live column must stay visible while held");
-            Assert.AreEqual(((Item)row.Content).Name, TextOf(live), $"row {row.Index}: the live column must show the new item while held");
+            Assert.AreEqual(ItemOf(row).Name, TextOf(live), $"row {row.Index}: the live column must show the new item while held");
             Assert.AreEqual(0d, hidden.Opacity, $"row {row.Index}: a held cell must be hidden");
         }
 
         await WaitForReleaseAsync(tableView);
 
-        foreach (var row in tableView.Rows)
+        foreach (var row in RowsWithItems(tableView))
         {
             Assert.IsFalse(row.RowPresenter?.AreCellsDeferred is true, $"row {row.Index} is still held after the scroll settled");
 
             foreach (var cell in row.Cells.Where(c => c.Visibility == Visibility.Visible))
             {
                 Assert.AreEqual(1d, cell.Opacity, $"row {row.Index} settled but a cell is still hidden");
-                Assert.AreEqual(((Item)row.Content).Name, TextOf(cell), $"row {row.Index} shows another item's value after the throw settled");
+                Assert.AreEqual(ItemOf(row).Name, TextOf(cell), $"row {row.Index} shows another item's value after the throw settled");
             }
         }
 
@@ -165,23 +166,35 @@ public class TableViewRecycledRowStateTests
         await Task.Delay(20);
         tableView.UpdateLayout();
 
-        foreach (var row in tableView.Rows.Where(r => r.RowPresenter?.AreCellsDeferred is true))
+        foreach (var row in HeldRowsWithItems(tableView))
         {
             Assert.AreEqual(1d, row.Cells[3].Opacity, $"row {row.Index}: the flagged column must stay visible while held");
-            Assert.AreEqual(((Item)row.Content).Name, TextOf(row.Cells[3]), $"row {row.Index}: the flagged column must show the new item while held");
+            Assert.AreEqual(ItemOf(row).Name, TextOf(row.Cells[3]), $"row {row.Index}: the flagged column must show the new item while held");
             Assert.AreEqual(0d, row.Cells[0].Opacity, $"row {row.Index}: with no count, the first column is held like the rest");
         }
 
         await WaitForReleaseAsync(tableView);
 
-        foreach (var row in tableView.Rows)
+        foreach (var row in RowsWithItems(tableView))
         {
             Assert.IsFalse(row.RowPresenter?.AreCellsDeferred is true, $"row {row.Index} is still held after the scroll settled");
-            Assert.AreEqual(((Item)row.Content).Name, TextOf(row.Cells[3]));
+            Assert.AreEqual(ItemOf(row).Name, TextOf(row.Cells[3]));
         }
 
         await UnitTestApp.Current.MainWindow.UnloadTestContentAsync(tableView);
     }
+
+    /// <summary>
+    /// The rows that are bound to an item. Under load a container the panel has just cleared can still be enumerated
+    /// with no content; it shows nothing and has nothing to be compared against, so it is not part of the check.
+    /// </summary>
+    private static IEnumerable<TableViewRow> RowsWithItems(TableView tableView)
+        => tableView.Rows.Where(r => r.Content is Item);
+
+    private static IEnumerable<TableViewRow> HeldRowsWithItems(TableView tableView)
+        => RowsWithItems(tableView).Where(r => r.RowPresenter?.AreCellsDeferred is true);
+
+    private static Item ItemOf(TableViewRow row) => (Item)row.Content;
 
     private static string? TextOf(TableViewCell cell)
     {

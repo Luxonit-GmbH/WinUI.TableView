@@ -1,3 +1,4 @@
+﻿using WinUI.TableView.Helpers;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -30,7 +31,7 @@ public partial class TableViewFilterItemsControl : UserControl
     /// </summary>
     internal async void Initialize()
     {
-        FilterItems = TableView?.FilterHandler?.GetFilterItems(ColumnHeader?.Column!, null).ToList();
+        FilterItems = GetFilterItemsSafely(null);
 
         InitializeOperators();
 
@@ -180,9 +181,33 @@ public partial class TableViewFilterItemsControl : UserControl
         }
     }
 
+    /// <summary>
+    /// Asks the filter handler for the column's values. Initialize is <c>async void</c> and the search box's
+    /// handler is an event handler, so an exception from either, a handler the app supplied or a value the
+    /// built-in one cannot list, would end the process as an unhandled exception. The flyout opens empty instead,
+    /// and the exception is traced.
+    /// </summary>
+    private IList<TableViewFilterItem>? GetFilterItemsSafely(string? searchText)
+    {
+        if (TableView?.FilterHandler is not { } handler || ColumnHeader?.Column is not { } column)
+        {
+            return null;
+        }
+
+        try
+        {
+            return handler.GetFilterItems(column, searchText)?.ToList();
+        }
+        catch (Exception ex)
+        {
+            TableViewTrace.Write($"GetFilterItems failed for column '{column.Header}': {ex}");
+            return [];
+        }
+    }
+
     private void OnSearchBoxTextChanged(object sender, TextChangedEventArgs e)
     {
-        FilterItems = TableView?.FilterHandler?.GetFilterItems(ColumnHeader?.Column!, searchBox!.Text);
+        FilterItems = GetFilterItemsSafely(searchBox!.Text);
     }
 
     /// <summary>
