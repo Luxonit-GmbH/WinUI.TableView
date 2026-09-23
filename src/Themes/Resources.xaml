@@ -36,7 +36,7 @@
             <StaticResource x:Key="TableViewCellBackgroundSelected" ResourceKey="SubtleFillColorSecondaryBrush" />
             <StaticResource x:Key="TableViewHeaderForeground" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TableViewHeaderRowBackground" ResourceKey="SubtleFillColorSecondaryBrush" />
-            <StaticResource x:Key="TableViewColumnGroupHeaderBackground" ResourceKey="SubtleFillColorTertiaryBrush" />
+            <SolidColorBrush x:Key="TableViewColumnGroupHeaderBackground" Color="Transparent" />
             <StaticResource x:Key="TableViewColumnGroupHeaderStroke" ResourceKey="DividerStrokeColorDefaultBrush" />
             <StaticResource x:Key="TableViewBannerRowBackground" ResourceKey="SubtleFillColorTertiaryBrush" />
             <Thickness x:Key="TableViewBannerRowPadding">12,0,12,0</Thickness>
@@ -113,7 +113,7 @@
             <StaticResource x:Key="TableViewCellBackgroundSelected" ResourceKey="SubtleFillColorSecondaryBrush" />
             <StaticResource x:Key="TableViewHeaderForeground" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TableViewHeaderRowBackground" ResourceKey="SubtleFillColorSecondaryBrush" />
-            <StaticResource x:Key="TableViewColumnGroupHeaderBackground" ResourceKey="SubtleFillColorTertiaryBrush" />
+            <SolidColorBrush x:Key="TableViewColumnGroupHeaderBackground" Color="Transparent" />
             <StaticResource x:Key="TableViewColumnGroupHeaderStroke" ResourceKey="DividerStrokeColorDefaultBrush" />
             <StaticResource x:Key="TableViewBannerRowBackground" ResourceKey="SubtleFillColorTertiaryBrush" />
             <Thickness x:Key="TableViewBannerRowPadding">12,0,12,0</Thickness>
@@ -190,7 +190,7 @@
             <SolidColorBrush x:Key="TableViewCellBackgroundSelected" Color="{ThemeResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="TableViewHeaderForeground" Color="{ThemeResource SystemColorButtonTextColor}" />
             <SolidColorBrush x:Key="TableViewHeaderRowBackground" Color="{ThemeResource SystemColorHighlightColor}" />
-            <SolidColorBrush x:Key="TableViewColumnGroupHeaderBackground" Color="{ThemeResource SystemColorHighlightColor}" />
+            <SolidColorBrush x:Key="TableViewColumnGroupHeaderBackground" Color="Transparent" />
             <SolidColorBrush x:Key="TableViewColumnGroupHeaderStroke" Color="{ThemeResource SystemColorButtonTextColor}" />
             <SolidColorBrush x:Key="TableViewBannerRowBackground" Color="{ThemeResource SystemColorHighlightColor}" />
             <Thickness x:Key="TableViewBannerRowPadding">12,0,12,0</Thickness>

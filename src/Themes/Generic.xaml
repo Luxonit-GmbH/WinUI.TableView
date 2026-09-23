@@ -71,6 +71,7 @@
         <Setter Property="HorizontalContentAlignment" Value="Center" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="MinHeight" Value="32" />
+        <Setter Property="BorderThickness" Value="0,0,1,1" />
         <Setter Property="Padding" Value="8,0" />
         <Setter Property="Template">
             <Setter.Value>
@@ -79,7 +80,7 @@
                          between one banner and the next reads as grey on grey. -->
                     <Border Background="{TemplateBinding Background}"
                             BorderBrush="{ThemeResource TableViewColumnGroupHeaderStroke}"
-                            BorderThickness="0,0,1,1"
+                            BorderThickness="{TemplateBinding BorderThickness}"
                             MinHeight="{TemplateBinding MinHeight}"
                             Padding="{TemplateBinding Padding}">
                         <!-- Name and chevron travel together, centred over the run of columns. -->

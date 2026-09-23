@@ -88,6 +88,22 @@ public partial class TableViewColumnGroupHeader : ContentControl
         var collapsible = Group is { IsCollapsible: true };
         IsHitTestVisible = collapsible;
 
+        // The filler above ungrouped columns blends into the header row instead of looking like an empty group.
+        if (Group is null)
+        {
+            BorderThickness = new Thickness(0);
+        }
+        else
+        {
+            ClearValue(BorderThicknessProperty);
+        }
+
+        // Match the column header height rather than the banner style's own minimum.
+        if (_tableView is not null)
+        {
+            MinHeight = _tableView.HeaderRowMinHeight;
+        }
+
         if (_chevron is not null)
         {
             _chevron.Visibility = collapsible ? Visibility.Visible : Visibility.Collapsed;

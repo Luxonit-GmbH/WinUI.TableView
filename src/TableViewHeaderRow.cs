@@ -60,6 +60,9 @@ public partial class TableViewHeaderRow : Control
     public TableViewHeaderRow()
     {
         DefaultStyleKey = typeof(TableViewHeaderRow);
+
+        // The banner strip can grow the header without the TableView resizing, so the clip must follow our own size.
+        SizeChanged += (_, _) => UpdatePanClip();
     }
 
     /// <inheritdoc/>
