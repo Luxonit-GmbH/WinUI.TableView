@@ -385,6 +385,7 @@ public partial class TableView : ListView
 
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        LostFocus += OnLostFocusWhileEditing;
         ContainerContentChanging += OnContainerContentChanging;
         SelectionChanged += TableView_SelectionChanged;
         _collectionView.ItemPropertyChanged += OnItemPropertyChanged;
@@ -1540,15 +1541,10 @@ public partial class TableView : ListView
         }
         else if (e.Key is VirtualKey.Escape && currentCell is not null && IsEditing)
         {
-            // Transfer focus from the editing element (e.g. TextBox) to the cell
-            // itself BEFORE EndCellEditing tears down that element.  If we wait,
-            // WinUI's focus manager will move focus to the next focusable sibling
-            // the moment the editing element is removed from the visual tree, and
-            // screen readers will announce that sibling instead of the current cell.
-            currentCell.Focus(FocusState.Programmatic);
-
-            e.Handled = EndCellEditing(TableViewEditAction.Cancel, currentCell);
-            SetIsEditing(false);
+            // Moves focus from the editor to the cell before tearing the editor down (see MoveFocusFromEditorToCell).
+            // A CellEditEnding handler that cancels keeps the grid in edit mode: this used to leave edit mode anyway,
+            // with the editor still in the cell, so F2 or a click could start a second edit on top of it.
+            e.Handled = TryEndCurrentCellEdit(TableViewEditAction.Cancel);
         }
         else if (e.Key is VirtualKey.Space && currentCell is not null && CurrentCellSlot.HasValue && !IsEditing)
         {
@@ -1784,9 +1780,61 @@ public partial class TableView : ListView
     }
 
     /// <summary>
+    /// Ends the edit in progress on the current cell, if there is one, committing or cancelling it.
+    /// </summary>
+    /// <param name="editAction">
+    /// <see cref="TableViewEditAction.Commit"/> writes the editor's value to the item;
+    /// <see cref="TableViewEditAction.Cancel"/> discards it, and the cell shows the item's value again.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> if the grid is no longer editing: the edit was ended, or none was in progress.
+    /// <see langword="false"/> if a <see cref="CellEditEnding"/> handler cancelled the ending; the cell stays in edit
+    /// mode with its editor and value untouched.
+    /// </returns>
+    /// <remarks>
+    /// <para>This is the path <b>Escape</b> (cancel) and <b>Enter</b>/<b>Tab</b> (commit) take, so
+    /// <see cref="CellEditEnding"/> and <see cref="CellEditEnded"/> are raised exactly as they are for the keys. If
+    /// keyboard focus is inside the editor it moves to the cell before the editor is removed, so it does not jump to
+    /// whatever element comes next; focus anywhere else, such as on the button that called this, is left alone.</para>
+    /// <para>Cancel relies on the editor not having written its value yet. The built-in columns bind with
+    /// <see cref="UpdateSourceTrigger.Explicit"/> unless told otherwise; a column binding given
+    /// <see cref="UpdateSourceTrigger.PropertyChanged"/> has already updated the item as the user typed, and
+    /// cancelling cannot take that back.</para>
+    /// <para>If the edited cell is no longer realized there is nothing left to commit or cancel against: the grid
+    /// leaves edit mode without raising the events and returns <see langword="true"/>.</para>
+    /// </remarks>
+    public bool TryEndCurrentCellEdit(TableViewEditAction editAction)
+    {
+        if (!IsEditing)
+        {
+            return true;
+        }
+
+        if (CurrentCellSlot is not { } slot || GetCellFromSlot(slot) is not { } cell)
+        {
+            SetIsEditing(false); // otherwise the grid stays in edit mode with no editor, and paste, select-all and the header commands stay disabled
+            return true;
+        }
+
+        if (!EndCellEditing(editAction, cell, keepFocusInCell: true))
+        {
+            return false;
+        }
+
+        SetIsEditing(false);
+        return true;
+    }
+
+    /// <summary>
     /// Ends the editing of a cell, committing or canceling the edit based on the specified action.
     /// </summary>
-    internal bool EndCellEditing(TableViewEditAction editAction, TableViewCell cell)
+    /// <param name="editAction">Whether to commit or cancel.</param>
+    /// <param name="cell">The cell being edited.</param>
+    /// <param name="keepFocusInCell">
+    /// Move focus from the editor to the cell before the editor is removed, when the editor has it. Checked only once
+    /// no handler has cancelled the ending, so a cancelled ending leaves focus in the editor.
+    /// </param>
+    internal bool EndCellEditing(TableViewEditAction editAction, TableViewCell cell, bool keepFocusInCell = false)
     {
         var editingElement = cell.Content as FrameworkElement;
         var endingArgs = new TableViewCellEditEndingEventArgs(cell, cell.Row?.Content, cell.Column!, editingElement!, editAction);
@@ -1796,12 +1844,122 @@ public partial class TableView : ListView
             return false;
         }
 
+        if (keepFocusInCell)
+        {
+            MoveFocusFromEditorToCell(cell);
+        }
+
         cell.EndEditing(editAction);
 
         var endArgs = new TableViewCellEditEndedEventArgs(cell, cell.Row?.Content, cell.Column!, editAction);
         OnCellEditEnded(endArgs);
 
         return true;
+    }
+
+    /// <summary>
+    /// Moves keyboard focus from the cell's editor to the cell itself, if the editor or anything inside the cell has
+    /// it. Without this, the moment the editor leaves the tree the focus manager moves focus to the next focusable
+    /// element, and a screen reader announces that element instead of the cell.
+    /// </summary>
+    private static void MoveFocusFromEditorToCell(TableViewCell cell)
+    {
+        if (cell.XamlRoot is { } xamlRoot
+            && FocusManager.GetFocusedElement(xamlRoot) is DependencyObject focused
+            && IsWithin(focused, cell))
+        {
+            cell.Focus(FocusState.Programmatic);
+        }
+    }
+
+    /// <summary>
+    /// The cell a pointer press tried to move to while the edit's commit was refused (see
+    /// <see cref="NoteRefusedPress"/>). Read and cleared by the next focus-loss check.
+    /// </summary>
+    private TableViewCell? _refusedPressTarget;
+
+    /// <summary>
+    /// Records that a press on <paramref name="target"/> asked to commit the edit and a
+    /// <see cref="CellEditEnding"/> handler refused. If that press still moves focus to the cell, the focus-loss
+    /// commit is the same gesture and must not ask the handler a second time; a handler that shows a dialog would
+    /// otherwise show it twice.
+    /// </summary>
+    internal void NoteRefusedPress(TableViewCell target) => _refusedPressTarget = target;
+
+    /// <summary>
+    /// Commits the edit when keyboard focus leaves the cell being edited for anywhere else in the window: a toolbar,
+    /// another control, a header, the grid's empty area, a cell whose content kept the press to itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>Enter, Tab, Escape and a press on another cell end an edit on their own; this is the rest of "clicking
+    /// away", which until now left the editor open.</para>
+    /// <para>LostFocus is raised after focus has moved, so the element that has it now is known. Nothing is done
+    /// when it is still inside the cell, or inside a popup the editor owns, such as a picker's flyout or a combo
+    /// box's drop-down, or inside any popup that does not also host the grid: focus comes back to the editor
+    /// when those close. Focus that left an editor the grid has already moved on from (Tab and Enter tear the old
+    /// editor down before this runs) is not inside the cell being edited now, so it is ignored as well.</para>
+    /// <para>If a <see cref="CellEditEnding"/> handler refuses the commit, the cell stays in edit mode with focus
+    /// where the user put it; it is asked again the next time focus leaves the editor, not on every focus move elsewhere.</para>
+    /// </remarks>
+    private void OnLostFocusWhileEditing(object sender, RoutedEventArgs e)
+    {
+        var refusedPressTarget = _refusedPressTarget;
+        _refusedPressTarget = null;
+
+        if (!IsEditing
+            || CurrentCellSlot is not { } slot
+            || GetCellFromSlot(slot) is not { } cell
+            || e.OriginalSource is not DependencyObject lostFocus
+            || !IsWithin(lostFocus, cell)
+            || cell.XamlRoot is not { } xamlRoot
+            || FocusManager.GetFocusedElement(xamlRoot) is not DependencyObject focused
+            || IsWithin(focused, cell)
+            || IsInPopupNotHostingTheGrid(focused, cell, xamlRoot)
+            || (refusedPressTarget is not null && IsWithin(focused, refusedPressTarget)))
+        {
+            return;
+        }
+
+        TryEndCurrentCellEdit(TableViewEditAction.Commit);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="element"/> is <paramref name="container"/> or inside it, following each element's
+    /// logical parent where it has one and its visual parent otherwise. The logical parent is what leads out of a
+    /// popup's content to the popup, and from there back to the control whose template placed it, so the items of
+    /// an editor's own drop-down count as inside its cell.
+    /// </summary>
+    private static bool IsWithin(DependencyObject? element, DependencyObject container)
+    {
+        for (var node = element; node is not null; node = (node as FrameworkElement)?.Parent ?? VisualTreeHelper.GetParent(node))
+        {
+            if (ReferenceEquals(node, container))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="element"/> is inside an open popup that does not also contain
+    /// <paramref name="cell"/>. A grid hosted in a flyout or a dialog lives in a popup itself, and focus moving to a
+    /// button in that same popup has left the cell like any other.
+    /// </summary>
+    private static bool IsInPopupNotHostingTheGrid(DependencyObject element, TableViewCell cell, XamlRoot xamlRoot)
+    {
+        foreach (var popup in VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot))
+        {
+            var content = (DependencyObject?)popup.Child ?? popup;
+
+            if ((IsWithin(element, popup) || IsWithin(element, content)) && !IsWithin(cell, popup) && !IsWithin(cell, content))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

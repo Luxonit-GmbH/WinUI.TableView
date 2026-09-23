@@ -690,14 +690,9 @@ public abstract partial class TableViewColumn : DependencyObject
     {
         if (d is TableViewColumn column)
         {
-            if (column.TableView is TableView tableView &&
-                tableView.IsReadOnly &&
-                tableView.IsEditing &&
-                tableView.CurrentCellSlot is not null &&
-                tableView.GetCellFromSlot(tableView.CurrentCellSlot.Value) is { } currentCell &&
-                tableView.EndCellEditing(TableViewEditAction.Cancel, currentCell))
+            if (column.TableView is TableView { IsReadOnly: true } tableView)
             {
-                tableView.SetIsEditing(false);
+                tableView.TryEndCurrentCellEdit(TableViewEditAction.Cancel);
             }
 
             column.OwningCollection?.HandleColumnPropertyChanged(column, nameof(IsReadOnly));

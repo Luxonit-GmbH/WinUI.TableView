@@ -1,6 +1,6 @@
 ﻿# Editing
 
-`TableView` supports in-place cell editing. Double-tapping a cell, or pressing **F2** when a cell has focus, enters edit mode. The column provides the editing control. Pressing **Enter** or tabbing out commits the change; pressing **Escape** cancels it.
+`TableView` supports in-place cell editing. Double-tapping a cell, or pressing **F2** when a cell has focus, enters edit mode. The column provides the editing control. Pressing **Enter**, tabbing out, or moving focus anywhere outside the cell commits the change; pressing **Escape** cancels it. Focus that moves into a popup the editor opens, such as a picker's flyout or a combo box's drop-down, does not end the edit.
 
 ## When to use it
 
@@ -147,6 +147,23 @@ tableView.CellEditEnded += (s, e) =>
 |---|---|
 | [`Commit`](xref:WinUI.TableView.TableViewEditAction.Commit) | The user confirmed the edit (Enter, Tab, or clicking away) |
 | `Cancel` | The user cancelled (Escape) |
+
+## Ending an edit from code
+
+[`TryEndCurrentCellEdit`](xref:WinUI.TableView.TableView.TryEndCurrentCellEdit(WinUI.TableView.TableViewEditAction)) ends the edit in progress the way the keys do, for a Cancel or Save button, a shortcut of your own, or before the app replaces the data:
+
+```csharp
+private void OnCancelEditClick(object sender, RoutedEventArgs e)
+{
+    tableView.TryEndCurrentCellEdit(TableViewEditAction.Cancel);
+}
+```
+
+It raises `CellEditEnding` and `CellEditEnded` like **Escape** and **Enter** do. It returns `true` when the grid is no longer editing, including when nothing was being edited, and `false` when a `CellEditEnding` handler set `Cancel`, in which case the cell stays in edit mode. Focus that is inside the editor moves to the cell; focus elsewhere, such as on the button that was clicked, stays where it is.
+
+A control that does not take focus when it is clicked leaves the edit open, since focus never left the cell. Call `TryEndCurrentCellEdit(TableViewEditAction.Commit)` first in its handler when it acts on the data, such as a Save button.
+
+Cancel discards the editor's value because the built-in columns only write it back on commit. A column binding given `UpdateSourceTrigger=PropertyChanged` has already updated the item while the user typed, and cancelling cannot undo that.
 
 ## IsReadOnlyChanged event
 

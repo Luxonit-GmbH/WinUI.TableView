@@ -654,7 +654,11 @@ public partial class TableViewCell : ContentControl
              TableView.CurrentCellSlot.HasValue &&
              TableView.GetCellFromSlot(TableView.CurrentCellSlot.Value) is { } currentCell)
         {
-            if (!TableView.EndCellEditing(TableViewEditAction.Commit, currentCell)) return false;
+            if (!TableView.EndCellEditing(TableViewEditAction.Commit, currentCell))
+            {
+                TableView.NoteRefusedPress(this);
+                return false;
+            }
 
             TableView.SetIsEditing(false);
         }

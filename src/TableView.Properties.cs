@@ -1475,13 +1475,7 @@ public partial class TableView
 
             if (!tableView.IsReadOnly) return;
 
-            if (tableView.IsEditing &&
-                tableView.CurrentCellSlot is not null &&
-                tableView.GetCellFromSlot(tableView.CurrentCellSlot.Value) is { } currentCell &&
-                tableView.EndCellEditing(TableViewEditAction.Cancel, currentCell))
-            {
-                tableView.SetIsEditing(false);
-            }
+            tableView.TryEndCurrentCellEdit(TableViewEditAction.Cancel);
 
             if (tableView.SelectionMode is ListViewSelectionMode.None
                 || tableView.SelectionUnit is TableViewSelectionUnit.Row)
