@@ -1156,7 +1156,9 @@ public partial class TableView : ListView
             || canvasPoint is null                                                      // Skip selection when canvasPoint is null (e.g., pointer is outside the scroll canvas)
             || canvasPoint.Value.Y < 0                                                  // Skip selection when the pointer is in the column header area (above the scroll canvas)              
             || (pressedElement == null && canvasPoint.Value.X < CellsHorizontalOffset)  // Skip selection when the pointer is in the row header area (and not on a row/cell)
-            || isShiftKey)                                                              // Skip selection when the Shift key is held
+            || isShiftKey                                                               // Skip selection when the Shift key is held
+            || (IsEditing && pressedElement is TableViewCell { } pressedCell            // Skip selection when pressing inside the cell being edited, so its
+                && pressedCell.Slot == CurrentCellSlot))                                // editor keeps focus and pointer capture (e.g. a combo box drop-down)
         {
             return;
         }
